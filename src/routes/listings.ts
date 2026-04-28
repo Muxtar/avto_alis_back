@@ -9,7 +9,7 @@ const prisma = new PrismaClient();
 // Get listings with filters
 router.get('/listings', async (req: Request, res: Response) => {
   try {
-    const { search, category, type, condition, country, brand, sort, page = '1', limit = '12' } = req.query;
+    const { search, category, type, condition, country, brand, model, city, fuelType, paymentType, sort, page = '1', limit = '12' } = req.query;
     const skip = (parseInt(page as string) - 1) * parseInt(limit as string);
     const take = parseInt(limit as string);
 
@@ -19,6 +19,7 @@ router.get('/listings', async (req: Request, res: Response) => {
         { title: { contains: search as string, mode: 'insensitive' } },
         { description: { contains: search as string, mode: 'insensitive' } },
         { brand: { contains: search as string, mode: 'insensitive' } },
+        { model: { contains: search as string, mode: 'insensitive' } },
       ];
     }
     if (category) where.category = category as string;
@@ -26,6 +27,18 @@ router.get('/listings', async (req: Request, res: Response) => {
     if (condition) where.condition = condition as any;
     if (country) where.country = country as string;
     if (brand) where.brand = { contains: brand as string, mode: 'insensitive' };
+    if (model) where.model = { contains: model as string, mode: 'insensitive' };
+    if (city) where.city = city as string;
+    if (fuelType) where.fuelType = fuelType as any;
+    if (paymentType) {
+      // BOTH istənərsə, həm CASH, həm CREDIT, həm BOTH dönsün
+      const pt = paymentType as string;
+      if (pt === 'BOTH') {
+        where.paymentType = 'BOTH';
+      } else {
+        where.paymentType = { in: [pt as any, 'BOTH'] };
+      }
+    }
 
     // Fiyat araligi filtresi
     const minPrice = req.query.min_price ? parseFloat(req.query.min_price as string) : undefined;
@@ -82,7 +95,7 @@ router.get('/listings', async (req: Request, res: Response) => {
 // Get platform stats
 router.get('/stats', async (_req: Request, res: Response) => {
   try {
-    const [totalListings, totalProducts, totalServices, totalUsers, totalOrders, categories, brands, priceStats, years, yearStats] = await Promise.all([
+    const [totalListings, totalProducts, totalServices, totalUsers, totalOrders, categories, brands, priceStats, years, yearStats, cities] = await Promise.all([
       prisma.listing.count(),
       prisma.listing.count({ where: { type: 'PRODUCT' } }),
       prisma.listing.count({ where: { type: 'SERVICE' } }),
@@ -93,6 +106,7 @@ router.get('/stats', async (_req: Request, res: Response) => {
       prisma.listing.aggregate({ _avg: { price: true }, _min: { price: true }, _max: { price: true } }),
       prisma.listing.findMany({ select: { year: true }, distinct: ['year'], where: { year: { not: null } }, orderBy: { year: 'desc' } }),
       prisma.listing.aggregate({ _min: { year: true }, _max: { year: true }, where: { year: { not: null } } }),
+      prisma.listing.findMany({ select: { city: true }, distinct: ['city'], where: { city: { not: null } }, orderBy: { city: 'asc' } }),
     ]);
 
     res.json({
@@ -104,6 +118,7 @@ router.get('/stats', async (_req: Request, res: Response) => {
       totalCategories: categories.length,
       categories: categories.map(c => c.category),
       brands: brands.map(b => b.brand).filter(Boolean),
+      cities: cities.map(c => c.city).filter((c): c is string => c !== null),
       years: years.map(y => y.year).filter((y): y is number => y !== null),
       yearStats: {
         min: yearStats._min.year || null,

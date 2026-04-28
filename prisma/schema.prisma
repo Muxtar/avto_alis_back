@@ -36,6 +36,21 @@ enum Condition {
   REFURBISHED
 }
 
+enum FuelType {
+  GASOLINE
+  DIESEL
+  HYBRID
+  ELECTRIC
+  GAS
+  OTHER
+}
+
+enum PaymentType {
+  CASH
+  CREDIT
+  BOTH
+}
+
 enum OrderStatus {
   PENDING
   CONFIRMED
@@ -180,6 +195,10 @@ model Listing {
   unit        String?
   unitValue   Float?
   year        Int?
+  model       String?
+  city        String?
+  fuelType    FuelType?
+  paymentType PaymentType?
   viewCount   Int         @default(0)
   createdAt   DateTime    @default(now())
   updatedAt   DateTime    @updatedAt
@@ -196,6 +215,9 @@ model Listing {
   @@index([price])
   @@index([type])
   @@index([year])
+  @@index([city])
+  @@index([fuelType])
+  @@index([paymentType])
 }
 
 model Message {

@@ -3,8 +3,9 @@
   "version": "1.0.0",
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "build": "tsc",
-    "start": "node dist/index.js",
+    "build": "echo 'Skipping tsc - using tsx at runtime'",
+    "start": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit",
     "db:push": "prisma db push",
     "db:generate": "prisma generate"
   },
@@ -15,7 +16,8 @@
     "express": "^4.21.0",
     "jsonwebtoken": "^9.0.3",
     "multer": "^1.4.5-lts.1",
-    "openai": "^6.34.0"
+    "openai": "^6.34.0",
+    "tsx": "^4.19.0"
   },
   "devDependencies": {
     "@types/bcryptjs": "^2.4.6",
@@ -24,7 +26,6 @@
     "@types/jsonwebtoken": "^9.0.10",
     "@types/multer": "^1.4.12",
     "prisma": "^6.5.0",
-    "tsx": "^4.19.0",
     "typescript": "^5.6.0"
   }
 }

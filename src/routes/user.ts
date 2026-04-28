@@ -66,7 +66,7 @@ router.get('/me/listings', adminAuth, async (req: AuthRequest, res: Response) =>
 // Create my listing - requires seller verification + type match
 router.post('/me/listings', requireSellerVerified, upload.array('images', 5), async (req: AuthRequest, res: Response) => {
   try {
-    const { title, description, price, category, type, location, phone, condition, country, brand, stock, forVehicle, unit, unitValue, year } = req.body;
+    const { title, description, price, category, type, location, phone, condition, country, brand, stock, forVehicle, unit, unitValue, year, model, city, fuelType, paymentType } = req.body;
 
     if (type === 'PRODUCT' && req.userType !== UserType.PARTS_SELLER) {
       res.status(403).json({ success: false, message: 'Yalnız hissə satıcıları məhsul elanı verə bilər' }); return;
@@ -90,6 +90,10 @@ router.post('/me/listings', requireSellerVerified, upload.array('images', 5), as
         unit: unit || null,
         unitValue: unitValue ? parseFloat(unitValue) : null,
         year: year ? parseInt(year) : null,
+        model: model || null,
+        city: city || null,
+        fuelType: fuelType || null,
+        paymentType: paymentType || null,
       },
     });
     res.status(201).json({ success: true, listing });
@@ -105,7 +109,7 @@ router.put('/me/listings/:id', adminAuth, async (req: AuthRequest, res: Response
     if (!existing || existing.userId !== req.adminId) {
       res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return;
     }
-    const { title, description, price, category, type, location, phone, condition, country, brand, stock, forVehicle, unit, unitValue, year } = req.body;
+    const { title, description, price, category, type, location, phone, condition, country, brand, stock, forVehicle, unit, unitValue, year, model, city, fuelType, paymentType } = req.body;
     const listing = await prisma.listing.update({
       where: { id: parseInt(req.params.id) },
       data: {
@@ -121,6 +125,10 @@ router.put('/me/listings/:id', adminAuth, async (req: AuthRequest, res: Response
         ...(unit !== undefined && { unit }),
         ...(unitValue !== undefined && { unitValue: unitValue ? parseFloat(unitValue) : null }),
         ...(year !== undefined && { year: year ? parseInt(year) : null }),
+        ...(model !== undefined && { model: model || null }),
+        ...(city !== undefined && { city: city || null }),
+        ...(fuelType !== undefined && { fuelType: fuelType || null }),
+        ...(paymentType !== undefined && { paymentType: paymentType || null }),
       },
     });
     res.json({ success: true, listing });
