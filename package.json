@@ -3,8 +3,8 @@
   "version": "1.0.0",
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "build": "prisma generate && prisma db push --accept-data-loss",
-    "start": "tsx src/index.ts",
+    "build": "prisma generate",
+    "start": "prisma db push --accept-data-loss && tsx src/index.ts",
     "typecheck": "tsc --noEmit",
     "db:push": "prisma db push",
     "db:generate": "prisma generate"
