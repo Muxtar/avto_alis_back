@@ -1,0 +1,472 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserType {
+  CAR_OWNER
+  MECHANIC
+  PARTS_SELLER
+  COURIER
+}
+
+enum UserRole {
+  USER
+  ADMIN
+}
+
+enum VerificationStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum ListingType {
+  PRODUCT
+  SERVICE
+}
+
+enum Condition {
+  NEW
+  USED
+  REFURBISHED
+}
+
+enum OrderStatus {
+  PENDING
+  CONFIRMED
+  SHIPPED
+  DELIVERED
+  CANCELLED
+}
+
+enum DeliveryType {
+  DELIVERY
+  PICKUP
+}
+
+enum PaymentMethod {
+  CASH
+  CARD
+  WALLET
+}
+
+enum PaymentStatus {
+  PENDING
+  PAID
+  FAILED
+  REFUNDED
+}
+
+enum ReturnStatus {
+  REQUESTED
+  APPROVED
+  REJECTED
+  RETURN_SHIPPED
+  RETURN_RECEIVED
+  REFUNDED
+  CANCELLED
+}
+
+enum ReturnReason {
+  DEFECTIVE
+  WRONG_ITEM
+  NOT_AS_DESCRIBED
+  CHANGED_MIND
+  OTHER
+}
+
+model User {
+  id                Int                @id @default(autoincrement())
+  name              String             @default("")
+  phone             String
+  email             String?
+  telegramId        String?            @unique
+  type              UserType           @default(CAR_OWNER)
+  role              UserRole           @default(USER)
+  password          String?
+  verified          Boolean            @default(false)
+  profileComplete   Boolean            @default(false)
+  sellerVerified    Boolean            @default(false)
+  sellerVerifiedAt  DateTime?
+  sellerApplication SellerVerification?
+  createdAt         DateTime           @default(now())
+  vehicles          Vehicle[]
+  workplaces        Workplace[]
+  verificationCodes VerificationCode[]
+  listings          Listing[]
+  sentMessages      Message[]        @relation("SentMessages")
+  receivedMessages  Message[]        @relation("ReceivedMessages")
+  comments          Comment[]
+  cart              Cart?
+  buyerOrders       Order[]          @relation("BuyerOrders")
+  sellerOrders      Order[]          @relation("SellerOrders")
+  courierOrders     Order[]          @relation("CourierOrders")
+  emailVerifications EmailVerification[]
+  buyerReturns      ReturnRequest[]  @relation("BuyerReturns")
+  sellerReturns     ReturnRequest[]  @relation("SellerReturns")
+  buyerInquiries    Inquiry[]        @relation("BuyerInquiries")
+  targetedInquiries InquiryTarget[]  @relation("TargetedInquiries")
+  sellerOffers      InquiryOffer[]   @relation("SellerOffers")
+
+  // Bolt Food benzeri ozellikler
+  loyaltyPoints     Int              @default(0)
+  isPremium         Boolean          @default(false)
+  premiumUntil      DateTime?
+  avgRating         Float?           // satici icin ortalama rating
+  ratingCount       Int              @default(0)
+  businessHours     Json?            // {monday: {open: "09:00", close: "18:00"}, ...}
+  favorites         Favorite[]
+  addresses         SavedAddress[]
+  sellerRatings     SellerRating[]   @relation("SellerRatings")
+  givenRatings      SellerRating[]   @relation("BuyerRatings")
+  notifications     Notification[]
+
+  @@index([phone])
+  @@index([type])
+  @@index([createdAt])
+}
+
+model Vehicle {
+  id            Int    @id @default(autoincrement())
+  userId        Int
+  brand         String
+  model         String
+  year          Int
+  passportImage String
+  user          User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model Workplace {
+  id        Int    @id @default(autoincrement())
+  userId    Int
+  name      String
+  address   String
+  latitude  Float?
+  longitude Float?
+  user      User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model VerificationCode {
+  id        Int      @id @default(autoincrement())
+  userId    Int
+  code      String
+  expiresAt DateTime
+  verified  Boolean  @default(false)
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model Listing {
+  id          Int         @id @default(autoincrement())
+  userId      Int
+  title       String
+  description String
+  price       Float
+  category    String
+  type        ListingType
+  images      String[]
+  location    String?
+  phone       String?
+  condition   Condition   @default(NEW)
+  country     String?
+  brand       String?
+  stock       Int         @default(1)
+  forVehicle  String?
+  unit        String?
+  unitValue   Float?
+  year        Int?
+  viewCount   Int         @default(0)
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+  user        User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  messages    Message[]
+  comments    Comment[]
+  cartItems     CartItem[]
+  orderItems    OrderItem[]
+  inquiryOffers InquiryOffer[]
+  favorites     Favorite[]
+
+  @@index([userId, createdAt])
+  @@index([category])
+  @@index([price])
+  @@index([type])
+  @@index([year])
+}
+
+model Message {
+  id         Int      @id @default(autoincrement())
+  senderId   Int
+  receiverId Int
+  listingId  Int?
+  content    String
+  read       Boolean  @default(false)
+  createdAt  DateTime @default(now())
+  sender     User     @relation("SentMessages", fields: [senderId], references: [id], onDelete: Cascade)
+  receiver   User     @relation("ReceivedMessages", fields: [receiverId], references: [id], onDelete: Cascade)
+  listing    Listing? @relation(fields: [listingId], references: [id], onDelete: SetNull)
+}
+
+model Comment {
+  id        Int      @id @default(autoincrement())
+  userId    Int
+  listingId Int
+  content   String
+  rating    Int?
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  listing   Listing  @relation(fields: [listingId], references: [id], onDelete: Cascade)
+}
+
+model Cart {
+  id        Int        @id @default(autoincrement())
+  userId    Int        @unique
+  createdAt DateTime   @default(now())
+  user      User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  items     CartItem[]
+}
+
+model CartItem {
+  id        Int     @id @default(autoincrement())
+  cartId    Int
+  listingId Int
+  quantity  Int     @default(1)
+  cart      Cart    @relation(fields: [cartId], references: [id], onDelete: Cascade)
+  listing   Listing @relation(fields: [listingId], references: [id], onDelete: Cascade)
+
+  @@unique([cartId, listingId])
+}
+
+model Order {
+  id             Int           @id @default(autoincrement())
+  buyerId        Int
+  sellerId       Int
+  courierId      Int?
+  status         OrderStatus   @default(PENDING)
+  total          Float
+  subtotal       Float?        // indirim oncesi
+  discountAmount Float         @default(0)
+  pointsEarned   Int           @default(0)
+  pointsUsed     Int           @default(0)
+  address        String?
+  phone          String?
+  note           String?
+  deliveryType   DeliveryType  @default(DELIVERY)
+  scheduledAt    DateTime?     // ileri tarihli siparis
+  paymentMethod  PaymentMethod @default(CASH)
+  paymentStatus  PaymentStatus @default(PENDING)
+  promoCodeId    Int?
+  // Canli takip icin
+  latitude       Float?
+  longitude      Float?
+  estimatedDeliveryAt DateTime?
+  courierLat     Float?
+  courierLng     Float?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+  buyer          User          @relation("BuyerOrders", fields: [buyerId], references: [id], onDelete: Cascade)
+  seller         User          @relation("SellerOrders", fields: [sellerId], references: [id], onDelete: Cascade)
+  courier        User?         @relation("CourierOrders", fields: [courierId], references: [id], onDelete: SetNull)
+  promoCode      PromoCode?    @relation(fields: [promoCodeId], references: [id], onDelete: SetNull)
+  items          OrderItem[]
+  returnRequests ReturnRequest[]
+  sellerRating   SellerRating?
+
+  @@index([buyerId, createdAt])
+  @@index([sellerId, createdAt])
+  @@index([status])
+}
+
+model EmailVerification {
+  id        Int      @id @default(autoincrement())
+  userId    Int
+  email     String
+  code      String
+  expiresAt DateTime
+  verified  Boolean  @default(false)
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model OrderItem {
+  id        Int     @id @default(autoincrement())
+  orderId   Int
+  listingId Int
+  quantity  Int
+  price     Float
+  title     String
+  order     Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  listing   Listing @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  returnRequests ReturnRequest[]
+}
+
+model ReturnRequest {
+  id           Int          @id @default(autoincrement())
+  orderId      Int
+  orderItemId  Int?
+  buyerId      Int
+  sellerId     Int
+  status       ReturnStatus @default(REQUESTED)
+  reason       ReturnReason
+  reasonText   String?
+  quantity     Int
+  refundAmount Float?
+  sellerNote   String?
+  adminNote    String?
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+  order        Order        @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  orderItem    OrderItem?   @relation(fields: [orderItemId], references: [id], onDelete: SetNull)
+  buyer        User         @relation("BuyerReturns", fields: [buyerId], references: [id], onDelete: Cascade)
+  seller       User         @relation("SellerReturns", fields: [sellerId], references: [id], onDelete: Cascade)
+}
+
+enum InquiryStatus {
+  OPEN
+  CLOSED
+  ACCEPTED
+  EXPIRED
+}
+
+enum OfferStatus {
+  PENDING
+  ACCEPTED
+  REJECTED
+  WITHDRAWN
+}
+
+model Inquiry {
+  id            Int            @id @default(autoincrement())
+  buyerId       Int
+  rawText       String
+  aiAnalysis    Json?
+  status        InquiryStatus  @default(OPEN)
+  expiresAt     DateTime?
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+  buyer         User           @relation("BuyerInquiries", fields: [buyerId], references: [id], onDelete: Cascade)
+  offers        InquiryOffer[]
+  targetSellers InquiryTarget[]
+}
+
+model InquiryTarget {
+  id        Int      @id @default(autoincrement())
+  inquiryId Int
+  sellerId  Int
+  seen      Boolean  @default(false)
+  createdAt DateTime @default(now())
+  inquiry   Inquiry  @relation(fields: [inquiryId], references: [id], onDelete: Cascade)
+  seller    User     @relation("TargetedInquiries", fields: [sellerId], references: [id], onDelete: Cascade)
+
+  @@unique([inquiryId, sellerId])
+}
+
+model InquiryOffer {
+  id        Int         @id @default(autoincrement())
+  inquiryId Int
+  sellerId  Int
+  listingId Int?
+  price     Float
+  message   String?
+  status    OfferStatus @default(PENDING)
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
+  inquiry   Inquiry     @relation(fields: [inquiryId], references: [id], onDelete: Cascade)
+  seller    User        @relation("SellerOffers", fields: [sellerId], references: [id], onDelete: Cascade)
+  listing   Listing?    @relation(fields: [listingId], references: [id], onDelete: SetNull)
+}
+
+// ==================== BOLT FOOD BENZERI MODELLER ====================
+
+model Favorite {
+  id        Int      @id @default(autoincrement())
+  userId    Int
+  listingId Int
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  listing   Listing  @relation(fields: [listingId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, listingId])
+}
+
+model SavedAddress {
+  id        Int      @id @default(autoincrement())
+  userId    Int
+  label     String   // "Ev", "Is", "Anne evi"
+  address   String
+  phone     String?
+  latitude  Float?
+  longitude Float?
+  isDefault Boolean  @default(false)
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model PromoCode {
+  id             Int       @id @default(autoincrement())
+  code           String    @unique
+  description    String?
+  discountType   String    // "PERCENT" veya "FIXED"
+  discountValue  Float
+  minOrderAmount Float?
+  maxDiscount    Float?
+  usageLimit     Int?
+  usageCount     Int       @default(0)
+  validFrom      DateTime  @default(now())
+  validUntil     DateTime?
+  active         Boolean   @default(true)
+  createdAt      DateTime  @default(now())
+  orders         Order[]
+}
+
+model SellerRating {
+  id        Int      @id @default(autoincrement())
+  orderId   Int      @unique
+  sellerId  Int
+  buyerId   Int
+  rating    Int      // 1-5
+  comment   String?
+  createdAt DateTime @default(now())
+  order     Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  seller    User     @relation("SellerRatings", fields: [sellerId], references: [id], onDelete: Cascade)
+  buyer     User     @relation("BuyerRatings", fields: [buyerId], references: [id], onDelete: Cascade)
+
+  @@index([sellerId])
+}
+
+model SellerVerification {
+  id              Int                @id @default(autoincrement())
+  userId          Int                @unique
+  idImageFront    String
+  idImageBack     String?
+  taxId           String
+  iban            String?
+  businessName    String?
+  status          VerificationStatus @default(PENDING)
+  rejectionReason String?
+  submittedAt     DateTime           @default(now())
+  reviewedAt      DateTime?
+  reviewedBy      Int?
+  user            User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([status])
+}
+
+model Notification {
+  id        Int      @id @default(autoincrement())
+  userId    Int
+  type      String   // "ORDER", "MESSAGE", "INQUIRY", "PROMO", "SYSTEM"
+  title     String
+  body      String
+  link      String?
+  read      Boolean  @default(false)
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, read])
+  @@index([userId, createdAt])
+}
