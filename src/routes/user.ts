@@ -183,8 +183,8 @@ router.post('/me/email/send-code', adminAuth, async (req: AuthRequest, res: Resp
         expiresAt: new Date(Date.now() + 5 * 60 * 1000),
       },
     });
-    // Dev modunda kodu dondur (test icin), production'da dondurme
-    const isDev = process.env.NODE_ENV !== 'production';
+    // TEST MODE: kodu cavabda qaytarir. SMS_PROVIDER=twilio qoyulanda gizlədilir
+    const isDev = process.env.SMS_PROVIDER !== 'twilio';
     res.json({ success: true, message: 'Doğrulama kodu göndərildi', ...(isDev && { code }) });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });

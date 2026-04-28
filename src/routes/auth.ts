@@ -66,7 +66,8 @@ router.post('/register/phone', registerLimiter, async (req: Request, res: Respon
     }
 
     const verificationCode = await createVerificationCode(user.id);
-    const isDev = process.env.NODE_ENV !== 'production';
+    // TEST MODE: always return verificationCode until Twilio is integrated
+    const isDev = process.env.SMS_PROVIDER !== 'twilio';
     res.status(201).json({
       success: true,
       userId: user.id,
@@ -145,7 +146,8 @@ router.post('/verify/resend', verifyLimiter, async (req: Request, res: Response)
     const user = await prisma.user.findUnique({ where: { id: uid } });
     if (!user) { res.status(404).json({ success: false, message: 'İstifadəçi tapılmadı' }); return; }
     const verificationCode = await createVerificationCode(uid);
-    const isDev = process.env.NODE_ENV !== 'production';
+    // TEST MODE: always return verificationCode until Twilio is integrated
+    const isDev = process.env.SMS_PROVIDER !== 'twilio';
     res.json({ success: true, ...(isDev && { verificationCode }) });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
@@ -189,7 +191,8 @@ router.post('/register/car-owner', registerLimiter, upload.array('passportImages
 
     const verificationCode = await createVerificationCode(user.id);
     // Dev modunda kodu dondur (test icin), production'da dondurme
-    const isDev = process.env.NODE_ENV !== 'production';
+    // TEST MODE: always return verificationCode until Twilio is integrated
+    const isDev = process.env.SMS_PROVIDER !== 'twilio';
     res.status(201).json({ success: true, user, userId: user.id, ...(isDev && { verificationCode }) });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
@@ -228,7 +231,8 @@ router.post('/register/mechanic', registerLimiter, async (req: Request, res: Res
 
     const verificationCode = await createVerificationCode(user.id);
     // Dev modunda kodu dondur (test icin), production'da dondurme
-    const isDev = process.env.NODE_ENV !== 'production';
+    // TEST MODE: always return verificationCode until Twilio is integrated
+    const isDev = process.env.SMS_PROVIDER !== 'twilio';
     res.status(201).json({ success: true, user, userId: user.id, ...(isDev && { verificationCode }) });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
@@ -267,7 +271,8 @@ router.post('/register/parts-seller', async (req: Request, res: Response) => {
 
     const verificationCode = await createVerificationCode(user.id);
     // Dev modunda kodu dondur (test icin), production'da dondurme
-    const isDev = process.env.NODE_ENV !== 'production';
+    // TEST MODE: always return verificationCode until Twilio is integrated
+    const isDev = process.env.SMS_PROVIDER !== 'twilio';
     res.status(201).json({ success: true, user, userId: user.id, ...(isDev && { verificationCode }) });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
@@ -388,7 +393,8 @@ router.post('/register/telegram', registerLimiter, async (req: Request, res: Res
 
     const verificationCode = await createVerificationCode(user.id);
     // Dev modunda kodu dondur (test icin), production'da dondurme
-    const isDev = process.env.NODE_ENV !== 'production';
+    // TEST MODE: always return verificationCode until Twilio is integrated
+    const isDev = process.env.SMS_PROVIDER !== 'twilio';
     res.status(201).json({ success: true, user, userId: user.id, ...(isDev && { verificationCode }) });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
