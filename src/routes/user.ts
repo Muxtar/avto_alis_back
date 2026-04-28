@@ -215,4 +215,169 @@ router.post('/me/email/verify', adminAuth, async (req: AuthRequest, res: Respons
   }
 });
 
+// ===================== VEHICLES (CAR_OWNER) =====================
+
+// List my vehicles
+router.get('/me/vehicles', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const vehicles = await prisma.vehicle.findMany({ where: { userId: req.adminId! }, orderBy: { id: 'desc' } });
+    res.json({ vehicles });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+// Add a vehicle (passport image required)
+router.post('/me/vehicles', adminAuth, upload.single('passportImage'), async (req: AuthRequest, res: Response) => {
+  try {
+    const { brand, model, year } = req.body;
+    if (!brand || !model || !year) {
+      res.status(400).json({ success: false, message: 'Marka, model və il tələb olunur' });
+      return;
+    }
+    const file = req.file as Express.Multer.File | undefined;
+    if (!file) {
+      res.status(400).json({ success: false, message: 'Texniki pasport şəkli tələb olunur' });
+      return;
+    }
+    const vehicle = await prisma.vehicle.create({
+      data: {
+        userId: req.adminId!,
+        brand,
+        model,
+        year: parseInt(year),
+        passportImage: file.filename,
+      },
+    });
+    res.status(201).json({ success: true, vehicle });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+// Update a vehicle (passport image optional — old kept if not uploaded)
+router.put('/me/vehicles/:id', adminAuth, upload.single('passportImage'), async (req: AuthRequest, res: Response) => {
+  try {
+    const id = parseInt(req.params.id);
+    const existing = await prisma.vehicle.findUnique({ where: { id } });
+    if (!existing || existing.userId !== req.adminId) {
+      res.status(403).json({ success: false, message: 'İcazə yoxdur' });
+      return;
+    }
+    const { brand, model, year } = req.body;
+    const file = req.file as Express.Multer.File | undefined;
+
+    // Yeni shekil yuklenibse, koheni diskten sil
+    if (file && existing.passportImage) {
+      const oldPath = path.join(__dirname, '../../uploads', existing.passportImage);
+      fs.unlink(oldPath, () => {});
+    }
+
+    const vehicle = await prisma.vehicle.update({
+      where: { id },
+      data: {
+        ...(brand !== undefined && { brand }),
+        ...(model !== undefined && { model }),
+        ...(year !== undefined && { year: parseInt(year) }),
+        ...(file && { passportImage: file.filename }),
+      },
+    });
+    res.json({ success: true, vehicle });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+// Delete a vehicle
+router.delete('/me/vehicles/:id', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const id = parseInt(req.params.id);
+    const existing = await prisma.vehicle.findUnique({ where: { id } });
+    if (!existing || existing.userId !== req.adminId) {
+      res.status(403).json({ success: false, message: 'İcazə yoxdur' });
+      return;
+    }
+    if (existing.passportImage) {
+      const filePath = path.join(__dirname, '../../uploads', existing.passportImage);
+      fs.unlink(filePath, () => {});
+    }
+    await prisma.vehicle.delete({ where: { id } });
+    res.json({ success: true });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+// ===================== WORKPLACES (MECHANIC / PARTS_SELLER) =====================
+
+router.get('/me/workplaces', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const workplaces = await prisma.workplace.findMany({ where: { userId: req.adminId! }, orderBy: { id: 'desc' } });
+    res.json({ workplaces });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+router.post('/me/workplaces', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const { name, address, latitude, longitude } = req.body;
+    if (!name || !address) {
+      res.status(400).json({ success: false, message: 'Ad və ünvan tələb olunur' });
+      return;
+    }
+    const workplace = await prisma.workplace.create({
+      data: {
+        userId: req.adminId!,
+        name,
+        address,
+        latitude: latitude ? parseFloat(latitude) : null,
+        longitude: longitude ? parseFloat(longitude) : null,
+      },
+    });
+    res.status(201).json({ success: true, workplace });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+router.put('/me/workplaces/:id', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const id = parseInt(req.params.id);
+    const existing = await prisma.workplace.findUnique({ where: { id } });
+    if (!existing || existing.userId !== req.adminId) {
+      res.status(403).json({ success: false, message: 'İcazə yoxdur' });
+      return;
+    }
+    const { name, address, latitude, longitude } = req.body;
+    const workplace = await prisma.workplace.update({
+      where: { id },
+      data: {
+        ...(name !== undefined && { name }),
+        ...(address !== undefined && { address }),
+        ...(latitude !== undefined && { latitude: latitude === null || latitude === '' ? null : parseFloat(latitude) }),
+        ...(longitude !== undefined && { longitude: longitude === null || longitude === '' ? null : parseFloat(longitude) }),
+      },
+    });
+    res.json({ success: true, workplace });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+router.delete('/me/workplaces/:id', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const id = parseInt(req.params.id);
+    const existing = await prisma.workplace.findUnique({ where: { id } });
+    if (!existing || existing.userId !== req.adminId) {
+      res.status(403).json({ success: false, message: 'İcazə yoxdur' });
+      return;
+    }
+    await prisma.workplace.delete({ where: { id } });
+    res.json({ success: true });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
 export default router;
