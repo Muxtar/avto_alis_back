@@ -7,7 +7,8 @@
     "start": "prisma db push --accept-data-loss && tsx src/index.ts",
     "typecheck": "tsc --noEmit",
     "db:push": "prisma db push",
-    "db:generate": "prisma generate"
+    "db:generate": "prisma generate",
+    "db:seed": "tsx prisma/seed.ts"
   },
   "dependencies": {
     "@prisma/client": "^6.5.0",
