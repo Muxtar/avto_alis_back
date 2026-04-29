@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
-import { PrismaClient, Prisma, UserType } from '@prisma/client';
+import { PrismaClient, Prisma } from '@prisma/client';
 import { upload } from '../middleware/upload';
-import { adminAuth, requireSellerVerified, AuthRequest } from '../middleware/auth';
+import { adminAuth, AuthRequest } from '../middleware/auth';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -254,19 +254,16 @@ router.delete('/comments/:id', adminAuth, async (req: AuthRequest, res: Response
   }
 });
 
-// Create listing (auth required)
-router.post('/listings', requireSellerVerified, upload.array('images', 5), async (req: AuthRequest, res: Response) => {
+// Create listing — any logged-in user (auth required)
+router.post('/listings', adminAuth, upload.array('images', 5), async (req: AuthRequest, res: Response) => {
   try {
     const { title, description, price, category, type, location, phone, year } = req.body;
     if (!title || !description || !price || !category || !type) {
       res.status(400).json({ success: false, message: 'Başlıq, təsvir, qiymət, kateqoriya və tip tələb olunur' });
       return;
     }
-    if (type === 'PRODUCT' && req.userType !== UserType.PARTS_SELLER) {
-      res.status(403).json({ success: false, message: 'Yalnız hissə satıcıları məhsul elanı verə bilər' }); return;
-    }
-    if (type === 'SERVICE' && req.userType !== UserType.MECHANIC) {
-      res.status(403).json({ success: false, message: 'Yalnız ustalar xidmət elanı verə bilər' }); return;
+    if (type !== 'PRODUCT' && type !== 'SERVICE') {
+      res.status(400).json({ success: false, message: 'Tip yalnız PRODUCT və ya SERVICE ola bilər' }); return;
     }
 
     const files = req.files as Express.Multer.File[];
