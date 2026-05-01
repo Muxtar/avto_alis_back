@@ -2,6 +2,7 @@ import express, { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import path from 'path';
 import fs from 'fs';
+import { PrismaClient } from '@prisma/client';
 import authRoutes from './routes/auth';
 import verifyRoutes from './routes/verify';
 import listingsRoutes from './routes/listings';
@@ -114,7 +115,21 @@ process.on('unhandledRejection', (reason: any) => {
   console.error('Unhandled Promise Rejection:', reason);
 });
 
+// Backfill expiresAt for legacy listings created before this column existed.
+// Idempotent: only updates rows where expiresAt IS NULL.
+async function backfillListingExpiresAt() {
+  try {
+    const prisma = new PrismaClient();
+    const updated = await prisma.$executeRaw`UPDATE "Listing" SET "expiresAt" = "createdAt" + INTERVAL '20 days' WHERE "expiresAt" IS NULL`;
+    if (updated > 0) console.log(`[startup] Backfilled expiresAt on ${updated} legacy listings`);
+    await prisma.$disconnect();
+  } catch (err: any) {
+    console.error('[startup] expiresAt backfill failed:', err.message);
+  }
+}
+
 app.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
   console.log(`CORS origins: ${allowedOrigins.join(', ')}`);
+  backfillListingExpiresAt();
 });

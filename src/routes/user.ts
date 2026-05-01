@@ -78,6 +78,7 @@ router.post('/me/listings', adminAuth, upload.array('images', 5), async (req: Au
     const files = req.files as Express.Multer.File[];
     const images = files?.map((f) => f.filename) || [];
 
+    const expiresAt = new Date(Date.now() + 20 * 24 * 60 * 60 * 1000);
     const listing = await prisma.listing.create({
       data: {
         userId: req.adminId!, title, description, price: parseFloat(price),
@@ -94,6 +95,7 @@ router.post('/me/listings', adminAuth, upload.array('images', 5), async (req: Au
         city: city || null,
         fuelType: fuelType || null,
         paymentType: paymentType || null,
+        expiresAt,
       },
     });
     res.status(201).json({ success: true, listing });
@@ -131,6 +133,24 @@ router.put('/me/listings/:id', adminAuth, async (req: AuthRequest, res: Response
         ...(fuelType !== undefined && { fuelType: fuelType || null }),
         ...(paymentType !== undefined && { paymentType: paymentType || null }),
       },
+    });
+    res.json({ success: true, listing });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+// Reactivate my listing — extends expiry by 20 days
+router.post('/me/listings/:id/reactivate', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const existing = await prisma.listing.findUnique({ where: { id: parseInt(req.params.id) } });
+    if (!existing || existing.userId !== req.adminId) {
+      res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return;
+    }
+    const expiresAt = new Date(Date.now() + 20 * 24 * 60 * 60 * 1000);
+    const listing = await prisma.listing.update({
+      where: { id: existing.id },
+      data: { expiresAt },
     });
     res.json({ success: true, listing });
   } catch (error: any) {

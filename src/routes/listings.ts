@@ -13,14 +13,18 @@ router.get('/listings', async (req: Request, res: Response) => {
     const skip = (parseInt(page as string) - 1) * parseInt(limit as string);
     const take = parseInt(limit as string);
 
-    const where: Prisma.ListingWhereInput = {};
+    const where: Prisma.ListingWhereInput = {
+      AND: [{ OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }] }],
+    };
     if (search) {
-      where.OR = [
-        { title: { contains: search as string, mode: 'insensitive' } },
-        { description: { contains: search as string, mode: 'insensitive' } },
-        { brand: { contains: search as string, mode: 'insensitive' } },
-        { model: { contains: search as string, mode: 'insensitive' } },
-      ];
+      (where.AND as Prisma.ListingWhereInput[]).push({
+        OR: [
+          { title: { contains: search as string, mode: 'insensitive' } },
+          { description: { contains: search as string, mode: 'insensitive' } },
+          { brand: { contains: search as string, mode: 'insensitive' } },
+          { model: { contains: search as string, mode: 'insensitive' } },
+        ],
+      });
     }
     if (category) where.category = category as string;
     if (type && type !== 'all') where.type = type as any;
@@ -162,7 +166,10 @@ router.get('/sellers/:id', async (req: Request, res: Response) => {
     }
 
     const listings = await prisma.listing.findMany({
-      where: { userId: user.id },
+      where: {
+        userId: user.id,
+        OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
+      },
       include: { user: { select: { id: true, name: true, phone: true, type: true } } },
       orderBy: { createdAt: 'desc' },
     });
@@ -203,6 +210,10 @@ router.get('/listings/:id', async (req: Request, res: Response) => {
     }).catch(() => null);
 
     if (!listing) {
+      res.status(404).json({ success: false, message: 'Elan tapılmadı' });
+      return;
+    }
+    if (listing.expiresAt && listing.expiresAt <= new Date()) {
       res.status(404).json({ success: false, message: 'Elan tapılmadı' });
       return;
     }
@@ -269,6 +280,7 @@ router.post('/listings', adminAuth, upload.array('images', 5), async (req: AuthR
     const files = req.files as Express.Multer.File[];
     const images = files?.map((f) => f.filename) || [];
 
+    const expiresAt = new Date(Date.now() + 20 * 24 * 60 * 60 * 1000);
     const listing = await prisma.listing.create({
       data: {
         userId: req.adminId!,
@@ -281,6 +293,7 @@ router.post('/listings', adminAuth, upload.array('images', 5), async (req: AuthR
         location: location || null,
         phone: phone || null,
         year: year ? parseInt(year) : null,
+        expiresAt,
       },
       include: { user: true },
     });
