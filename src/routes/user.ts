@@ -105,14 +105,41 @@ router.post('/me/listings', adminAuth, upload.array('images', 5), async (req: Au
   }
 });
 
-// Update my listing
-router.put('/me/listings/:id', adminAuth, async (req: AuthRequest, res: Response) => {
+// Update my listing — accepts multipart/form-data so images can be edited.
+// Pass `existingImages` as a JSON-stringified array of filenames to keep;
+// any image previously stored but not in the array is deleted from disk.
+// New uploads via `images` field are appended (total cap = 5).
+router.put('/me/listings/:id', adminAuth, upload.array('images', 5), async (req: AuthRequest, res: Response) => {
   try {
     const existing = await prisma.listing.findUnique({ where: { id: parseInt(req.params.id) } });
     if (!existing || existing.userId !== req.adminId) {
       res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return;
     }
-    const { title, description, price, category, type, location, phone, condition, country, brand, stock, forVehicle, unit, unitValue, year, model, city, fuelType, paymentType } = req.body;
+    const { title, description, price, category, type, location, phone, condition, country, brand, stock, forVehicle, unit, unitValue, year, model, city, fuelType, paymentType, existingImages } = req.body;
+
+    let nextImages: string[] | undefined;
+    const isMultipart = (req.headers['content-type'] || '').includes('multipart/form-data');
+    const newFiles = (req.files as Express.Multer.File[] | undefined) || [];
+
+    if (isMultipart) {
+      let kept: string[] = existing.images;
+      if (existingImages !== undefined) {
+        try {
+          const parsed = typeof existingImages === 'string' ? JSON.parse(existingImages) : existingImages;
+          if (Array.isArray(parsed)) kept = parsed.filter((s) => typeof s === 'string');
+        } catch {
+          kept = existing.images;
+        }
+      }
+      // Delete removed images from disk.
+      const removed = existing.images.filter((img) => !kept.includes(img));
+      for (const img of removed) {
+        const filePath = path.join(__dirname, '../../uploads', img);
+        fs.unlink(filePath, () => {});
+      }
+      nextImages = [...kept, ...newFiles.map((f) => f.filename)].slice(0, 5);
+    }
+
     const listing = await prisma.listing.update({
       where: { id: parseInt(req.params.id) },
       data: {
@@ -132,6 +159,7 @@ router.put('/me/listings/:id', adminAuth, async (req: AuthRequest, res: Response
         ...(city !== undefined && { city: city || null }),
         ...(fuelType !== undefined && { fuelType: fuelType || null }),
         ...(paymentType !== undefined && { paymentType: paymentType || null }),
+        ...(nextImages !== undefined && { images: nextImages }),
       },
     });
     res.json({ success: true, listing });
