@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { PrismaClient, Prisma } from '@prisma/client';
 import { upload } from '../middleware/upload';
+import { processImages } from '../middleware/imageProcess';
 import { adminAuth, AuthRequest } from '../middleware/auth';
 
 const router = Router();
@@ -266,7 +267,7 @@ router.delete('/comments/:id', adminAuth, async (req: AuthRequest, res: Response
 });
 
 // Create listing — any logged-in user (auth required)
-router.post('/listings', adminAuth, upload.array('images', 5), async (req: AuthRequest, res: Response) => {
+router.post('/listings', adminAuth, upload.array('images', 5), processImages, async (req: AuthRequest, res: Response) => {
   try {
     const { title, description, price, category, type, location, phone, year } = req.body;
     if (!title || !description || !price || !category || !type) {

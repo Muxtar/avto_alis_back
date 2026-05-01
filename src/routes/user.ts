@@ -2,6 +2,7 @@ import { Router, Response } from 'express';
 import { PrismaClient } from '@prisma/client';
 import { adminAuth, AuthRequest } from '../middleware/auth';
 import { upload } from '../middleware/upload';
+import { processImages } from '../middleware/imageProcess';
 import fs from 'fs';
 import path from 'path';
 
@@ -64,7 +65,7 @@ router.get('/me/listings', adminAuth, async (req: AuthRequest, res: Response) =>
 });
 
 // Create my listing — any logged-in user can post (PRODUCT or SERVICE)
-router.post('/me/listings', adminAuth, upload.array('images', 5), async (req: AuthRequest, res: Response) => {
+router.post('/me/listings', adminAuth, upload.array('images', 5), processImages, async (req: AuthRequest, res: Response) => {
   try {
     const { title, description, price, category, type, location, phone, condition, country, brand, stock, forVehicle, unit, unitValue, year, model, city, fuelType, paymentType } = req.body;
 
@@ -109,7 +110,7 @@ router.post('/me/listings', adminAuth, upload.array('images', 5), async (req: Au
 // Pass `existingImages` as a JSON-stringified array of filenames to keep;
 // any image previously stored but not in the array is deleted from disk.
 // New uploads via `images` field are appended (total cap = 5).
-router.put('/me/listings/:id', adminAuth, upload.array('images', 5), async (req: AuthRequest, res: Response) => {
+router.put('/me/listings/:id', adminAuth, upload.array('images', 5), processImages, async (req: AuthRequest, res: Response) => {
   try {
     const existing = await prisma.listing.findUnique({ where: { id: parseInt(req.params.id) } });
     if (!existing || existing.userId !== req.adminId) {
