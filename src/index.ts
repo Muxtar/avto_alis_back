@@ -1,6 +1,7 @@
 import express, { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import path from 'path';
+import fs from 'fs';
 import authRoutes from './routes/auth';
 import verifyRoutes from './routes/verify';
 import listingsRoutes from './routes/listings';
@@ -40,7 +41,10 @@ const corsOptions = {
 app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
 app.use(express.json());
-app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
+
+const uploadsDir = path.join(__dirname, '../uploads');
+fs.mkdirSync(uploadsDir, { recursive: true });
+app.use('/uploads', express.static(uploadsDir));
 
 app.use('/api', authRoutes);
 app.use('/api', verifyRoutes);
@@ -68,19 +72,31 @@ app.use((_req: Request, res: Response) => {
 });
 
 // Fix #15: Global error handler - yakalanmamis hatalari yakalar
-app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
-  console.error('Unhandled error:', err.message);
+app.use((err: any, req: Request, res: Response, _next: NextFunction) => {
+  console.error(`[${req.method} ${req.path}] Unhandled error:`, err.message, err.code || '');
   console.error(err.stack);
 
   // Multer file size error
-  if (err.message?.includes('File too large')) {
+  if (err.message?.includes('File too large') || err.code === 'LIMIT_FILE_SIZE') {
     res.status(413).json({ success: false, message: 'Fayl çox böyükdür (max 5MB)' });
+    return;
+  }
+
+  // Multer unexpected file
+  if (err.code === 'LIMIT_UNEXPECTED_FILE') {
+    res.status(400).json({ success: false, message: 'Gözlənilməyən fayl sahəsi' });
     return;
   }
 
   // Multer file type error
   if (err.message?.includes('resim dosyaları')) {
     res.status(400).json({ success: false, message: err.message });
+    return;
+  }
+
+  // Filesystem errors (uploads/ yoxdursa)
+  if (err.code === 'ENOENT' || err.code === 'EACCES') {
+    res.status(500).json({ success: false, message: 'Server fayl sistemi xətası' });
     return;
   }
 

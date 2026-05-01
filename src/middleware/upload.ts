@@ -1,14 +1,24 @@
 import multer from 'multer';
 import path from 'path';
+import fs from 'fs';
+
+const UPLOADS_DIR = path.join(__dirname, '../../uploads');
+
+// Railway / fresh deploylarda uploads/ klasörü olmaya bilər — startup'da yaradırıq
+try {
+  fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+} catch (err) {
+  console.error('uploads/ klasörü yaradılarkən xəta:', err);
+}
 
 const storage = multer.diskStorage({
   destination: (_req, _file, cb) => {
-    cb(null, path.join(__dirname, '../../uploads'));
+    cb(null, UPLOADS_DIR);
   },
   filename: (_req, file, cb) => {
     const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
     const ext = path.extname(file.originalname);
-    cb(null, `passport-${uniqueSuffix}${ext}`);
+    cb(null, `listing-${uniqueSuffix}${ext}`);
   },
 });
 

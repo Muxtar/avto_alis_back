@@ -98,6 +98,7 @@ router.post('/me/listings', adminAuth, upload.array('images', 5), async (req: Au
     });
     res.status(201).json({ success: true, listing });
   } catch (error: any) {
+    console.error('[POST /me/listings] error:', error.message, error.code, error);
     res.status(400).json({ success: false, message: error.message });
   }
 });
