@@ -11,7 +11,7 @@ async function processOne(file: Express.Multer.File): Promise<void> {
   const out = await sharp(buffer)
     .rotate()
     .resize({ width: MAX_DIMENSION, height: MAX_DIMENSION, fit: 'inside', withoutEnlargement: true })
-    .jpeg({ quality: JPEG_QUALITY, progressive: true, mozjpeg: true })
+    .jpeg({ quality: JPEG_QUALITY, progressive: false, mozjpeg: true })
     .toBuffer();
 
   const dir = path.dirname(file.path);

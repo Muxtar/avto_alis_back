@@ -3,6 +3,7 @@ import cors from 'cors';
 import path from 'path';
 import fs from 'fs';
 import { PrismaClient } from '@prisma/client';
+import sharp from 'sharp';
 import authRoutes from './routes/auth';
 import verifyRoutes from './routes/verify';
 import listingsRoutes from './routes/listings';
@@ -128,8 +129,46 @@ async function backfillListingExpiresAt() {
   }
 }
 
+// One-time optimization of legacy uploads: re-encodes oversized / progressive
+// images to baseline JPEG (1280px max) so browsers render them fully on first paint.
+// Idempotent: skips files already small enough.
+async function backfillOptimizeImages() {
+  try {
+    const dir = path.join(__dirname, '../uploads');
+    if (!fs.existsSync(dir)) return;
+    const files = await fs.promises.readdir(dir);
+    let processed = 0;
+    for (const filename of files) {
+      if (!/\.(jpe?g|png|webp)$/i.test(filename)) continue;
+      const fullPath = path.join(dir, filename);
+      try {
+        const stat = await fs.promises.stat(fullPath);
+        if (stat.size < 200 * 1024) continue;
+        const buffer = await fs.promises.readFile(fullPath);
+        const meta = await sharp(buffer).metadata();
+        const oversized = (meta.width || 0) > 1280 || (meta.height || 0) > 1280;
+        const progressive = !!meta.isProgressive;
+        if (!oversized && !progressive && stat.size < 400 * 1024) continue;
+        const out = await sharp(buffer)
+          .rotate()
+          .resize({ width: 1280, height: 1280, fit: 'inside', withoutEnlargement: true })
+          .jpeg({ quality: 80, progressive: false, mozjpeg: true })
+          .toBuffer();
+        await fs.promises.writeFile(fullPath, out);
+        processed++;
+      } catch (err: any) {
+        console.error(`[startup] Could not optimize ${filename}:`, err.message);
+      }
+    }
+    if (processed > 0) console.log(`[startup] Re-encoded ${processed} legacy images to baseline JPEG`);
+  } catch (err: any) {
+    console.error('[startup] image backfill failed:', err.message);
+  }
+}
+
 app.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
   console.log(`CORS origins: ${allowedOrigins.join(', ')}`);
   backfillListingExpiresAt();
+  backfillOptimizeImages();
 });
