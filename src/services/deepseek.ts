@@ -89,6 +89,54 @@ export async function chatMessage(text: string): Promise<ChatResponse> {
   }
 }
 
+// Vision-based analysis. Sends a base64 image to a vision-capable model and
+// extracts the same AIAnalysis structure as text-based requests.
+// DeepSeek's text-only `deepseek-chat` model doesn't accept images, so this
+// uses OpenAI's `gpt-4o-mini` if OPENAI_API_KEY is set; otherwise returns
+// a generic fallback so the rest of the search flow keeps working.
+const visionClient = process.env.OPENAI_API_KEY
+  ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY, timeout: 20000, maxRetries: 1 })
+  : null;
+
+export async function analyzeImage(imageBase64: string, mimeType: string): Promise<AIAnalysis> {
+  if (!visionClient) {
+    return {
+      productType: null, brand: null, vehicleBrand: null, vehicleModel: null,
+      vehicleYear: null, category: null, specifications: [], keywords: [],
+      summary: 'Şəkilli axtarış üçün vision modeli konfiqurasiya edilməyib. OPENAI_API_KEY env-i təyin edin.',
+    };
+  }
+  try {
+    const response = await visionClient.chat.completions.create({
+      model: 'gpt-4o-mini',
+      messages: [
+        { role: 'system', content: ANALYSIS_PROMPT },
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: 'Bu şəkildəki avtomobil ehtiyat hissəsini analiz et və JSON qaytar.' },
+            { type: 'image_url', image_url: { url: `data:${mimeType};base64,${imageBase64}` } },
+          ],
+        },
+      ],
+      temperature: 0.1,
+      max_tokens: 500,
+    });
+    const content = response.choices[0].message.content || '{}';
+    const jsonStr = content.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+    return JSON.parse(jsonStr);
+  } catch (err: any) {
+    // H25 fix: do NOT leak raw provider error message (may contain API key
+    // metadata, internal hostnames, etc.). Log internally, return generic msg.
+    console.error('[analyzeImage] vision API failed:', err?.message);
+    return {
+      productType: null, brand: null, vehicleBrand: null, vehicleModel: null,
+      vehicleYear: null, category: null, specifications: [],
+      keywords: [], summary: 'Şəkilli axtarış uğursuz oldu. Yenidən cəhd edin və ya mətnlə axtarın.',
+    };
+  }
+}
+
 export async function analyzeRequest(text: string): Promise<AIAnalysis> {
   try {
     const response = await openai.chat.completions.create({

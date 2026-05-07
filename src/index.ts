@@ -1,5 +1,6 @@
 import express, { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
+import helmet from 'helmet';
 import path from 'path';
 import fs from 'fs';
 import { PrismaClient } from '@prisma/client';
@@ -19,6 +20,7 @@ import promoRoutes from './routes/promo';
 import ratingsRoutes from './routes/ratings';
 import notificationsRoutes from './routes/notifications';
 import sellerRoutes from './routes/seller';
+import searchRoutes from './routes/search';
 
 const app = express();
 const PORT = process.env.PORT || 5001;
@@ -42,7 +44,10 @@ const corsOptions = {
 
 app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
-app.use(express.json());
+// Security headers (X-Frame-Options, X-Content-Type-Options, Strict-Transport-Security, etc.)
+// crossOriginResourcePolicy disabled because we serve uploads to the frontend on a different origin.
+app.use(helmet({ crossOriginResourcePolicy: false }));
+app.use(express.json({ limit: '1mb' }));
 
 const uploadsDir = path.join(__dirname, '../uploads');
 fs.mkdirSync(uploadsDir, { recursive: true });
@@ -63,6 +68,7 @@ app.use('/api', promoRoutes);
 app.use('/api', ratingsRoutes);
 app.use('/api', notificationsRoutes);
 app.use('/api', sellerRoutes);
+app.use('/api', searchRoutes);
 
 app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok' });
@@ -76,7 +82,8 @@ app.use((_req: Request, res: Response) => {
 // Fix #15: Global error handler - yakalanmamis hatalari yakalar
 app.use((err: any, req: Request, res: Response, _next: NextFunction) => {
   console.error(`[${req.method} ${req.path}] Unhandled error:`, err.message, err.code || '');
-  console.error(err.stack);
+  // Stack traces only in non-production to avoid leaking internal paths/structure.
+  if (process.env.NODE_ENV !== 'production') console.error(err.stack);
 
   // Multer file size error
   if (err.message?.includes('File too large') || err.code === 'LIMIT_FILE_SIZE') {
@@ -145,11 +152,11 @@ async function backfillOptimizeImages() {
         const stat = await fs.promises.stat(fullPath);
         if (stat.size < 200 * 1024) continue;
         const buffer = await fs.promises.readFile(fullPath);
-        const meta = await sharp(buffer).metadata();
+        const meta = await sharp(buffer, { limitInputPixels: 50_000_000 }).metadata();
         const oversized = (meta.width || 0) > 1280 || (meta.height || 0) > 1280;
         const progressive = !!meta.isProgressive;
         if (!oversized && !progressive && stat.size < 400 * 1024) continue;
-        const out = await sharp(buffer)
+        const out = await sharp(buffer, { limitInputPixels: 50_000_000 })
           .rotate()
           .resize({ width: 1280, height: 1280, fit: 'inside', withoutEnlargement: true })
           .jpeg({ quality: 80, progressive: false, mozjpeg: true })

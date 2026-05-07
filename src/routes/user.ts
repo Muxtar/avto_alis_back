@@ -3,6 +3,7 @@ import { PrismaClient } from '@prisma/client';
 import { adminAuth, AuthRequest } from '../middleware/auth';
 import { upload } from '../middleware/upload';
 import { processImages } from '../middleware/imageProcess';
+import { listingWriteLimiter, bulkLimiter } from '../middleware/rateLimiter';
 import fs from 'fs';
 import path from 'path';
 
@@ -65,7 +66,7 @@ router.get('/me/listings', adminAuth, async (req: AuthRequest, res: Response) =>
 });
 
 // Create my listing — any logged-in user can post (PRODUCT or SERVICE)
-router.post('/me/listings', adminAuth, upload.array('images', 5), processImages, async (req: AuthRequest, res: Response) => {
+router.post('/me/listings', listingWriteLimiter, adminAuth, upload.array('images', 5), processImages, async (req: AuthRequest, res: Response) => {
   try {
     const { title, description, price, category, type, location, phone, condition, country, brand, stock, forVehicle, unit, unitValue, year, model, city, fuelType, paymentType } = req.body;
 
@@ -169,14 +170,84 @@ router.put('/me/listings/:id', adminAuth, upload.array('images', 5), processImag
   }
 });
 
-// Reactivate my listing — extends expiry by 20 days
+// Bulk publish from desktop sync — accepts up to 100 items at once.
+// Used by Kassa SQL desktop app to push local inventory to AvtoBazar.
+router.post('/me/listings/bulk', bulkLimiter, adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const items = req.body?.items;
+    if (!Array.isArray(items) || items.length === 0) {
+      res.status(400).json({ success: false, message: 'items massiv tələb olunur' });
+      return;
+    }
+    if (items.length > 100) {
+      res.status(400).json({ success: false, message: 'Maksimum 100 məhsul bir sorğuda' });
+      return;
+    }
+    const expiresAt = new Date(Date.now() + 20 * 24 * 60 * 60 * 1000);
+    const created: { index: number; id: number; externalId?: string }[] = [];
+    const errors: { index: number; message: string; externalId?: string }[] = [];
+
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i];
+      try {
+        if (!it?.title || !it?.price || !it?.category) {
+          errors.push({ index: i, message: 'title, price, category tələb olunur', externalId: it?.externalId });
+          continue;
+        }
+        const listing = await prisma.listing.create({
+          data: {
+            userId: req.adminId!,
+            title: String(it.title),
+            description: String(it.description || it.title),
+            price: parseFloat(String(it.price)),
+            category: String(it.category),
+            type: it.type === 'SERVICE' ? 'SERVICE' : 'PRODUCT',
+            images: [],
+            condition: it.condition || 'NEW',
+            brand: it.brand ? String(it.brand) : null,
+            stock: it.stock ? parseInt(String(it.stock)) : 1,
+            model: it.model ? String(it.model) : null,
+            year: it.year ? parseInt(String(it.year)) : null,
+            city: it.city ? String(it.city) : null,
+            forVehicle: it.forVehicle ? String(it.forVehicle) : null,
+            expiresAt,
+          },
+        });
+        created.push({ index: i, id: listing.id, externalId: it.externalId });
+      } catch (err: any) {
+        errors.push({ index: i, message: err.message, externalId: it?.externalId });
+      }
+    }
+    res.json({ success: true, created, errors, total: items.length });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+// Reactivate my listing — extends expiry by 20 days.
+// H7 fix: cooldown of 24h between reactivations to prevent gaming the
+// "newest" sort by spam-reactivating.
 router.post('/me/listings/:id/reactivate', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
-    const existing = await prisma.listing.findUnique({ where: { id: parseInt(req.params.id) } });
+    const id = parseInt(req.params.id);
+    if (Number.isNaN(id)) {
+      res.status(400).json({ success: false, message: 'Yanlış ID' }); return;
+    }
+    const existing = await prisma.listing.findUnique({ where: { id } });
     if (!existing || existing.userId !== req.adminId) {
       res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return;
     }
-    const expiresAt = new Date(Date.now() + 20 * 24 * 60 * 60 * 1000);
+    // Cooldown: only allow reactivation if the listing is actually expired
+    // (or within 1 day of expiring) — prevents abuse.
+    const now = Date.now();
+    if (existing.expiresAt && existing.expiresAt.getTime() > now + 24 * 60 * 60 * 1000) {
+      res.status(400).json({
+        success: false,
+        message: 'Bu elanın müddəti hələ dolmayıb. Yalnız bitməyə yaxın və ya bitmiş elanları yeniləmək olar.',
+      });
+      return;
+    }
+    const expiresAt = new Date(now + 20 * 24 * 60 * 60 * 1000);
     const listing = await prisma.listing.update({
       where: { id: existing.id },
       data: { expiresAt },
@@ -278,7 +349,7 @@ router.get('/me/vehicles', adminAuth, async (req: AuthRequest, res: Response) =>
 });
 
 // Add a vehicle (passport image required)
-router.post('/me/vehicles', adminAuth, upload.single('passportImage'), async (req: AuthRequest, res: Response) => {
+router.post('/me/vehicles', adminAuth, upload.single('passportImage'), processImages, async (req: AuthRequest, res: Response) => {
   try {
     const { brand, model, year } = req.body;
     if (!brand || !model || !year) {
@@ -306,7 +377,7 @@ router.post('/me/vehicles', adminAuth, upload.single('passportImage'), async (re
 });
 
 // Update a vehicle (passport image optional — old kept if not uploaded)
-router.put('/me/vehicles/:id', adminAuth, upload.single('passportImage'), async (req: AuthRequest, res: Response) => {
+router.put('/me/vehicles/:id', adminAuth, upload.single('passportImage'), processImages, async (req: AuthRequest, res: Response) => {
   try {
     const id = parseInt(req.params.id);
     const existing = await prisma.vehicle.findUnique({ where: { id } });

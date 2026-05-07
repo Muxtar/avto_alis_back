@@ -111,17 +111,26 @@ router.put('/admin/users/:id', requireAdmin, async (req: AuthRequest, res: Respo
       return;
     }
 
-    const user = await prisma.user.update({
-      where: { id: targetId },
-      data: {
-        ...(name !== undefined && { name }),
-        ...(phone !== undefined && { phone }),
-        ...(type !== undefined && { type }),
-        ...(verified !== undefined && { verified }),
-        ...(role !== undefined && { role }),
-      },
-    });
-    res.json({ success: true, user });
+    try {
+      const user = await prisma.user.update({
+        where: { id: targetId },
+        data: {
+          ...(name !== undefined && { name }),
+          ...(phone !== undefined && { phone }),
+          ...(type !== undefined && { type }),
+          ...(verified !== undefined && { verified }),
+          ...(role !== undefined && { role }),
+        },
+      });
+      res.json({ success: true, user });
+    } catch (err: any) {
+      // H11 fix: catch unique-violation on phone
+      if (err?.code === 'P2002') {
+        res.status(400).json({ success: false, message: 'Bu telefon nömrəsi artıq başqa istifadəçi tərəfindən istifadə olunur' });
+        return;
+      }
+      throw err;
+    }
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }
@@ -130,7 +139,16 @@ router.put('/admin/users/:id', requireAdmin, async (req: AuthRequest, res: Respo
 // Delete User
 router.delete('/admin/users/:id', requireAdmin, async (req: AuthRequest, res: Response) => {
   try {
-    await prisma.user.delete({ where: { id: parseInt(req.params.id) } });
+    const targetId = parseInt(req.params.id);
+    if (Number.isNaN(targetId)) {
+      res.status(400).json({ success: false, message: 'Yanlış ID' }); return;
+    }
+    // C13 fix: prevent admin self-deletion (would lock them out & cascade-delete their data)
+    if (targetId === req.adminId) {
+      res.status(403).json({ success: false, message: 'Öz hesabınızı silə bilməzsiniz' });
+      return;
+    }
+    await prisma.user.delete({ where: { id: targetId } });
     res.json({ success: true });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
@@ -308,10 +326,27 @@ router.get('/admin/orders', requireAdmin, async (req: AuthRequest, res: Response
 // Assign Courier to Order
 router.put('/admin/orders/:id/assign-courier', requireAdmin, async (req: AuthRequest, res: Response) => {
   try {
+    const orderId = parseInt(req.params.id);
+    if (Number.isNaN(orderId)) {
+      res.status(400).json({ success: false, message: 'Yanlış sifariş ID' }); return;
+    }
     const { courierId } = req.body;
+    const cid = courierId ? parseInt(courierId) : null;
+    // C10 fix: when assigning, verify the user is actually a COURIER —
+    // otherwise admin could mistakenly assign any user to deliver.
+    if (cid !== null) {
+      const courier = await prisma.user.findUnique({
+        where: { id: cid },
+        select: { id: true, type: true },
+      });
+      if (!courier || courier.type !== 'COURIER') {
+        res.status(400).json({ success: false, message: 'Seçilmiş istifadəçi kuryer deyil' });
+        return;
+      }
+    }
     const order = await prisma.order.update({
-      where: { id: parseInt(req.params.id) },
-      data: { courierId: courierId ? parseInt(courierId) : null },
+      where: { id: orderId },
+      data: { courierId: cid },
       include: { courier: { select: { id: true, name: true, phone: true } } },
     });
     res.json({ success: true, order });

@@ -24,15 +24,18 @@ const storage = multer.diskStorage({
 
 export const upload = multer({
   storage,
-  limits: { fileSize: 5 * 1024 * 1024 },
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB to accommodate HEIC originals
   fileFilter: (_req, file, cb) => {
-    const allowed = /jpeg|jpg|png|webp/;
-    const ext = allowed.test(path.extname(file.originalname).toLowerCase());
-    const mime = allowed.test(file.mimetype);
+    // H21 fix: accept HEIC/HEIF (iPhone Camera Roll default format).
+    // sharp can decode HEIC and processImages middleware will re-encode to JPEG.
+    const allowedExt = /\.(jpe?g|png|webp|heic|heif)$/i;
+    const allowedMime = /^image\/(jpeg|jpg|png|webp|heic|heif)$/i;
+    const ext = allowedExt.test(file.originalname.toLowerCase());
+    const mime = allowedMime.test(file.mimetype) || file.mimetype === 'application/octet-stream';
     if (ext && mime) {
       cb(null, true);
     } else {
-      cb(new Error('Yalnızca resim dosyaları yüklenebilir (jpg, png, webp)'));
+      cb(new Error('Yalnızca resim dosyaları yüklenebilir (jpg, png, webp, heic)'));
     }
   },
 });

@@ -166,22 +166,37 @@ router.get('/sellers/:id', async (req: Request, res: Response) => {
       return;
     }
 
-    const listings = await prisma.listing.findMany({
-      where: {
-        userId: user.id,
-        OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
-      },
-      include: { user: { select: { id: true, name: true, phone: true, type: true } } },
-      orderBy: { createdAt: 'desc' },
-    });
+    // M1 fix: paginate seller's listings to avoid serving thousands at once.
+    const page = parseInt((req.query.page as string) || '1');
+    const limit = Math.min(parseInt((req.query.limit as string) || '24'), 100);
+    const skip = (page - 1) * limit;
+    const sellerListingsWhere = {
+      userId: user.id,
+      OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
+    };
+    const [listings, listingsTotal] = await Promise.all([
+      prisma.listing.findMany({
+        where: sellerListingsWhere,
+        include: { user: { select: { id: true, name: true, phone: true, type: true } } },
+        orderBy: { createdAt: 'desc' },
+        skip,
+        take: limit,
+      }),
+      prisma.listing.count({ where: sellerListingsWhere }),
+    ]);
 
+    // Stats based on full count (not just current page).
+    const [productsCount, servicesCount] = await Promise.all([
+      prisma.listing.count({ where: { ...sellerListingsWhere, type: 'PRODUCT' } }),
+      prisma.listing.count({ where: { ...sellerListingsWhere, type: 'SERVICE' } }),
+    ]);
     const stats = {
-      totalListings: listings.length,
-      totalProducts: listings.filter((l) => l.type === 'PRODUCT').length,
-      totalServices: listings.filter((l) => l.type === 'SERVICE').length,
+      totalListings: listingsTotal,
+      totalProducts: productsCount,
+      totalServices: servicesCount,
     };
 
-    res.json({ user, listings, stats });
+    res.json({ user, listings, stats, page, totalPages: Math.ceil(listingsTotal / limit) });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }
@@ -227,17 +242,43 @@ router.get('/listings/:id', async (req: Request, res: Response) => {
 // Add comment to listing (auth required)
 router.post('/listings/:id/comments', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
+    const listingId = parseInt(req.params.id);
+    if (Number.isNaN(listingId)) {
+      res.status(400).json({ success: false, message: 'Yanlış ID' });
+      return;
+    }
     const { content, rating } = req.body;
-    if (!content?.trim()) {
+    const trimmed = typeof content === 'string' ? content.trim() : '';
+    if (!trimmed) {
       res.status(400).json({ success: false, message: 'Şərh mətni tələb olunur' });
+      return;
+    }
+    if (trimmed.length > 1000) {
+      res.status(400).json({ success: false, message: 'Şərh çox uzundur (maks 1000 simvol)' });
+      return;
+    }
+    // Validate rating: must be 1..5 if provided.
+    let parsedRating: number | null = null;
+    if (rating !== undefined && rating !== null && rating !== '') {
+      const n = typeof rating === 'number' ? rating : parseInt(rating);
+      if (Number.isNaN(n) || n < 1 || n > 5) {
+        res.status(400).json({ success: false, message: 'Reytinq 1-5 aralığında olmalıdır' });
+        return;
+      }
+      parsedRating = n;
+    }
+    // Verify the listing actually exists (avoid raw FK error).
+    const exists = await prisma.listing.findUnique({ where: { id: listingId }, select: { id: true } });
+    if (!exists) {
+      res.status(404).json({ success: false, message: 'Elan tapılmadı' });
       return;
     }
     const comment = await prisma.comment.create({
       data: {
         userId: req.adminId!,
-        listingId: parseInt(req.params.id),
-        content: content.trim(),
-        rating: rating ? parseInt(rating) : null,
+        listingId,
+        content: trimmed,
+        rating: parsedRating,
       },
       include: { user: { select: { id: true, name: true, type: true } } },
     });

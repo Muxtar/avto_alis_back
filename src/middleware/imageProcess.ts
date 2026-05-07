@@ -8,7 +8,9 @@ const JPEG_QUALITY = 80;
 
 async function processOne(file: Express.Multer.File): Promise<void> {
   const buffer = await fs.promises.readFile(file.path);
-  const out = await sharp(buffer)
+  // limitInputPixels protects against decompression bombs (e.g. 50000x50000 PNG)
+  // that decode into multi-GB pixel buffers and crash the server.
+  const out = await sharp(buffer, { limitInputPixels: 50_000_000 })
     .rotate()
     .resize({ width: MAX_DIMENSION, height: MAX_DIMENSION, fit: 'inside', withoutEnlargement: true })
     .jpeg({ quality: JPEG_QUALITY, progressive: false, mozjpeg: true })

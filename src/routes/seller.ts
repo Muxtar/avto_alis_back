@@ -2,6 +2,7 @@ import { Router, Response } from 'express';
 import { PrismaClient, UserType } from '@prisma/client';
 import { adminAuth, requireAdmin, AuthRequest } from '../middleware/auth';
 import { upload } from '../middleware/upload';
+import { processImages } from '../middleware/imageProcess';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -10,7 +11,7 @@ const prisma = new PrismaClient();
 router.post('/seller/apply', adminAuth, upload.fields([
   { name: 'idImageFront', maxCount: 1 },
   { name: 'idImageBack', maxCount: 1 },
-]), async (req: AuthRequest, res: Response) => {
+]), processImages, async (req: AuthRequest, res: Response) => {
   try {
     const { taxId, iban, businessName } = req.body;
     const files = req.files as { [field: string]: Express.Multer.File[] } | undefined;
@@ -59,11 +60,18 @@ router.get('/seller/status', adminAuth, async (req: AuthRequest, res: Response) 
     const user = await prisma.user.findUnique({
       where: { id: req.adminId! },
       select: {
+        type: true,
         sellerVerified: true, sellerVerifiedAt: true,
         sellerApplication: true,
       },
     });
     if (!user) { res.status(404).json({ success: false }); return; }
+    // M13 fix: only sellers (MECHANIC / PARTS_SELLER) need KYC.
+    // Other types should get a 403 instead of an empty/null response.
+    if (user.type !== UserType.MECHANIC && user.type !== UserType.PARTS_SELLER) {
+      res.status(403).json({ success: false, message: 'Yalnız satıcı tipi KYC tələb edir' });
+      return;
+    }
     res.json({ success: true, ...user });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });

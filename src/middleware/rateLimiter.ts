@@ -49,3 +49,15 @@ export const verifyLimiter = rateLimit(5, 5 * 60 * 1000);
 
 // Register endpointler: 3 istek / 10 dakika
 export const registerLimiter = rateLimit(3, 10 * 60 * 1000);
+
+// Listing yaratma — depolama spam koruması: 30 istek / saat
+export const listingWriteLimiter = rateLimit(30, 60 * 60 * 1000);
+
+// Bulk publish (Desktop) — 10 istek / saat (her biri 100 elemana qədər)
+export const bulkLimiter = rateLimit(10, 60 * 60 * 1000);
+
+// AI/Inquiry — DeepSeek spam korumas: 20 istek / saat
+export const inquiryLimiter = rateLimit(20, 60 * 60 * 1000);
+
+// Image search — OpenAI vision API qoruması: 15 istek / saat
+export const imageSearchLimiter = rateLimit(15, 60 * 60 * 1000);

@@ -367,6 +367,7 @@ model Inquiry {
   buyerId       Int
   rawText       String
   aiAnalysis    Json?
+  cities        String[]       @default([])
   status        InquiryStatus  @default(OPEN)
   expiresAt     DateTime?
   createdAt     DateTime       @default(now())

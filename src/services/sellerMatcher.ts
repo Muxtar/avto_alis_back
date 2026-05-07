@@ -3,7 +3,11 @@ import { AIAnalysis } from './deepseek';
 
 const prisma = new PrismaClient();
 
-export async function findRelevantSellers(analysis: AIAnalysis, buyerId: number): Promise<number[]> {
+export async function findRelevantSellers(
+  analysis: AIAnalysis,
+  buyerId: number,
+  cities?: string[]
+): Promise<number[]> {
   // AI analizinden arama kosullari olustur
   const orConditions: Prisma.ListingWhereInput[] = [];
 
@@ -46,14 +50,24 @@ export async function findRelevantSellers(analysis: AIAnalysis, buyerId: number)
     return [];
   }
 
+  // City filter — sellers whose listings OR workplaces are in selected cities.
+  const userFilter: Prisma.UserWhereInput = {
+    type: { in: ['PARTS_SELLER', 'MECHANIC'] },
+    id: { not: buyerId },
+  };
+  if (cities && cities.length > 0) {
+    userFilter.OR = [
+      { workplaces: { some: { address: { in: cities, mode: 'insensitive' } } } },
+      { listings: { some: { city: { in: cities, mode: 'insensitive' } } } },
+    ];
+  }
+
   // Eslesen listingleri bul
   const listings = await prisma.listing.findMany({
     where: {
       OR: orConditions,
-      user: {
-        type: { in: ['PARTS_SELLER', 'MECHANIC'] },
-        id: { not: buyerId },
-      },
+      ...(cities && cities.length > 0 ? { city: { in: cities, mode: 'insensitive' } } : {}),
+      user: userFilter,
     },
     select: { userId: true },
     take: 100,
@@ -62,13 +76,13 @@ export async function findRelevantSellers(analysis: AIAnalysis, buyerId: number)
   // Unique satici ID'leri - en fazla 20
   const sellerIds = [...new Set(listings.map(l => l.userId))].slice(0, 20);
 
-  // Eslesen listing yoksa, tum PARTS_SELLER ve MECHANIC'leri al (max 10)
+  // Eslesen listing yoksa, tum sellerVerified PARTS_SELLER ve MECHANIC'leri al (max 10)
+  // C11 fix: filter by sellerVerified (KYC-onaylı), not just verified (phone-OTP).
   if (sellerIds.length === 0) {
     const allSellers = await prisma.user.findMany({
       where: {
-        type: { in: ['PARTS_SELLER', 'MECHANIC'] },
-        id: { not: buyerId },
-        verified: true,
+        ...userFilter,
+        sellerVerified: true,
       },
       select: { id: true },
       take: 10,
