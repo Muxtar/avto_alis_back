@@ -12,14 +12,19 @@
 // Bütün passların mətni birləşdirilir, parser hər sahənin ən yaxşı namizədini
 // regex və xüsusi qaydalarla seçir.
 
-import { createWorker, Worker, PSM } from 'tesseract.js';
+import { createWorker, Worker, PSM, OEM } from 'tesseract.js';
 import sharp from 'sharp';
 import path from 'path';
+import fs from 'fs';
 
-// İki worker: biri normal mətn üçün (aze+eng), digəri alfanumeric whitelist
-// üçün (yalnız eng + char_whitelist). İlk istifadədə yaradılır, sonra cache.
+// Üç worker:
+//  1. normalWorker — ümumi mətn üçün (aze+eng)
+//  2. alphaNumWorker — VIN/qeydiyyat üçün (eng + char_whitelist)
+//  3. osdWorker — orientation aşkarlaması üçün (Legacy model tələb edir)
+// Hamısı ilk istifadədə yaradılır, sonra cache.
 let normalWorker: Promise<Worker> | null = null;
 let alphaNumWorker: Promise<Worker> | null = null;
+let osdWorker: Promise<Worker> | null = null;
 
 function getNormalWorker(): Promise<Worker> {
   if (!normalWorker) {
@@ -32,7 +37,6 @@ async function getAlphaNumWorker(): Promise<Worker> {
   if (!alphaNumWorker) {
     alphaNumWorker = createWorker('eng').then(async (w) => {
       await w.setParameters({
-        // VIN və qeydiyyat nömrələri üçün — yalnız böyük hərflər və rəqəmlər
         tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.- ',
         tessedit_pageseg_mode: PSM.SPARSE_TEXT,
       });
@@ -40,6 +44,59 @@ async function getAlphaNumWorker(): Promise<Worker> {
     });
   }
   return alphaNumWorker;
+}
+
+function getOSDWorker(): Promise<Worker> {
+  if (!osdWorker) {
+    // OSD üçün xüsusi `osd.traineddata` modeli + Legacy OEM lazımdır.
+    // Tesseract `worker.detect()` yalnız Legacy modeldə işləyir.
+    osdWorker = createWorker('osd', OEM.TESSERACT_ONLY);
+  }
+  return osdWorker;
+}
+
+// OSD ilə şəkilin orientation-unu aşkarla, lazımdırsa Sharp ilə düzəlt.
+// `detect()` `orientation_degrees` qaytarır (mətnin neçə dərəcə fırladılması
+// lazım olduğunu — saat əqrəbinin əksi istiqamətdə).
+// Sharp `.rotate(N)` saat əqrəbi istiqamətindədir, ona görə əksi (N → 360-N)
+// işlədirik. Konfidensi `OSD_MIN_CONFIDENCE`-dən aşağıdırsa, fırlatmırıq —
+// səhv aşkarlamadan qaçmaq üçün.
+const OSD_MIN_CONFIDENCE = parseFloat(process.env.OSD_MIN_CONFIDENCE || '1.0');
+
+async function autoRotateInPlace(imagePath: string): Promise<number> {
+  try {
+    // Şəkili kiçildilmiş halda OSD-yə ötür — sürət üçün
+    const tempBuf = await sharp(imagePath, { limitInputPixels: 50_000_000 })
+      .rotate() // EXIF
+      .resize({ width: 1200, height: 1200, fit: 'inside', withoutEnlargement: true })
+      .toFormat('png')
+      .toBuffer();
+
+    const w = await getOSDWorker();
+    const { data } = await w.detect(tempBuf);
+    const angle: number = data.orientation_degrees || 0;
+    const conf: number = data.orientation_confidence || 0;
+
+    if (angle === 0 || conf < OSD_MIN_CONFIDENCE) {
+      return 0; // düzdür və ya əmin deyilik — toxunma
+    }
+
+    // Tesseract.js `orientation_degrees` artıq "şəkili düzəltmək üçün lazımi
+    // saat-əqrəbi açısı"dır. Sharp `.rotate(N)` saat əqrəbi istiqamətində fırladır,
+    // ona görə birbaşa ötürürük.
+    const rotated = await sharp(imagePath, { limitInputPixels: 50_000_000 })
+      .rotate() // EXIF
+      .rotate(angle)
+      .jpeg({ quality: 92 })
+      .toBuffer();
+
+    await fs.promises.writeFile(imagePath, rotated);
+    return angle;
+  } catch (err: any) {
+    // OSD uğursuz olarsa, şəkili olduğu kimi qoy
+    console.error('[passportOCR] OSD failed:', err?.message);
+    return 0;
+  }
 }
 
 // === ÖN EMAL VARIANTLARI ===
@@ -378,6 +435,23 @@ async function runAllPasses(imagePath: string): Promise<{ normal: string; hc: st
 }
 
 export async function extractWithOCR(frontPath: string, backPath: string): Promise<OCRResult> {
+  // STEP 0: Avtomatik orientation düzəltmə. Şəkil yan/tərs çəkilibsə, OSD
+  // bunu aşkarlayıb Sharp ilə düz vəziyyətə gətirir. Bu, kullanıcı
+  // hər istiqamətdə şəkil yükləsə də OCR/parser-in işləməsinə imkan verir.
+  let frontRotated = 0;
+  let backRotated = 0;
+  try {
+    [frontRotated, backRotated] = await Promise.all([
+      autoRotateInPlace(frontPath),
+      autoRotateInPlace(backPath),
+    ]);
+    if (frontRotated || backRotated) {
+      console.log(`[passportOCR] auto-rotated front=${frontRotated}° back=${backRotated}°`);
+    }
+  } catch (err: any) {
+    console.error('[passportOCR] auto-rotate stage failed:', err?.message);
+  }
+
   let frontPasses = { normal: '', hc: '', thr: '', alpha: '' };
   let backPasses = { normal: '', hc: '', thr: '', alpha: '' };
   try {
@@ -421,4 +495,5 @@ export async function extractWithOCR(frontPath: string, backPath: string): Promi
 process.once('exit', () => {
   if (normalWorker) normalWorker.then((w) => w.terminate()).catch(() => {});
   if (alphaNumWorker) alphaNumWorker.then((w) => w.terminate()).catch(() => {});
+  if (osdWorker) osdWorker.then((w) => w.terminate()).catch(() => {});
 });
