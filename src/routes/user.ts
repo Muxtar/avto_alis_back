@@ -4,6 +4,7 @@ import { adminAuth, AuthRequest } from '../middleware/auth';
 import { upload } from '../middleware/upload';
 import { processImages } from '../middleware/imageProcess';
 import { listingWriteLimiter, bulkLimiter } from '../middleware/rateLimiter';
+import { extractPassportFromFiles } from '../services/vehiclePassportAI';
 import fs from 'fs';
 import path from 'path';
 
@@ -348,26 +349,149 @@ router.get('/me/vehicles', adminAuth, async (req: AuthRequest, res: Response) =>
   }
 });
 
-// Add a vehicle (passport image required)
-router.post('/me/vehicles', adminAuth, upload.single('passportImage'), processImages, async (req: AuthRequest, res: Response) => {
+// Two-image upload: front + back of the texniki pasport.
+const passportFields = upload.fields([
+  { name: 'passportImageFront', maxCount: 1 },
+  { name: 'passportImageBack', maxCount: 1 },
+]);
+
+function pickPassportFile(
+  files: Express.Multer.File[] | { [k: string]: Express.Multer.File[] } | undefined,
+  key: string,
+): Express.Multer.File | undefined {
+  if (!files || Array.isArray(files)) return undefined;
+  return files[key]?.[0];
+}
+
+// Bütün AI sahələrini eyni şəkildə UI-dan ya da AI-dan götürmək üçün ortaq
+// list. JSON save endpoint-ləri də bunu istifadə edir.
+const PASSPORT_FIELD_KEYS = [
+  'registrationNumber', 'registrationDate', 'manufactureYear',
+  'ownerName', 'ownerAddress', 'ownershipType', 'validUntil', 'cardSerial',
+  'vehicleType', 'engineNumber', 'bodyNumber', 'chassisNumber', 'color',
+  'maxMass', 'unloadedMass', 'seatCount', 'engineCapacity', 'issuedBy', 'specialMarks',
+] as const;
+
+const NUMERIC_FIELDS = new Set(['manufactureYear', 'seatCount']);
+
+function pickPassportFields(input: Record<string, any> | undefined | null) {
+  const out: Record<string, any> = {};
+  if (!input) return out;
+  for (const k of PASSPORT_FIELD_KEYS) {
+    const v = input[k];
+    if (v === undefined) continue;
+    if (v === null || v === '') {
+      out[k] = null;
+      continue;
+    }
+    if (NUMERIC_FIELDS.has(k)) {
+      const n = typeof v === 'number' ? v : parseInt(String(v).replace(/[^0-9]/g, ''), 10);
+      out[k] = Number.isFinite(n) ? n : null;
+    } else {
+      out[k] = String(v).trim() || null;
+    }
+  }
+  return out;
+}
+
+// STEP 1: Şəkilləri yüklə + AI ilə oxu. DB-yə HEÇ NƏ yazılmır.
+// Cavab: yüklənmiş fayl adları + bütün sahələr. UI bunları forma yığır,
+// kullanıcı redaktə edir, sonra /me/vehicles/save-ə göndərir.
+router.post(
+  '/me/vehicles/extract',
+  adminAuth,
+  passportFields,
+  processImages,
+  async (req: AuthRequest, res: Response) => {
+    try {
+      const front = pickPassportFile(req.files, 'passportImageFront');
+      const back = pickPassportFile(req.files, 'passportImageBack');
+      if (!front || !back) {
+        res.status(400).json({
+          success: false,
+          message: 'Texniki pasportun ön və arxa şəkilləri tələb olunur',
+        });
+        return;
+      }
+
+      const ai = await extractPassportFromFiles(front.path, back.path);
+      const f = ai.fields;
+      res.json({
+        success: true,
+        ok: ai.ok,
+        error: ai.error,
+        passportImageFront: front.filename,
+        passportImageBack: back.filename,
+        fields: {
+          // marka/model/year-i ayrıca qaytarırıq ki, UI form-un əsas
+          // sahələrinə də ön-doldurma edə bilsin.
+          brand: f.brand,
+          model: f.model,
+          year: f.manufactureYear,
+          registrationNumber: f.registrationNumber,
+          registrationDate: f.registrationDate,
+          manufactureYear: f.manufactureYear,
+          ownerName: f.ownerName,
+          ownerAddress: f.ownerAddress,
+          ownershipType: f.ownershipType,
+          validUntil: f.validUntil,
+          cardSerial: f.cardSerial,
+          vehicleType: f.vehicleType,
+          engineNumber: f.engineNumber,
+          bodyNumber: f.bodyNumber,
+          chassisNumber: f.chassisNumber,
+          color: f.color,
+          maxMass: f.maxMass,
+          unloadedMass: f.unloadedMass,
+          seatCount: f.seatCount,
+          engineCapacity: f.engineCapacity,
+          issuedBy: f.issuedBy,
+          specialMarks: f.specialMarks,
+        },
+        aiRaw: ai.raw,
+      });
+    } catch (error: any) {
+      res.status(400).json({ success: false, message: error.message });
+    }
+  },
+);
+
+// STEP 2: Kullanıcının redaktə etdiyi sahələri DB-yə yaz.
+// Body JSON: { brand, model, year, passportImageFront, passportImageBack, ...fields }
+router.post('/me/vehicles', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
-    const { brand, model, year } = req.body;
-    if (!brand || !model || !year) {
+    const body = req.body as Record<string, any>;
+    const brand = String(body.brand || '').trim();
+    const model = String(body.model || '').trim();
+    const yearStr = body.year ? String(body.year) : '';
+    const front = body.passportImageFront ? String(body.passportImageFront) : null;
+    const back = body.passportImageBack ? String(body.passportImageBack) : null;
+
+    if (!brand || !model || !yearStr) {
       res.status(400).json({ success: false, message: 'Marka, model və il tələb olunur' });
       return;
     }
-    const file = req.file as Express.Multer.File | undefined;
-    if (!file) {
-      res.status(400).json({ success: false, message: 'Texniki pasport şəkli tələb olunur' });
+    if (!front || !back) {
+      res.status(400).json({
+        success: false,
+        message: 'Texniki pasportun ön və arxa şəkilləri tələb olunur (əvvəlcə /extract çağırın)',
+      });
       return;
     }
+
+    const fields = pickPassportFields(body);
     const vehicle = await prisma.vehicle.create({
       data: {
         userId: req.adminId!,
         brand,
         model,
-        year: parseInt(year),
-        passportImage: file.filename,
+        year: parseInt(yearStr, 10),
+        passportImage: front,
+        passportImageFront: front,
+        passportImageBack: back,
+        ...fields,
+        aiExtracted: body.aiRaw ?? null,
+        aiVerifiedAt: body.aiVerified ? new Date() : null,
       },
     });
     res.status(201).json({ success: true, vehicle });
@@ -376,8 +500,9 @@ router.post('/me/vehicles', adminAuth, upload.single('passportImage'), processIm
   }
 });
 
-// Update a vehicle (passport image optional — old kept if not uploaded)
-router.put('/me/vehicles/:id', adminAuth, upload.single('passportImage'), processImages, async (req: AuthRequest, res: Response) => {
+// Update a vehicle (JSON). Yeni şəkillər lazımdırsa, əvvəlcədən /extract
+// çağırılıb fayl adları + sahələr UI-da redaktə edilməlidir.
+router.put('/me/vehicles/:id', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
     const id = parseInt(req.params.id);
     const existing = await prisma.vehicle.findUnique({ where: { id } });
@@ -385,24 +510,33 @@ router.put('/me/vehicles/:id', adminAuth, upload.single('passportImage'), proces
       res.status(403).json({ success: false, message: 'İcazə yoxdur' });
       return;
     }
-    const { brand, model, year } = req.body;
-    const file = req.file as Express.Multer.File | undefined;
+    const body = req.body as Record<string, any>;
+    const updates: Record<string, any> = {};
 
-    // Yeni shekil yuklenibse, koheni diskten sil
-    if (file && existing.passportImage) {
-      const oldPath = path.join(__dirname, '../../uploads', existing.passportImage);
-      fs.unlink(oldPath, () => {});
+    if (body.brand !== undefined) updates.brand = String(body.brand);
+    if (body.model !== undefined) updates.model = String(body.model);
+    if (body.year !== undefined) updates.year = parseInt(String(body.year), 10);
+
+    // Yeni şəkillər
+    if (body.passportImageFront && body.passportImageFront !== existing.passportImageFront) {
+      if (existing.passportImageFront) {
+        fs.unlink(path.join(__dirname, '../../uploads', existing.passportImageFront), () => {});
+      }
+      updates.passportImage = body.passportImageFront;
+      updates.passportImageFront = body.passportImageFront;
+    }
+    if (body.passportImageBack && body.passportImageBack !== existing.passportImageBack) {
+      if (existing.passportImageBack) {
+        fs.unlink(path.join(__dirname, '../../uploads', existing.passportImageBack), () => {});
+      }
+      updates.passportImageBack = body.passportImageBack;
     }
 
-    const vehicle = await prisma.vehicle.update({
-      where: { id },
-      data: {
-        ...(brand !== undefined && { brand }),
-        ...(model !== undefined && { model }),
-        ...(year !== undefined && { year: parseInt(year) }),
-        ...(file && { passportImage: file.filename }),
-      },
-    });
+    Object.assign(updates, pickPassportFields(body));
+    if (body.aiRaw !== undefined) updates.aiExtracted = body.aiRaw;
+    if (body.aiVerified) updates.aiVerifiedAt = new Date();
+
+    const vehicle = await prisma.vehicle.update({ where: { id }, data: updates });
     res.json({ success: true, vehicle });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
@@ -418,9 +552,10 @@ router.delete('/me/vehicles/:id', adminAuth, async (req: AuthRequest, res: Respo
       res.status(403).json({ success: false, message: 'İcazə yoxdur' });
       return;
     }
-    if (existing.passportImage) {
-      const filePath = path.join(__dirname, '../../uploads', existing.passportImage);
-      fs.unlink(filePath, () => {});
+    for (const fname of [existing.passportImage, existing.passportImageFront, existing.passportImageBack]) {
+      if (fname) {
+        fs.unlink(path.join(__dirname, '../../uploads', fname), () => {});
+      }
     }
     await prisma.vehicle.delete({ where: { id } });
     res.json({ success: true });

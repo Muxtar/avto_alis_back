@@ -152,8 +152,47 @@ model Vehicle {
   brand         String
   model         String
   year          Int
-  passportImage String
+
+  // Backwards-compatible legacy single-image field. New rows use the
+  // front/back pair below; old rows keep this populated.
+  passportImage String  @default("")
+
+  // Texniki pasport şəkilləri (ön və arxa hissələr)
+  passportImageFront String? // ön kart şəkli
+  passportImageBack  String? // arxa kart şəkli
+
+  // ===== Texniki pasportun ön hissəsi =====
+  registrationNumber String? // A — Qeydiyyat nişanı (məs: 77NP518)
+  registrationDate   String? // B.1 — Qeydiyyat tarixi (məs: 25.11.2024)
+  manufactureYear    Int?    // B.2 — İstehsal tarixi (il)
+  ownerName          String? // C.1 — Mülkiyyətçi (məs: ƏSƏDOV EMIN ASLAN OĞLU)
+  ownerAddress       String? // C.2 — Sahibinin ünvanı
+  ownershipType      String? // C.3 — Mülkiyyət növü (Fiziki şəxs / Hüquqi şəxs)
+  validUntil         String? // H — Etibarlıdır
+  cardSerial         String? // Kart üzərindəki seriya (məs: BB667834)
+
+  // ===== Texniki pasportun arxa hissəsi =====
+  vehicleType     String? // D.3 — Tip (məs: MİNİK, UNIVERSAL)
+  engineNumber    String? // E.1 — Mühərrik nömrəsi
+  bodyNumber      String? // E.2 — Ban nömrəsi (VIN)
+  chassisNumber   String? // E.3 — Şassi nömrəsi
+  color           String? // E.4 — Rəngi
+  maxMass         String? // F.1 — Maksimal kütlə
+  unloadedMass    String? // F.2 — Yüksüz kütlə
+  seatCount       Int?    // F.3 — Oturacaqların sayı
+  engineCapacity  String? // G — Mühərrikin həcmi (sm³)
+  issuedBy        String? // Verilib (məs: AR DİN BDYPİ Qİİ)
+  specialMarks    String? // Xüsusi qeydlər
+
+  // AI çıxarışı və metadata
+  aiExtracted    Json?     // AI-nın qaytardığı xam JSON (audit / debug üçün)
+  aiVerifiedAt   DateTime? // AI-nın oxuduğu vaxt
+
   user          User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([registrationNumber])
+  @@index([bodyNumber])
 }
 
 model Workplace {

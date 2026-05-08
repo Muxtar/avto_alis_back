@@ -4,6 +4,66 @@ import bcrypt from 'bcryptjs';
 import { upload } from '../middleware/upload';
 import { generateToken, adminAuth, AuthRequest } from '../middleware/auth';
 import { authLimiter, registerLimiter, verifyLimiter } from '../middleware/rateLimiter';
+import { extractPassportFromFiles } from '../services/vehiclePassportAI';
+
+// Hər avtomobil üçün ön+arxa cüt şəkil. `passportImagesFront[i]` və
+// `passportImagesBack[i]` indeksləri eyni avtomobilə aiddir.
+const passportPairUpload = upload.fields([
+  { name: 'passportImagesFront', maxCount: 10 },
+  { name: 'passportImagesBack', maxCount: 10 },
+]);
+
+function getFiles(
+  reqFiles: Request['files'],
+  key: 'passportImagesFront' | 'passportImagesBack',
+): Express.Multer.File[] {
+  if (!reqFiles || Array.isArray(reqFiles)) return [];
+  return (reqFiles as Record<string, Express.Multer.File[]>)[key] || [];
+}
+
+async function buildVehicleCreateRow(
+  v: any,
+  front: Express.Multer.File | undefined,
+  back: Express.Multer.File | undefined,
+) {
+  const base = {
+    brand: v.brand,
+    model: v.model,
+    year: parseInt(v.year),
+    passportImage: front?.filename || '',
+    passportImageFront: front?.filename || null,
+    passportImageBack: back?.filename || null,
+  } as Record<string, any>;
+
+  if (front && back) {
+    const ai = await extractPassportFromFiles(front.path, back.path);
+    const f = ai.fields;
+    Object.assign(base, {
+      registrationNumber: f.registrationNumber,
+      registrationDate: f.registrationDate,
+      manufactureYear: f.manufactureYear,
+      ownerName: f.ownerName,
+      ownerAddress: f.ownerAddress,
+      ownershipType: f.ownershipType,
+      validUntil: f.validUntil,
+      cardSerial: f.cardSerial,
+      vehicleType: f.vehicleType,
+      engineNumber: f.engineNumber,
+      bodyNumber: f.bodyNumber,
+      chassisNumber: f.chassisNumber,
+      color: f.color,
+      maxMass: f.maxMass,
+      unloadedMass: f.unloadedMass,
+      seatCount: f.seatCount,
+      engineCapacity: f.engineCapacity,
+      issuedBy: f.issuedBy,
+      specialMarks: f.specialMarks,
+      aiExtracted: ai.raw,
+      aiVerifiedAt: ai.ok ? new Date() : null,
+    });
+  }
+  return base;
+}
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -80,7 +140,7 @@ router.post('/register/phone', registerLimiter, async (req: Request, res: Respon
 });
 
 // Complete profile after phone verification (auth required). Sets type + type-specific data.
-router.post('/register/complete', adminAuth, upload.array('passportImages', 5), async (req: AuthRequest, res: Response) => {
+router.post('/register/complete', adminAuth, passportPairUpload, async (req: AuthRequest, res: Response) => {
   try {
     const { name, type, vehicles: vehiclesJson, workplaces: workplacesJson } = req.body;
 
@@ -101,14 +161,13 @@ router.post('/register/complete', adminAuth, upload.array('passportImages', 5), 
       if (!Array.isArray(vehicles) || vehicles.length === 0) {
         res.status(400).json({ success: false, message: 'Ən azı bir avtomobil əlavə edin' }); return;
       }
-      const files = (req.files as Express.Multer.File[]) || [];
+      const fronts = getFiles(req.files, 'passportImagesFront');
+      const backs = getFiles(req.files, 'passportImagesBack');
       await prisma.vehicle.deleteMany({ where: { userId } });
-      updateData.vehicles = {
-        create: vehicles.map((v: any, i: number) => ({
-          brand: v.brand, model: v.model, year: parseInt(v.year),
-          passportImage: files[i]?.filename || '',
-        })),
-      };
+      const rows = await Promise.all(
+        vehicles.map((v: any, i: number) => buildVehicleCreateRow(v, fronts[i], backs[i])),
+      );
+      updateData.vehicles = { create: rows };
     } else {
       const { data: workplaces, error: jsonErr } = safeJsonParse(workplacesJson || '[]');
       if (jsonErr) { res.status(400).json({ success: false, message: jsonErr }); return; }
@@ -137,6 +196,99 @@ router.post('/register/complete', adminAuth, upload.array('passportImages', 5), 
   }
 });
 
+// JSON variant — UI öncədən hər avtomobil üçün /me/vehicles/extract çağırıb
+// fayl adları və AI sahələrini alır, kullanıcı redaktə edir, sonra burada
+// yekun JSON-u göndərir. Multipart variant geriyə uyğunluq üçün saxlanılır.
+router.post('/register/complete-json', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const { name, type, vehicles, workplaces } = req.body as {
+      name: string;
+      type: 'CAR_OWNER' | 'MECHANIC' | 'PARTS_SELLER';
+      vehicles?: any[];
+      workplaces?: any[];
+    };
+
+    const nameErr = validateName(name);
+    if (nameErr) { res.status(400).json({ success: false, message: nameErr }); return; }
+    if (!type || !['CAR_OWNER', 'MECHANIC', 'PARTS_SELLER'].includes(type)) {
+      res.status(400).json({ success: false, message: 'Düzgün istifadəçi tipi seçin' });
+      return;
+    }
+
+    const userId = req.adminId!;
+    const updateData: any = { name: name.trim(), type, profileComplete: true };
+
+    if (type === 'CAR_OWNER') {
+      if (!Array.isArray(vehicles) || vehicles.length === 0) {
+        res.status(400).json({ success: false, message: 'Ən azı bir avtomobil əlavə edin' }); return;
+      }
+      for (let i = 0; i < vehicles.length; i++) {
+        const v = vehicles[i];
+        if (!v.passportImageFront || !v.passportImageBack) {
+          res.status(400).json({
+            success: false,
+            message: `Avtomobil #${i + 1}: pasportun ön və arxa şəkillərini yükləyin`,
+          });
+          return;
+        }
+      }
+      await prisma.vehicle.deleteMany({ where: { userId } });
+      const numericFields = new Set(['manufactureYear', 'seatCount']);
+      const passportKeys = [
+        'registrationNumber', 'registrationDate', 'manufactureYear',
+        'ownerName', 'ownerAddress', 'ownershipType', 'validUntil', 'cardSerial',
+        'vehicleType', 'engineNumber', 'bodyNumber', 'chassisNumber', 'color',
+        'maxMass', 'unloadedMass', 'seatCount', 'engineCapacity', 'issuedBy', 'specialMarks',
+      ];
+      const rows = vehicles.map((v: any) => {
+        const row: Record<string, any> = {
+          brand: String(v.brand || ''),
+          model: String(v.model || ''),
+          year: parseInt(String(v.year), 10),
+          passportImage: String(v.passportImageFront),
+          passportImageFront: String(v.passportImageFront),
+          passportImageBack: String(v.passportImageBack),
+          aiExtracted: v.aiRaw ?? null,
+          aiVerifiedAt: v.aiVerified ? new Date() : null,
+        };
+        for (const k of passportKeys) {
+          const val = v[k];
+          if (val === undefined || val === null || val === '') { row[k] = null; continue; }
+          if (numericFields.has(k)) {
+            const n = typeof val === 'number' ? val : parseInt(String(val).replace(/[^0-9]/g, ''), 10);
+            row[k] = Number.isFinite(n) ? n : null;
+          } else {
+            row[k] = String(val).trim() || null;
+          }
+        }
+        return row;
+      });
+      updateData.vehicles = { create: rows as any };
+    } else {
+      if (!Array.isArray(workplaces) || workplaces.length === 0) {
+        res.status(400).json({ success: false, message: 'Ən azı bir iş yeri əlavə edin' }); return;
+      }
+      await prisma.workplace.deleteMany({ where: { userId } });
+      updateData.workplaces = {
+        create: workplaces.map((w: any) => ({
+          name: w.name, address: w.address,
+          latitude: w.latitude ? parseFloat(w.latitude) : null,
+          longitude: w.longitude ? parseFloat(w.longitude) : null,
+        })),
+      };
+    }
+
+    const user = await prisma.user.update({
+      where: { id: userId },
+      data: updateData,
+      select: { id: true, name: true, phone: true, email: true, type: true, role: true, verified: true, profileComplete: true, sellerVerified: true },
+    });
+    res.json({ success: true, user });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
 // Resend verification code for a given phone (used on OTP screen)
 router.post('/verify/resend', verifyLimiter, async (req: Request, res: Response) => {
   try {
@@ -155,7 +307,7 @@ router.post('/verify/resend', verifyLimiter, async (req: Request, res: Response)
 });
 
 // Register Car Owner (legacy - kept for backwards compatibility)
-router.post('/register/car-owner', registerLimiter, upload.array('passportImages', 5), async (req: Request, res: Response) => {
+router.post('/register/car-owner', registerLimiter, passportPairUpload, async (req: Request, res: Response) => {
   try {
     const { name, phone, vehicles: vehiclesJson } = req.body;
 
@@ -170,21 +322,18 @@ router.post('/register/car-owner', registerLimiter, upload.array('passportImages
       res.status(400).json({ success: false, message: 'Ən azı bir avtomobil əlavə edin' }); return;
     }
 
-    const files = req.files as Express.Multer.File[];
+    const fronts = getFiles(req.files, 'passportImagesFront');
+    const backs = getFiles(req.files, 'passportImagesBack');
+    const rows = await Promise.all(
+      vehicles.map((v: any, i: number) => buildVehicleCreateRow(v, fronts[i], backs[i])),
+    );
 
     const user = await prisma.user.create({
       data: {
         name,
         phone,
         type: UserType.CAR_OWNER,
-        vehicles: {
-          create: vehicles.map((v: any, i: number) => ({
-            brand: v.brand,
-            model: v.model,
-            year: parseInt(v.year),
-            passportImage: files[i]?.filename || '',
-          })),
-        },
+        vehicles: { create: rows as any },
       },
       include: { vehicles: true },
     });
