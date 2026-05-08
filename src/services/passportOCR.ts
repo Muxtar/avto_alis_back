@@ -329,9 +329,9 @@ export function parsePassportText(
   );
   if (ownerWithSuffix) fields.ownerName = squash(ownerWithSuffix[1]).toUpperCase();
 
-  // === C.2 — Ünvan ===
+  // === C.2 — Ünvan (Az/ASCII variantları, OCR ş↔s qarışıqlığı) ===
   const addr = frontText.match(
-    /((?:Bakı|Baki|Sumqayıt|Sumqayit|Gəncə|Gence|Mingəçevir|Mingacevir|Şirvan|Sirvan|Naxçıvan|Naxcivan|Şəki|Seki|Lənkəran|Lenkeran)\s*ş?əh?\.?[^\n]{5,120})/i,
+    /((?:Bakı|Baki|Sumqayıt|Sumqayit|Gəncə|Gence|Mingəçevir|Mingacevir|Şirvan|Sirvan|Naxçıvan|Naxcivan|Şəki|Seki|Lənkəran|Lenkeran)\s*[şs]?[əe]h\.?[^\n]{5,120})/i,
   );
   if (addr) fields.ownerAddress = squash(addr[1]);
 
