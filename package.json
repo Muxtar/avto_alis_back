@@ -22,6 +22,7 @@
     "openai": "^6.34.0",
     "prisma": "^6.5.0",
     "sharp": "^0.34.5",
+    "tesseract.js": "^7.0.0",
     "tsx": "^4.19.0"
   },
   "devDependencies": {

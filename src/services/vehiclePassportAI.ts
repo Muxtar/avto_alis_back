@@ -1,17 +1,18 @@
-// Azərbaycan texniki pasportu üçün müstəqil vision AI servisi.
+// Azərbaycan texniki pasportu üçün hibrid pasport oxuma servisi.
 //
-// Bu modul DeepSeek-dən asılı DEYİL. DeepSeek-in `deepseek-chat` modeli
-// şəkil qəbul etmir, ona görə də pasport oxunması üçün ayrıca
-// vision-capable model (OpenAI gpt-4o-mini) istifadə edirik.
-// `services/deepseek.ts` ilə heç bir paylaşılan client/state yoxdur —
-// ayrıca konfiqurasiya, ayrıca timeout, ayrıca açar.
+// İki mərhələli pipeline:
+//   1) LOCAL OCR (tesseract.js + regex parser) — pulsuz, internetsiz işləyir.
+//      Şəkil keyfiyyəti yaxşıdırsa kifayət qədər sahə oxuyur.
+//   2) AI fallback (OpenAI vision) — yalnız OCR yetəri qədər sahə oxumadıqda
+//      və OPENAI_API_KEY env-i təyin olunduqda işə düşür.
 //
-// Yalnız bir məqsədi var: ön və arxa şəkillərdən AZ texniki pasport
-// sahələrini çıxarıb strukturlaşdırılmış JSON qaytarmaq.
+// OPENAI_API_KEY yoxdursa, sistem TAM OFFLINE işləyir — yalnız Tesseract.
+// DeepSeek-dən tamamilə müstəqildir.
 
 import OpenAI from 'openai';
 import fs from 'fs';
 import path from 'path';
+import { extractWithOCR, OCRFields } from './passportOCR';
 
 export interface VehiclePassportFields {
   // Ön hissə
@@ -110,7 +111,7 @@ QAYDALAR:
 
 const apiKey = process.env.OPENAI_API_KEY;
 if (!apiKey) {
-  console.warn('[vehiclePassportAI] OPENAI_API_KEY təyin edilməyib — pasport AI oxunması işləməyəcək.');
+  console.log('[vehiclePassportAI] OPENAI_API_KEY yoxdur — yalnız local Tesseract OCR işləyəcək (offline rejim).');
 }
 
 const client = apiKey
@@ -168,10 +169,48 @@ function coerce(raw: unknown): VehiclePassportFields {
   return f;
 }
 
-export async function extractPassportFromFiles(
+function ocrFieldsToVehicleFields(ocr: OCRFields): VehiclePassportFields {
+  return {
+    registrationNumber: ocr.registrationNumber ?? null,
+    registrationDate: ocr.registrationDate ?? null,
+    manufactureYear: ocr.manufactureYear ?? null,
+    ownerName: ocr.ownerName ?? null,
+    ownerAddress: ocr.ownerAddress ?? null,
+    ownershipType: ocr.ownershipType ?? null,
+    validUntil: ocr.validUntil ?? null,
+    cardSerial: ocr.cardSerial ?? null,
+    brand: ocr.brand ?? null,
+    model: ocr.model ?? null,
+    vehicleType: ocr.vehicleType ?? null,
+    engineNumber: ocr.engineNumber ?? null,
+    bodyNumber: ocr.bodyNumber ?? null,
+    chassisNumber: ocr.chassisNumber ?? null,
+    color: ocr.color ?? null,
+    maxMass: ocr.maxMass ?? null,
+    unloadedMass: ocr.unloadedMass ?? null,
+    seatCount: ocr.seatCount ?? null,
+    engineCapacity: ocr.engineCapacity ?? null,
+    issuedBy: ocr.issuedBy ?? null,
+    specialMarks: ocr.specialMarks ?? null,
+  };
+}
+
+// AI nəticəsi ilə OCR nəticəsini birləşdir: AI-da boş olan sahələri OCR-dakı
+// dəyərlərlə doldur (AI prioritetlidir, çünki vision modeli kontekst başa düşür).
+function mergeFields(primary: VehiclePassportFields, secondary: VehiclePassportFields): VehiclePassportFields {
+  const out: VehiclePassportFields = { ...primary };
+  for (const k of Object.keys(out) as (keyof VehiclePassportFields)[]) {
+    if (out[k] === null || out[k] === undefined || out[k] === '') {
+      (out as any)[k] = secondary[k];
+    }
+  }
+  return out;
+}
+
+async function callOpenAIVision(
   frontPath: string,
   backPath: string,
-): Promise<PassportExtractionResult> {
+): Promise<{ ok: boolean; fields: VehiclePassportFields; raw: unknown; error?: string }> {
   if (!client) {
     return {
       ok: false,
@@ -180,7 +219,6 @@ export async function extractPassportFromFiles(
       error: 'OPENAI_API_KEY təyin edilməyib',
     };
   }
-
   let frontUrl: string;
   let backUrl: string;
   try {
@@ -194,7 +232,6 @@ export async function extractPassportFromFiles(
       error: `Şəkil oxuna bilmədi: ${err?.message || 'naməlum xəta'}`,
     };
   }
-
   try {
     const response = await client.chat.completions.create({
       model: MODEL,
@@ -215,28 +252,67 @@ export async function extractPassportFromFiles(
       max_tokens: 800,
       response_format: { type: 'json_object' },
     });
-
     const content = response.choices[0]?.message?.content || '{}';
     const cleaned = content.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
     let parsed: unknown;
     try {
       parsed = JSON.parse(cleaned);
     } catch {
-      return {
-        ok: false,
-        fields: { ...EMPTY_FIELDS },
-        raw: content,
-        error: 'AI cavabı JSON kimi parse edilə bilmədi',
-      };
+      return { ok: false, fields: { ...EMPTY_FIELDS }, raw: content, error: 'AI cavabı JSON kimi parse edilə bilmədi' };
     }
     return { ok: true, fields: coerce(parsed), raw: parsed };
   } catch (err: any) {
     console.error('[vehiclePassportAI] OpenAI çağırışı uğursuz oldu:', err?.message);
+    return { ok: false, fields: { ...EMPTY_FIELDS }, raw: null, error: 'AI servisi cavab vermədi' };
+  }
+}
+
+export async function extractPassportFromFiles(
+  frontPath: string,
+  backPath: string,
+): Promise<PassportExtractionResult> {
+  // STEP 1: Local OCR (tesseract.js)
+  const ocr = await extractWithOCR(frontPath, backPath);
+  const ocrFields = ocrFieldsToVehicleFields(ocr.fields);
+
+  // OCR yetəri qədər oxudusa, AI çağırmadan qaytar (pulsuz yol)
+  if (ocr.ok) {
     return {
-      ok: false,
-      fields: { ...EMPTY_FIELDS },
-      raw: null,
-      error: 'AI servisi cavab vermədi',
+      ok: true,
+      fields: ocrFields,
+      raw: { source: 'tesseract', filledCount: ocr.filledCount, fields: ocr.fields, text: ocr.rawText },
     };
   }
+
+  // STEP 2: OCR zəif oxudu — OpenAI vision-a fallback
+  if (!client) {
+    // AI yoxdursa, OCR nəticəsini olduğu kimi qaytar (kullanıcı sahələri əllə doldura bilər)
+    return {
+      ok: ocr.filledCount > 0,
+      fields: ocrFields,
+      raw: { source: 'tesseract', filledCount: ocr.filledCount, fields: ocr.fields, text: ocr.rawText },
+      error:
+        ocr.filledCount > 0
+          ? 'OCR az sahə oxudu. Sahələri əllə yoxlayıb düzəldin və ya daha aydın şəkil yükləyin.'
+          : 'OCR şəkilləri oxuya bilmədi. Daha aydın şəkil yükləyin və ya sahələri əllə doldurun.',
+    };
+  }
+
+  const ai = await callOpenAIVision(frontPath, backPath);
+  if (!ai.ok) {
+    // AI də uğursuz oldu — OCR qismi nəticəsini istifadə et
+    return {
+      ok: ocr.filledCount > 0,
+      fields: ocrFields,
+      raw: { source: 'tesseract+ai-failed', ocr: ocr.fields, aiError: ai.error, text: ocr.rawText },
+      error: ai.error,
+    };
+  }
+  // AI uğurla bitdi — AI nəticəsini OCR ilə tamamla (AI bəzən bir sahəni atlaya bilər,
+  // OCR onu tutmuşsa, doldur).
+  return {
+    ok: true,
+    fields: mergeFields(ai.fields, ocrFields),
+    raw: { source: 'openai+tesseract', ai: ai.raw, ocr: ocr.fields },
+  };
 }
