@@ -25,20 +25,21 @@ function getWorker(): Promise<Worker> {
 
 // Şəkli OCR-a uyğunlaşdırmaq: çox böyük şəkilləri kiçilt, kontrastı artır,
 // boz tonlara çevir. Tesseract kontrast yüksək olan boz şəkillərdə daha
-// dəqiq oxuyur.
-async function preprocess(imagePath: string): Promise<Buffer> {
+// dəqiq oxuyur. Opsional `rotateDeg` ilə şəkli 0/90/180/270 dərəcə fırlatmaq
+// olar — pasport şəkilləri yan-tərs çəkilirsə kömək edir.
+async function preprocess(imagePath: string, rotateDeg = 0): Promise<Buffer> {
   return sharp(imagePath, { limitInputPixels: 50_000_000 })
-    .rotate() // EXIF rotation
+    .rotate(rotateDeg) // İlk parametr verilərsə EXIF deyil, açıq fırlatma
     .resize({ width: 1600, height: 1600, fit: 'inside', withoutEnlargement: true })
     .grayscale()
-    .normalise() // kontrast genişləndirməsi
+    .normalise()
     .sharpen()
     .toFormat('png')
     .toBuffer();
 }
 
-async function ocrSingle(imagePath: string): Promise<string> {
-  const buffer = await preprocess(imagePath);
+async function ocrSingle(imagePath: string, rotateDeg = 0): Promise<string> {
+  const buffer = await preprocess(imagePath, rotateDeg);
   const worker = await getWorker();
   const { data } = await worker.recognize(buffer);
   return data.text || '';
@@ -211,25 +212,86 @@ export interface OCRResult {
 
 const TOTAL_FIELDS = 21;
 
-export async function extractWithOCR(frontPath: string, backPath: string): Promise<OCRResult> {
+function scoreFields(fields: OCRFields): number {
+  // Sahə doluluğu + kritik sahələrin (VIN, marka, il) bonusu.
+  // Doğru istiqamətli şəkil səhv istiqamətdən daha yüksək bal alır.
+  let score = 0;
+  for (const v of Object.values(fields)) {
+    if (v !== undefined && v !== null && v !== '') score += 1;
+  }
+  if (fields.bodyNumber) score += 3;        // VIN 17-simvol — düz oxunması çətindir
+  if (fields.brand) score += 2;
+  if (fields.manufactureYear) score += 1;
+  if (fields.registrationNumber) score += 1;
+  return score;
+}
+
+async function ocrAllRotations(imagePath: string, tryAll: boolean): Promise<{ text: string; rot: number }> {
+  if (!tryAll) {
+    return { text: await ocrSingle(imagePath, 0), rot: 0 };
+  }
+  // Bütün 4 istiqaməti ardıcıl sına (paralel istəsək worker tək olduğu üçün
+  // serializasiya olur; ardıcıl daha proqnozlaşdırılandır).
+  const results: Array<{ text: string; rot: number }> = [];
+  for (const rot of [0, 90, 180, 270]) {
+    try {
+      const text = await ocrSingle(imagePath, rot);
+      results.push({ text, rot });
+    } catch (err: any) {
+      console.error(`[passportOCR] rotation ${rot}° failed:`, err?.message);
+    }
+  }
+  if (results.length === 0) return { text: '', rot: 0 };
+  // Mətndə pasport etiketi tezliyi ilə ən doğru istiqaməti seç.
+  // Az dilində bu sözlər yan/tərs istiqamətdə paralanır, ona görə düz mətndə
+  // çox sayda görünür.
+  const keywords = /\b(qeydiyyat|nişan|tarix|istehsal|m[üu]lkiyy?ət|sahib|fiziki|h[üu]quqi|m[üu]hərr?ik|şassi|rəng|kütlə|mod[ae]l|min[iı]k|universal|bakı|baki)\b/gi;
+  let best = results[0];
+  let bestScore = (results[0].text.match(keywords) || []).length;
+  for (const r of results.slice(1)) {
+    const sc = (r.text.match(keywords) || []).length;
+    if (sc > bestScore) { best = r; bestScore = sc; }
+  }
+  return best;
+}
+
+export async function extractWithOCR(
+  frontPath: string,
+  backPath: string,
+  options: { tryAllRotations?: boolean } = {},
+): Promise<OCRResult> {
+  const tryAll = options.tryAllRotations ?? false;
   let frontText = '';
   let backText = '';
+  let frontRot = 0;
+  let backRot = 0;
   try {
-    [frontText, backText] = await Promise.all([ocrSingle(frontPath), ocrSingle(backPath)]);
+    const [front, back] = await Promise.all([
+      ocrAllRotations(frontPath, tryAll),
+      ocrAllRotations(backPath, tryAll),
+    ]);
+    frontText = front.text; frontRot = front.rot;
+    backText = back.text; backRot = back.rot;
   } catch (err: any) {
     console.error('[passportOCR] tesseract failed:', err?.message);
     return { ok: false, fields: {}, filledCount: 0, rawText: '' };
   }
-  const fields = parsePassportText(frontText, backText);
+  let fields = parsePassportText(frontText, backText);
+
+  // 1-ci pass çox az sahə tutdusa və hələ rotation cəhdi etməmişiksə,
+  // 4 istiqaməti də yoxla.
+  if (!tryAll && scoreFields(fields) < 4) {
+    return extractWithOCR(frontPath, backPath, { tryAllRotations: true });
+  }
+
   const filledCount = Object.values(fields).filter((v) => v !== undefined && v !== null && v !== '').length;
-  // Yetəri qədər oxunma sayı: ən az 6 sahə (kritik VIN, marka, il, ünvan, ad daxil olmaqla)
   const hasCritical = !!(fields.bodyNumber && fields.brand && fields.manufactureYear);
   const ok = filledCount >= 6 && hasCritical;
   return {
     ok,
     fields,
     filledCount,
-    rawText: `--- FRONT ---\n${frontText}\n--- BACK ---\n${backText}`,
+    rawText: `--- FRONT (rotated ${frontRot}°) ---\n${frontText}\n--- BACK (rotated ${backRot}°) ---\n${backText}`,
   };
 }
 
