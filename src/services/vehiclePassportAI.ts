@@ -1,17 +1,14 @@
-// Azərbaycan texniki pasportu üçün hibrid pasport oxuma servisi.
+// Azərbaycan texniki pasportu üçün TAM LOCAL pasport oxuma servisi.
 //
-// İki mərhələli pipeline:
-//   1) LOCAL OCR (tesseract.js + regex parser) — pulsuz, internetsiz işləyir.
-//      Şəkil keyfiyyəti yaxşıdırsa kifayət qədər sahə oxuyur.
-//   2) AI fallback (OpenAI vision) — yalnız OCR yetəri qədər sahə oxumadıqda
-//      və OPENAI_API_KEY env-i təyin olunduqda işə düşür.
+// Heç bir xarici API (OpenAI, DeepSeek, Anthropic, Google) istifadə edilmir.
+// Bütün iş `tesseract.js` (Wasm OCR engine) və `sharp` (şəkil emalı)
+// kitabxanaları ilə kullanıcının kompüterində/serverdə icra olunur.
 //
-// OPENAI_API_KEY yoxdursa, sistem TAM OFFLINE işləyir — yalnız Tesseract.
-// DeepSeek-dən tamamilə müstəqildir.
+// Strategiya: hər şəkili 4 fərqli ön emal variantında oxuyub bütün mətnləri
+// birləşdiririk, sonra parser hər sahə üçün ən yaxşı namizədi seçir. Multi-pass
+// yanaşması tək bir pass-də zəif çıxan VIN, mühərrik nömrəsi kimi çətin sahələri
+// tutmağa kömək edir.
 
-import OpenAI from 'openai';
-import fs from 'fs';
-import path from 'path';
 import { extractWithOCR, OCRFields } from './passportOCR';
 
 export interface VehiclePassportFields {
@@ -44,7 +41,7 @@ export interface VehiclePassportFields {
 export interface PassportExtractionResult {
   ok: boolean;
   fields: VehiclePassportFields;
-  raw: unknown; // model-in qaytardığı xam json (audit üçün)
+  raw: unknown;
   error?: string;
 }
 
@@ -72,111 +69,6 @@ const EMPTY_FIELDS: VehiclePassportFields = {
   specialMarks: null,
 };
 
-const PASSPORT_PROMPT = `Sən Azərbaycan Respublikasının "NƏQLİYYAT VASİTƏSİNİN QEYDİYYAT ŞƏHADƏTNAMƏSİ" (texniki pasport) kartını oxuyan dəqiq bir OCR mütəxəssisisən.
-
-İki şəkil verilir: birincisi pasportun ÖN hissəsi, ikincisi ARXA hissəsi.
-
-KART STRUKTURU:
-- ÖN hissədə: A (qeydiyyat nişanı), B.1 (qeydiyyat tarixi), B.2 (istehsal ili), C.1 (mülkiyyətçi adı), C.2 (ünvan), C.3 (mülkiyyət növü), H (etibarlıdır), kart altında BB ilə başlayan seriya.
-- ARXA hissədə: D (marka — BMW, Toyota, Mercedes, Hyundai və s.), D.2 (model), D.3 (tip — MİNİK/UNIVERSAL), E.1 (mühərrik nömrəsi — 6-15 simvol), E.2 (ban/VIN nömrəsi — DƏQİQ 17 simvol, I/O/Q istifadə olunmur), E.3 (şassi nömrəsi), E.4 (rəng — Ag/Qa/Bz kimi qısa kod və ya tam söz), F.1 (maks kütlə kg), F.2 (yüksüz kütlə kg), F.3 (oturacaq sayı — 1-9 arası rəqəm), G (mühərrik həcmi sm³), Verilib (orqan adı).
-
-KRITİK SAHƏLƏRƏ DİQQƏT:
-1. E.2 BAN/VIN — 17 simvolluq alfanumerik kod, holoqram üzərində ola bilər. Diqqətlə oxu, hərf rəqəm qarışıqlığını (0/O, 1/I) düz tut. Tam 17 simvol olmalıdır.
-2. D MARKA — açıq Latın hərfli ad: BMW, TOYOTA, MERCEDES-BENZ, HYUNDAI, KIA, FORD, LEXUS, AUDI, NISSAN, VOLKSWAGEN və s.
-3. D.2 MODEL — markadan sonra gələn alfanumerik kod (məs: "X7 XDRIVE 40i", "RAV4", "E60", "W211 320CDI").
-4. F.3 OTURACAQ SAYI — kiçik rəqəm (4, 5, 7, 8). 4-rəqəmli kütlə dəyərlərini (F.1/F.2) F.3-ə qoyma.
-
-Cavab sxemi:
-{
-  "registrationNumber": "A — qeydiyyat nişanı, məs: 77NP518",
-  "registrationDate": "B.1 — qeydiyyat tarixi (DD.MM.YYYY)",
-  "manufactureYear": 2019,
-  "ownerName": "C.1 — mülkiyyətçinin tam adı",
-  "ownerAddress": "C.2 — sahibinin ünvanı (kart üzərində yazıldığı kimi)",
-  "ownershipType": "C.3 — Fiziki şəxs / Hüquqi şəxs",
-  "validUntil": "H — etibarlıdır (boş ola bilər)",
-  "cardSerial": "kart üzərindəki seriya nömrəsi, məs: BB667834",
-  "brand": "D — marka, məs: BMW",
-  "model": "D.2 — model, məs: X7 XDRIVE 40i",
-  "vehicleType": "D.3 — tip, məs: MİNİK, UNIVERSAL",
-  "engineNumber": "E.1 — mühərrik nömrəsi",
-  "bodyNumber": "E.2 — ban / VIN nömrəsi (17 simvol)",
-  "chassisNumber": "E.3 — şassi nömrəsi",
-  "color": "E.4 — rəngi (məs: Ag, Qara)",
-  "maxMass": "F.1 — maksimal kütlə (kg)",
-  "unloadedMass": "F.2 — yüksüz kütlə (kg)",
-  "seatCount": 5,
-  "engineCapacity": "G — mühərrikin həcmi (sm³)",
-  "issuedBy": "Verilib — orqan",
-  "specialMarks": "Xüsusi qeydlər"
-}
-
-QAYDALAR:
-- Hər hansı sahəni dəqiq oxuya bilmirsənsə, dəyəri null qoy (boş sətir DEYİL). NƏ TƏXMİN ET, NƏ BİLDİYİN AVTOMOBİL MARKALARINDAN SEÇ. Yalnız şəkildə açıq görünən mətni qaytar.
-- "manufactureYear" və "seatCount" rəqəm (int) olmalıdır, yoxdursa null.
-- Mətni kart üzərindəki orijinal yazılışla saxla (MAJUSKUL/minuskül və "Ə, Ş, Ç, Ö, Ü, Ğ, İ" hərfləri olduğu kimi).
-- Cavabı YALNIZ JSON kimi qaytar. Markdown code block (\`\`\`) İŞLƏTMƏ.`;
-
-const apiKey = process.env.OPENAI_API_KEY;
-if (!apiKey) {
-  console.log('[vehiclePassportAI] OPENAI_API_KEY yoxdur — yalnız local Tesseract OCR işləyəcək (offline rejim).');
-}
-
-const client = apiKey
-  ? new OpenAI({ apiKey, timeout: 30000, maxRetries: 1 })
-  : null;
-
-const MODEL = process.env.PASSPORT_VISION_MODEL || 'gpt-4o-mini';
-
-function fileToDataUrl(filePath: string): string {
-  const buf = fs.readFileSync(filePath);
-  const ext = path.extname(filePath).toLowerCase().replace('.', '') || 'jpeg';
-  const mime = ext === 'jpg' ? 'jpeg' : ext;
-  return `data:image/${mime};base64,${buf.toString('base64')}`;
-}
-
-function coerce(raw: unknown): VehiclePassportFields {
-  const f: VehiclePassportFields = { ...EMPTY_FIELDS };
-  if (!raw || typeof raw !== 'object') return f;
-  const r = raw as Record<string, unknown>;
-
-  const str = (k: keyof VehiclePassportFields) => {
-    const v = r[k];
-    if (v === null || v === undefined) return null;
-    const s = String(v).trim();
-    return s.length === 0 ? null : s;
-  };
-  const num = (k: keyof VehiclePassportFields) => {
-    const v = r[k];
-    if (v === null || v === undefined || v === '') return null;
-    const n = typeof v === 'number' ? v : parseInt(String(v).replace(/[^0-9]/g, ''), 10);
-    return Number.isFinite(n) ? n : null;
-  };
-
-  f.registrationNumber = str('registrationNumber');
-  f.registrationDate = str('registrationDate');
-  f.manufactureYear = num('manufactureYear');
-  f.ownerName = str('ownerName');
-  f.ownerAddress = str('ownerAddress');
-  f.ownershipType = str('ownershipType');
-  f.validUntil = str('validUntil');
-  f.cardSerial = str('cardSerial');
-  f.brand = str('brand');
-  f.model = str('model');
-  f.vehicleType = str('vehicleType');
-  f.engineNumber = str('engineNumber');
-  f.bodyNumber = str('bodyNumber');
-  f.chassisNumber = str('chassisNumber');
-  f.color = str('color');
-  f.maxMass = str('maxMass');
-  f.unloadedMass = str('unloadedMass');
-  f.seatCount = num('seatCount');
-  f.engineCapacity = str('engineCapacity');
-  f.issuedBy = str('issuedBy');
-  f.specialMarks = str('specialMarks');
-  return f;
-}
-
 function ocrFieldsToVehicleFields(ocr: OCRFields): VehiclePassportFields {
   return {
     registrationNumber: ocr.registrationNumber ?? null,
@@ -203,124 +95,28 @@ function ocrFieldsToVehicleFields(ocr: OCRFields): VehiclePassportFields {
   };
 }
 
-// AI nəticəsi ilə OCR nəticəsini birləşdir: AI-da boş olan sahələri OCR-dakı
-// dəyərlərlə doldur (AI prioritetlidir, çünki vision modeli kontekst başa düşür).
-function mergeFields(primary: VehiclePassportFields, secondary: VehiclePassportFields): VehiclePassportFields {
-  const out: VehiclePassportFields = { ...primary };
-  for (const k of Object.keys(out) as (keyof VehiclePassportFields)[]) {
-    if (out[k] === null || out[k] === undefined || out[k] === '') {
-      (out as any)[k] = secondary[k];
-    }
-  }
-  return out;
-}
-
-async function callOpenAIVision(
-  frontPath: string,
-  backPath: string,
-): Promise<{ ok: boolean; fields: VehiclePassportFields; raw: unknown; error?: string }> {
-  if (!client) {
-    return {
-      ok: false,
-      fields: { ...EMPTY_FIELDS },
-      raw: null,
-      error: 'OPENAI_API_KEY təyin edilməyib',
-    };
-  }
-  let frontUrl: string;
-  let backUrl: string;
-  try {
-    frontUrl = fileToDataUrl(frontPath);
-    backUrl = fileToDataUrl(backPath);
-  } catch (err: any) {
-    return {
-      ok: false,
-      fields: { ...EMPTY_FIELDS },
-      raw: null,
-      error: `Şəkil oxuna bilmədi: ${err?.message || 'naməlum xəta'}`,
-    };
-  }
-  try {
-    const response = await client.chat.completions.create({
-      model: MODEL,
-      messages: [
-        { role: 'system', content: PASSPORT_PROMPT },
-        {
-          role: 'user',
-          content: [
-            { type: 'text', text: 'Birinci şəkil — pasportun ÖN hissəsi.' },
-            { type: 'image_url', image_url: { url: frontUrl } },
-            { type: 'text', text: 'İkinci şəkil — pasportun ARXA hissəsi.' },
-            { type: 'image_url', image_url: { url: backUrl } },
-            { type: 'text', text: 'İkisini birləşdirib təlimatdakı sxemə uyğun JSON qaytar.' },
-          ],
-        },
-      ],
-      temperature: 0,
-      max_tokens: 800,
-      response_format: { type: 'json_object' },
-    });
-    const content = response.choices[0]?.message?.content || '{}';
-    const cleaned = content.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(cleaned);
-    } catch {
-      return { ok: false, fields: { ...EMPTY_FIELDS }, raw: content, error: 'AI cavabı JSON kimi parse edilə bilmədi' };
-    }
-    return { ok: true, fields: coerce(parsed), raw: parsed };
-  } catch (err: any) {
-    console.error('[vehiclePassportAI] OpenAI çağırışı uğursuz oldu:', err?.message);
-    return { ok: false, fields: { ...EMPTY_FIELDS }, raw: null, error: 'AI servisi cavab vermədi' };
-  }
-}
-
 export async function extractPassportFromFiles(
   frontPath: string,
   backPath: string,
 ): Promise<PassportExtractionResult> {
-  // STEP 1: Local OCR (tesseract.js)
   const ocr = await extractWithOCR(frontPath, backPath);
-  const ocrFields = ocrFieldsToVehicleFields(ocr.fields);
+  const fields = ocrFieldsToVehicleFields(ocr.fields);
 
-  // OCR yetəri qədər oxudusa, AI çağırmadan qaytar (pulsuz yol)
-  if (ocr.ok) {
+  if (ocr.filledCount === 0) {
     return {
-      ok: true,
-      fields: ocrFields,
-      raw: { source: 'tesseract', filledCount: ocr.filledCount, fields: ocr.fields, text: ocr.rawText },
+      ok: false,
+      fields: { ...EMPTY_FIELDS },
+      raw: { source: 'tesseract', text: ocr.rawText },
+      error: 'OCR şəkilləri oxuya bilmədi. Şəkilləri düz tutub yenidən cəhd edin və ya sahələri əllə doldurun.',
     };
   }
 
-  // STEP 2: OCR zəif oxudu — OpenAI vision-a fallback
-  if (!client) {
-    // AI yoxdursa, OCR nəticəsini olduğu kimi qaytar (kullanıcı sahələri əllə doldura bilər)
-    return {
-      ok: ocr.filledCount > 0,
-      fields: ocrFields,
-      raw: { source: 'tesseract', filledCount: ocr.filledCount, fields: ocr.fields, text: ocr.rawText },
-      error:
-        ocr.filledCount > 0
-          ? 'OCR az sahə oxudu. Sahələri əllə yoxlayıb düzəldin və ya daha aydın şəkil yükləyin.'
-          : 'OCR şəkilləri oxuya bilmədi. Daha aydın şəkil yükləyin və ya sahələri əllə doldurun.',
-    };
-  }
-
-  const ai = await callOpenAIVision(frontPath, backPath);
-  if (!ai.ok) {
-    // AI də uğursuz oldu — OCR qismi nəticəsini istifadə et
-    return {
-      ok: ocr.filledCount > 0,
-      fields: ocrFields,
-      raw: { source: 'tesseract+ai-failed', ocr: ocr.fields, aiError: ai.error, text: ocr.rawText },
-      error: ai.error,
-    };
-  }
-  // AI uğurla bitdi — AI nəticəsini OCR ilə tamamla (AI bəzən bir sahəni atlaya bilər,
-  // OCR onu tutmuşsa, doldur).
   return {
-    ok: true,
-    fields: mergeFields(ai.fields, ocrFields),
-    raw: { source: 'openai+tesseract', ai: ai.raw, ocr: ocr.fields },
+    ok: ocr.ok,
+    fields,
+    raw: { source: 'tesseract', filledCount: ocr.filledCount, fields: ocr.fields, text: ocr.rawText },
+    error: ocr.ok
+      ? undefined
+      : 'Bəzi sahələr oxunmadı. Sahələri yoxlayın və lazım olanları əllə düzəldin.',
   };
 }
