@@ -25,11 +25,11 @@ function getWorker(): Promise<Worker> {
 
 // Şəkli OCR-a uyğunlaşdırmaq: çox böyük şəkilləri kiçilt, kontrastı artır,
 // boz tonlara çevir. Tesseract kontrast yüksək olan boz şəkillərdə daha
-// dəqiq oxuyur. Opsional `rotateDeg` ilə şəkli 0/90/180/270 dərəcə fırlatmaq
-// olar — pasport şəkilləri yan-tərs çəkilirsə kömək edir.
-async function preprocess(imagePath: string, rotateDeg = 0): Promise<Buffer> {
+// dəqiq oxuyur. Şəkilin istiqaməti kullanıcının frontend-də ox düymələri ilə
+// düzəltdiyi vaxt artıq düz olur — burada heç bir fırlatma etmirik.
+async function preprocess(imagePath: string): Promise<Buffer> {
   return sharp(imagePath, { limitInputPixels: 50_000_000 })
-    .rotate(rotateDeg) // İlk parametr verilərsə EXIF deyil, açıq fırlatma
+    .rotate() // EXIF orientation-i tətbiq et (telefonun çəkdiyi şəkil üçün)
     .resize({ width: 1600, height: 1600, fit: 'inside', withoutEnlargement: true })
     .grayscale()
     .normalise()
@@ -38,8 +38,8 @@ async function preprocess(imagePath: string, rotateDeg = 0): Promise<Buffer> {
     .toBuffer();
 }
 
-async function ocrSingle(imagePath: string, rotateDeg = 0): Promise<string> {
-  const buffer = await preprocess(imagePath, rotateDeg);
+async function ocrSingle(imagePath: string): Promise<string> {
+  const buffer = await preprocess(imagePath);
   const worker = await getWorker();
   const { data } = await worker.recognize(buffer);
   return data.text || '';
@@ -117,10 +117,17 @@ export function parsePassportText(frontText: string, backText: string): OCRField
   const cap = backText.match(/\b((?:[89]\d{2}|[1-6]\d{3}))\b/);
   if (cap) fields.engineCapacity = cap[1];
 
-  // F.3 — oturacaqların sayı: 1-9 və ya 14, 16, 22 kimi rəqəmlər. "F.3" etiketinə
-  // yaxın yerdə kiçik rəqəm tap.
-  const seat = backText.match(/(?:F\.?\s*3|Oturaca\w*).{0,40}?\b([1-9]|1\d|2\d)\b/i);
-  if (seat) fields.seatCount = parseInt(seat[1], 10);
+  // F.3 — oturacaqların sayı: realistik avtomobillər üçün 1-9, mikroavtobus 10-29.
+  // "F.3" etiketinə yaxın yerdə tək kiçik rəqəm tap. "1040" kimi 4-rəqəmli kütlə
+  // dəyərlərinin yanlış tutulmaması üçün rəqəmin uzunluğunu 1-2 ilə məhdudlaşdırırıq
+  // və əvvəl/sonrasında digər rəqəm gəlməsin (boşluq və ya cümlə sonu olsun).
+  const seatMatch = backText.match(
+    /(?:F\.?\s*3|Oturaca\w*)[^\d\n]{0,40}?(?<![\d.])(\d{1,2})(?![\d.])/i,
+  );
+  if (seatMatch) {
+    const n = parseInt(seatMatch[1], 10);
+    if (n >= 1 && n <= 29) fields.seatCount = n;
+  }
 
   // D — marka: tanınmış brendlərdən birini tap. Tesseract bəzən "BMW"-i "BMil",
   // "Mercedes"-i "Mercodes" kimi oxuyur — fuzzy match (Levenshtein-vari) ilə
@@ -212,78 +219,16 @@ export interface OCRResult {
 
 const TOTAL_FIELDS = 21;
 
-function scoreFields(fields: OCRFields): number {
-  // Sahə doluluğu + kritik sahələrin (VIN, marka, il) bonusu.
-  // Doğru istiqamətli şəkil səhv istiqamətdən daha yüksək bal alır.
-  let score = 0;
-  for (const v of Object.values(fields)) {
-    if (v !== undefined && v !== null && v !== '') score += 1;
-  }
-  if (fields.bodyNumber) score += 3;        // VIN 17-simvol — düz oxunması çətindir
-  if (fields.brand) score += 2;
-  if (fields.manufactureYear) score += 1;
-  if (fields.registrationNumber) score += 1;
-  return score;
-}
-
-async function ocrAllRotations(imagePath: string, tryAll: boolean): Promise<{ text: string; rot: number }> {
-  if (!tryAll) {
-    return { text: await ocrSingle(imagePath, 0), rot: 0 };
-  }
-  // Bütün 4 istiqaməti ardıcıl sına (paralel istəsək worker tək olduğu üçün
-  // serializasiya olur; ardıcıl daha proqnozlaşdırılandır).
-  const results: Array<{ text: string; rot: number }> = [];
-  for (const rot of [0, 90, 180, 270]) {
-    try {
-      const text = await ocrSingle(imagePath, rot);
-      results.push({ text, rot });
-    } catch (err: any) {
-      console.error(`[passportOCR] rotation ${rot}° failed:`, err?.message);
-    }
-  }
-  if (results.length === 0) return { text: '', rot: 0 };
-  // Mətndə pasport etiketi tezliyi ilə ən doğru istiqaməti seç.
-  // Az dilində bu sözlər yan/tərs istiqamətdə paralanır, ona görə düz mətndə
-  // çox sayda görünür.
-  const keywords = /\b(qeydiyyat|nişan|tarix|istehsal|m[üu]lkiyy?ət|sahib|fiziki|h[üu]quqi|m[üu]hərr?ik|şassi|rəng|kütlə|mod[ae]l|min[iı]k|universal|bakı|baki)\b/gi;
-  let best = results[0];
-  let bestScore = (results[0].text.match(keywords) || []).length;
-  for (const r of results.slice(1)) {
-    const sc = (r.text.match(keywords) || []).length;
-    if (sc > bestScore) { best = r; bestScore = sc; }
-  }
-  return best;
-}
-
-export async function extractWithOCR(
-  frontPath: string,
-  backPath: string,
-  options: { tryAllRotations?: boolean } = {},
-): Promise<OCRResult> {
-  const tryAll = options.tryAllRotations ?? false;
+export async function extractWithOCR(frontPath: string, backPath: string): Promise<OCRResult> {
   let frontText = '';
   let backText = '';
-  let frontRot = 0;
-  let backRot = 0;
   try {
-    const [front, back] = await Promise.all([
-      ocrAllRotations(frontPath, tryAll),
-      ocrAllRotations(backPath, tryAll),
-    ]);
-    frontText = front.text; frontRot = front.rot;
-    backText = back.text; backRot = back.rot;
+    [frontText, backText] = await Promise.all([ocrSingle(frontPath), ocrSingle(backPath)]);
   } catch (err: any) {
     console.error('[passportOCR] tesseract failed:', err?.message);
     return { ok: false, fields: {}, filledCount: 0, rawText: '' };
   }
-  let fields = parsePassportText(frontText, backText);
-
-  // 1-ci pass çox az sahə tutdusa və hələ rotation cəhdi etməmişiksə,
-  // 4 istiqaməti də yoxla.
-  if (!tryAll && scoreFields(fields) < 4) {
-    return extractWithOCR(frontPath, backPath, { tryAllRotations: true });
-  }
-
+  const fields = parsePassportText(frontText, backText);
   const filledCount = Object.values(fields).filter((v) => v !== undefined && v !== null && v !== '').length;
   const hasCritical = !!(fields.bodyNumber && fields.brand && fields.manufactureYear);
   const ok = filledCount >= 6 && hasCritical;
@@ -291,7 +236,7 @@ export async function extractWithOCR(
     ok,
     fields,
     filledCount,
-    rawText: `--- FRONT (rotated ${frontRot}°) ---\n${frontText}\n--- BACK (rotated ${backRot}°) ---\n${backText}`,
+    rawText: `--- FRONT ---\n${frontText}\n--- BACK ---\n${backText}`,
   };
 }
 
