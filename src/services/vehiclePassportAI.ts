@@ -74,9 +74,17 @@ const EMPTY_FIELDS: VehiclePassportFields = {
 
 const PASSPORT_PROMPT = `Sən Azərbaycan Respublikasının "NƏQLİYYAT VASİTƏSİNİN QEYDİYYAT ŞƏHADƏTNAMƏSİ" (texniki pasport) kartını oxuyan dəqiq bir OCR mütəxəssisisən.
 
-İki şəkil verilir: birincisi pasportun ÖN hissəsi, ikincisi ARXA hissəsi. Şəkillərin istiqaməti yan, baş aşağı və ya tərs ola bilər — mətni hər istiqamətdə oxu.
+İki şəkil verilir: birincisi pasportun ÖN hissəsi, ikincisi ARXA hissəsi.
 
-Sənin vəzifən sahələri kart üzərindəki nişanlamaya görə (A, B.1, B.2, C.1, C.2, C.3, D, D.2, D.3, E.1, E.2, E.3, E.4, F.1, F.2, F.3, G, H) çıxarmaq və yalnız aşağıdakı JSON-u qaytarmaqdır. Heç bir izahat, markdown və ya əlavə mətn YAZMA.
+KART STRUKTURU:
+- ÖN hissədə: A (qeydiyyat nişanı), B.1 (qeydiyyat tarixi), B.2 (istehsal ili), C.1 (mülkiyyətçi adı), C.2 (ünvan), C.3 (mülkiyyət növü), H (etibarlıdır), kart altında BB ilə başlayan seriya.
+- ARXA hissədə: D (marka — BMW, Toyota, Mercedes, Hyundai və s.), D.2 (model), D.3 (tip — MİNİK/UNIVERSAL), E.1 (mühərrik nömrəsi — 6-15 simvol), E.2 (ban/VIN nömrəsi — DƏQİQ 17 simvol, I/O/Q istifadə olunmur), E.3 (şassi nömrəsi), E.4 (rəng — Ag/Qa/Bz kimi qısa kod və ya tam söz), F.1 (maks kütlə kg), F.2 (yüksüz kütlə kg), F.3 (oturacaq sayı — 1-9 arası rəqəm), G (mühərrik həcmi sm³), Verilib (orqan adı).
+
+KRITİK SAHƏLƏRƏ DİQQƏT:
+1. E.2 BAN/VIN — 17 simvolluq alfanumerik kod, holoqram üzərində ola bilər. Diqqətlə oxu, hərf rəqəm qarışıqlığını (0/O, 1/I) düz tut. Tam 17 simvol olmalıdır.
+2. D MARKA — açıq Latın hərfli ad: BMW, TOYOTA, MERCEDES-BENZ, HYUNDAI, KIA, FORD, LEXUS, AUDI, NISSAN, VOLKSWAGEN və s.
+3. D.2 MODEL — markadan sonra gələn alfanumerik kod (məs: "X7 XDRIVE 40i", "RAV4", "E60", "W211 320CDI").
+4. F.3 OTURACAQ SAYI — kiçik rəqəm (4, 5, 7, 8). 4-rəqəmli kütlə dəyərlərini (F.1/F.2) F.3-ə qoyma.
 
 Cavab sxemi:
 {
@@ -92,11 +100,11 @@ Cavab sxemi:
   "model": "D.2 — model, məs: X7 XDRIVE 40i",
   "vehicleType": "D.3 — tip, məs: MİNİK, UNIVERSAL",
   "engineNumber": "E.1 — mühərrik nömrəsi",
-  "bodyNumber": "E.2 — ban / VIN nömrəsi",
+  "bodyNumber": "E.2 — ban / VIN nömrəsi (17 simvol)",
   "chassisNumber": "E.3 — şassi nömrəsi",
   "color": "E.4 — rəngi (məs: Ag, Qara)",
-  "maxMass": "F.1 — maksimal kütlə",
-  "unloadedMass": "F.2 — yüksüz kütlə",
+  "maxMass": "F.1 — maksimal kütlə (kg)",
+  "unloadedMass": "F.2 — yüksüz kütlə (kg)",
   "seatCount": 5,
   "engineCapacity": "G — mühərrikin həcmi (sm³)",
   "issuedBy": "Verilib — orqan",
@@ -104,7 +112,7 @@ Cavab sxemi:
 }
 
 QAYDALAR:
-- Hər hansı sahəni oxuya bilmirsənsə, dəyəri null qoy (boş sətir DEYİL).
+- Hər hansı sahəni dəqiq oxuya bilmirsənsə, dəyəri null qoy (boş sətir DEYİL). NƏ TƏXMİN ET, NƏ BİLDİYİN AVTOMOBİL MARKALARINDAN SEÇ. Yalnız şəkildə açıq görünən mətni qaytar.
 - "manufactureYear" və "seatCount" rəqəm (int) olmalıdır, yoxdursa null.
 - Mətni kart üzərindəki orijinal yazılışla saxla (MAJUSKUL/minuskül və "Ə, Ş, Ç, Ö, Ü, Ğ, İ" hərfləri olduğu kimi).
 - Cavabı YALNIZ JSON kimi qaytar. Markdown code block (\`\`\`) İŞLƏTMƏ.`;

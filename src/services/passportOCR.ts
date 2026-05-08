@@ -108,25 +108,52 @@ export function parsePassportText(frontText: string, backText: string): OCRField
     fields.manufactureYear = distinctYears[0];
   }
 
-  // VIN (E.2) — 17 simvol, I/O/Q istifadə olunmur
-  const vin = backText.match(/\b([A-HJ-NPR-Z0-9]{17})\b/);
-  if (vin) fields.bodyNumber = vin[1];
+  // VIN (E.2) — 17 simvol, I/O/Q istifadə olunmur. OCR bəzən bir rəqəmi əskik
+  // edir/əlavə edir — 16-18 simvolluq adblok-da axtarıb 17-yə yaxınını seçirik.
+  const vinCandidates = [...backText.matchAll(/\b([A-HJ-NPR-Z0-9]{16,18})\b/g)].map((m) => m[1]);
+  const vin17 = vinCandidates.find((s) => s.length === 17);
+  if (vin17) fields.bodyNumber = vin17;
+  else if (vinCandidates.length > 0) {
+    // 17-li tapılmasa, ən yaxın uzunluq olanı təklif et (kullanıcı redaktə edəcək)
+    const best = vinCandidates.sort((a, b) => Math.abs(17 - a.length) - Math.abs(17 - b.length))[0];
+    if (best) fields.bodyNumber = best;
+  }
 
-  // G — mühərrik həcmi (cm³): 800-7000 arası 3-4 rəqəm (qeydiyyat nömrələrindən
-  // ayırmaq üçün məhdud diapazon)
-  const cap = backText.match(/\b((?:[89]\d{2}|[1-6]\d{3}))\b/);
-  if (cap) fields.engineCapacity = cap[1];
+  // G — mühərrik həcmi (cm³): 800-7000 arası 3-4 rəqəm. Sətirə əsaslı —
+  // "G" etiketi və ya "Mühərrikin həcmi" / "Engine capacity" keçən sətir tap.
+  // Beləliklə F.1/F.2 (kütlə) dəyərləri yanlış tutulmur.
+  for (const line of backText.split(/\n/)) {
+    if (!/(\bG\b|M[üu]h[əe]rr?ik[iı]?n?\s+h[əe]cm|Engine\s+capacity)/i.test(line)) continue;
+    const m = line.match(/\b((?:[89]\d{2}|[1-6]\d{3}))\b/);
+    if (m) { fields.engineCapacity = m[1]; break; }
+  }
 
-  // F.3 — oturacaqların sayı: realistik avtomobillər üçün 1-9, mikroavtobus 10-29.
-  // "F.3" etiketinə yaxın yerdə tək kiçik rəqəm tap. "1040" kimi 4-rəqəmli kütlə
-  // dəyərlərinin yanlış tutulmaması üçün rəqəmin uzunluğunu 1-2 ilə məhdudlaşdırırıq
-  // və əvvəl/sonrasında digər rəqəm gəlməsin (boşluq və ya cümlə sonu olsun).
-  const seatMatch = backText.match(
-    /(?:F\.?\s*3|Oturaca\w*)[^\d\n]{0,40}?(?<![\d.])(\d{1,2})(?![\d.])/i,
-  );
-  if (seatMatch) {
-    const n = parseInt(seatMatch[1], 10);
-    if (n >= 1 && n <= 29) fields.seatCount = n;
+  // F.3 — oturacaqların sayı. Etiketin "3"-ünü tutmamaq üçün sətirlərə böl,
+  // "F.3" və ya "Oturaca..." keçən sətirin SON rəqəmini götür (etiket
+  // əvvəldə, dəyər sonda olur).
+  for (const line of backText.split(/\n/)) {
+    if (!/(F\.?\s*3|Oturaca)/i.test(line)) continue;
+    const nums = [...line.matchAll(/(?<![\d.])(\d{1,2})(?![\d.])/g)].map((m) => parseInt(m[1], 10));
+    // "F.3" etiketinin "3"-ünü kənarlaşdır — yalnız etiketdən sonra gələn rəqəmi al.
+    const labelEnd = line.search(/F\.?\s*3|Oturaca\w*/i);
+    const tail = labelEnd >= 0 ? line.slice(labelEnd) : line;
+    const tailNums = [...tail.matchAll(/(?<![\d.])(\d{1,2})(?![\d.])/g)]
+      .map((m) => parseInt(m[1], 10))
+      .filter((n) => n >= 1 && n <= 29);
+    // Etiket "F.3"-ün özü `3`-i daxil edirsə, ondan keç — tail-da ilk rəqəmin
+    // pozisiyası etiketin sonundan ən az 2 simvol uzaqda olmalıdır.
+    const labelMatch = tail.match(/F\.?\s*3|Oturaca\w*/i);
+    const labelLen = labelMatch ? labelMatch[0].length : 0;
+    const firstAfterLabel = [...tail.matchAll(/(?<![\d.])(\d{1,2})(?![\d.])/g)]
+      .find((m) => (m.index ?? 0) >= labelLen + 1);
+    if (firstAfterLabel) {
+      const n = parseInt(firstAfterLabel[1], 10);
+      if (n >= 1 && n <= 29) { fields.seatCount = n; break; }
+    } else if (tailNums.length > 0) {
+      fields.seatCount = tailNums[0];
+      break;
+    }
+    void nums; // (debug üçün)
   }
 
   // D — marka: tanınmış brendlərdən birini tap. Tesseract bəzən "BMW"-i "BMil",
@@ -166,9 +193,14 @@ export function parsePassportText(frontText: string, backText: string): OCRField
   const typeMatch = backText.match(/\b(M[İI]N[İI]K|UNIVERSAL|SEDAN|HATCHBACK|M[İI]N[İI]VAN|P[İI]KAP|Y[ÜU]K|AVTOBUS)\b/i);
   if (typeMatch) fields.vehicleType = typeMatch[1].toUpperCase();
 
-  // E.4 — rəng: kiçik kod (Ag, Qa) və ya tam söz
-  const colorMatch = backText.match(/(?:E\.?\s*4|Rəng\w*|Color)[\s:]+([A-ZƏŞÇÖÜĞIı][a-zəşçöüğıi]{1,15})/);
-  if (colorMatch) fields.color = colorMatch[1];
+  // E.4 — rəng. Pasportda qısa kod (Ag/Aq, Qa, Bz) və ya tam söz (Qara, Ağ) olur.
+  // Xətti sətir-by-sətir axtaraq, "E.4" və ya "Rəng" / "Rang" / "Color" keçəni tap.
+  for (const line of backText.split(/\n/)) {
+    if (!/(E\.?\s*4|R[əea]ng\w*|Color)/i.test(line)) continue;
+    // Etiketdən sonra ilk hərfi söz — 1-15 simvol
+    const m = line.match(/(?:E\.?\s*4|R[əea]ng\w*|Color)[\s:.,-]+([A-ZƏŞÇÖÜĞ][a-zəşçöüğı]{0,14}|[A-ZƏŞÇÖÜĞ]{1,3})/i);
+    if (m) { fields.color = m[1]; break; }
+  }
 
   // Kart seriyası: 2 hərf + 6-8 rəqəm (məs: BB667834)
   const serial = frontText.match(/\b([A-Z]{2}\d{6,8})\b/);
@@ -205,6 +237,25 @@ export function parsePassportText(frontText: string, backText: string): OCRField
   const chassis = backText.match(/(?:E\.?\s*3|Şassi).{0,40}?\b([A-Z0-9]{6,17})\b/i);
   if (chassis && chassis[1] !== fields.bodyNumber && chassis[1] !== fields.engineNumber) {
     fields.chassisNumber = chassis[1];
+  }
+
+  // F.1 — maksimum kütlə (kg): adətən 1000-5000 arası 4-rəqəmli dəyər.
+  // F.2 — yüksüz kütlə: adətən F.1-dən kiçik. Sətirə əsaslanan axtarış.
+  for (const line of backText.split(/\n/)) {
+    if (/(F\.?\s*1|Maks\w*\s+k[üu]tl|Maximum\s+mass)/i.test(line) && !fields.maxMass) {
+      const m = line.match(/\b([12]?\d{3,4})\b/);
+      if (m) {
+        const n = parseInt(m[1], 10);
+        if (n >= 600 && n <= 30000) fields.maxMass = m[1];
+      }
+    }
+    if (/(F\.?\s*2|Y[üu]ks[üu]z|Unloaded\s+mass)/i.test(line) && !fields.unloadedMass) {
+      const m = line.match(/\b([12]?\d{3,4})\b/);
+      if (m) {
+        const n = parseInt(m[1], 10);
+        if (n >= 500 && n <= 25000) fields.unloadedMass = m[1];
+      }
+    }
   }
 
   return fields;
