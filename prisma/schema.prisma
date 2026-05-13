@@ -141,9 +141,16 @@ model User {
   givenRatings      SellerRating[]   @relation("BuyerRatings")
   notifications     Notification[]
 
+  // Default location — used on listings + city-search browsing.
+  city              String?
+  address           String?
+  latitude          Float?
+  longitude         Float?
+
   @@index([phone])
   @@index([type])
   @@index([createdAt])
+  @@index([city])
 }
 
 model Vehicle {

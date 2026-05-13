@@ -201,11 +201,15 @@ router.post('/register/complete', adminAuth, passportPairUpload, async (req: Aut
 // yekun JSON-u göndərir. Multipart variant geriyə uyğunluq üçün saxlanılır.
 router.post('/register/complete-json', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
-    const { name, type, vehicles, workplaces } = req.body as {
+    const { name, type, vehicles, workplaces, city, address, latitude, longitude } = req.body as {
       name: string;
       type: 'CAR_OWNER' | 'MECHANIC' | 'PARTS_SELLER';
       vehicles?: any[];
       workplaces?: any[];
+      city?: string;
+      address?: string;
+      latitude?: number | string;
+      longitude?: number | string;
     };
 
     const nameErr = validateName(name);
@@ -216,7 +220,20 @@ router.post('/register/complete-json', adminAuth, async (req: AuthRequest, res: 
     }
 
     const userId = req.adminId!;
-    const updateData: any = { name: name.trim(), type, profileComplete: true };
+    const toFloat = (v: any) => {
+      if (v === null || v === '' || v === undefined) return null;
+      const n = typeof v === 'number' ? v : parseFloat(v);
+      return Number.isFinite(n) ? n : null;
+    };
+    const updateData: any = {
+      name: name.trim(),
+      type,
+      profileComplete: true,
+      city: city || null,
+      address: address || null,
+      latitude: toFloat(latitude),
+      longitude: toFloat(longitude),
+    };
 
     if (type === 'CAR_OWNER') {
       if (!Array.isArray(vehicles) || vehicles.length === 0) {

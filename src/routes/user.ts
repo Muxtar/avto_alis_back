@@ -19,6 +19,7 @@ router.get('/me', adminAuth, async (req: AuthRequest, res: Response) => {
       select: {
         id: true, name: true, phone: true, email: true, type: true, role: true, verified: true,
         profileComplete: true, sellerVerified: true, sellerVerifiedAt: true, createdAt: true,
+        city: true, address: true, latitude: true, longitude: true,
         workplaces: true, vehicles: true,
         sellerApplication: { select: { status: true, rejectionReason: true, submittedAt: true } },
         _count: { select: { listings: true, sentMessages: true, receivedMessages: true } },
@@ -31,17 +32,30 @@ router.get('/me', adminAuth, async (req: AuthRequest, res: Response) => {
   }
 });
 
-// Update my profile
+// Update my profile. city/address/latitude/longitude are the user's default
+// location used to auto-fill listings and power the /locations browser.
 router.put('/me', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
-    const { name, phone } = req.body;
+    const { name, phone, city, address, latitude, longitude } = req.body;
+    const toFloat = (v: any) => {
+      if (v === null || v === '' || v === undefined) return null;
+      const n = typeof v === 'number' ? v : parseFloat(v);
+      return Number.isFinite(n) ? n : null;
+    };
     const user = await prisma.user.update({
       where: { id: req.adminId },
       data: {
         ...(name !== undefined && { name }),
         ...(phone !== undefined && { phone }),
+        ...(city !== undefined && { city: city || null }),
+        ...(address !== undefined && { address: address || null }),
+        ...(latitude !== undefined && { latitude: toFloat(latitude) }),
+        ...(longitude !== undefined && { longitude: toFloat(longitude) }),
       },
-      select: { id: true, name: true, phone: true, email: true, type: true, role: true, verified: true, createdAt: true },
+      select: {
+        id: true, name: true, phone: true, email: true, type: true, role: true, verified: true, createdAt: true,
+        city: true, address: true, latitude: true, longitude: true,
+      },
     });
     res.json({ success: true, user });
   } catch (error: any) {
@@ -66,7 +80,9 @@ router.get('/me/listings', adminAuth, async (req: AuthRequest, res: Response) =>
   }
 });
 
-// Create my listing — any logged-in user can post (PRODUCT or SERVICE)
+// Create my listing — any logged-in user can post (PRODUCT or SERVICE).
+// If `city`/`location` aren't provided, falls back to the user's default
+// location from their profile so listings always carry where they're from.
 router.post('/me/listings', listingWriteLimiter, adminAuth, upload.array('images', 5), processImages, async (req: AuthRequest, res: Response) => {
   try {
     const { title, description, price, category, type, location, phone, condition, country, brand, stock, forVehicle, unit, unitValue, year, model, city, fuelType, paymentType } = req.body;
@@ -81,11 +97,19 @@ router.post('/me/listings', listingWriteLimiter, adminAuth, upload.array('images
     const files = req.files as Express.Multer.File[];
     const images = files?.map((f) => f.filename) || [];
 
+    // Inherit user's default city/address when caller didn't pass one.
+    const me = await prisma.user.findUnique({
+      where: { id: req.adminId! },
+      select: { city: true, address: true },
+    });
+    const effectiveCity = city || me?.city || null;
+    const effectiveLocation = location || me?.address || null;
+
     const expiresAt = new Date(Date.now() + 20 * 24 * 60 * 60 * 1000);
     const listing = await prisma.listing.create({
       data: {
         userId: req.adminId!, title, description, price: parseFloat(price),
-        category, type, images, location: location || null, phone: phone || null,
+        category, type, images, location: effectiveLocation, phone: phone || null,
         condition: condition || 'NEW',
         country: country || null,
         brand: brand || null,
@@ -95,7 +119,7 @@ router.post('/me/listings', listingWriteLimiter, adminAuth, upload.array('images
         unitValue: unitValue ? parseFloat(unitValue) : null,
         year: year ? parseInt(year) : null,
         model: model || null,
-        city: city || null,
+        city: effectiveCity,
         fuelType: fuelType || null,
         paymentType: paymentType || null,
         expiresAt,
