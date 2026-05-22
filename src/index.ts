@@ -25,16 +25,34 @@ import searchRoutes from './routes/search';
 const app = express();
 const PORT = process.env.PORT || 5001;
 
-// Fix #17: CORS - env-based config
-const allowedOrigins = process.env.CORS_ORIGINS
-  ? process.env.CORS_ORIGINS.split(',').map(s => s.trim())
-  : ['http://localhost:3000', 'http://localhost:3001'];
+// Fix #17: CORS - env-based config with safe defaults for production domains
+// Production domain-ləri (tradixai.io) və local development origin-ləri həmişə icazəlidir.
+// Əlavə origin-lər `CORS_ORIGINS` env variable ilə vergüllə ayrılaraq əlavə edilə bilər.
+const defaultOrigins = [
+  'http://localhost:3000',
+  'http://localhost:3001',
+  'https://tradixai.io',
+  'https://www.tradixai.io',
+];
+
+const envOrigins = process.env.CORS_ORIGINS
+  ? process.env.CORS_ORIGINS.split(',').map(s => s.trim()).filter(Boolean)
+  : [];
+
+// Dedupe
+const allowedOrigins = Array.from(new Set([...defaultOrigins, ...envOrigins]));
+
+// Railway preview/production domain-lərini regex ilə icazə ver (məs. *.up.railway.app)
+const allowedOriginPatterns: RegExp[] = [
+  /^https:\/\/[a-z0-9-]+\.up\.railway\.app$/i,
+];
 
 const corsOptions = {
   origin: (origin: string | undefined, cb: (err: Error | null, allow?: boolean) => void) => {
     // Origin yoxdursa (server-to-server, curl) icazə ver
     if (!origin) return cb(null, true);
     if (allowedOrigins.includes(origin)) return cb(null, true);
+    if (allowedOriginPatterns.some((re) => re.test(origin))) return cb(null, true);
     return cb(new Error(`CORS blocked: ${origin}`), false);
   },
   credentials: true,
