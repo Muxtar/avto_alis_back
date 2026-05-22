@@ -230,6 +230,35 @@ router.delete('/admin/listings/:id', requireAdmin, async (req: AuthRequest, res:
   }
 });
 
+// Bulk reactivate — bütün vaxtı bitmiş (və ya expiresAt = null) elanların
+// müddətini indidən 30 gün uzadır. Bir dəfəlik admin əməliyyatı: marketplace-də
+// köhnə elanlar yenidən görünsün.
+router.post('/admin/listings/reactivate-expired', requireAdmin, async (_req: AuthRequest, res: Response) => {
+  try {
+    const now = new Date();
+    const newExpiresAt = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
+
+    const result = await prisma.listing.updateMany({
+      where: {
+        OR: [
+          { expiresAt: null },
+          { expiresAt: { lte: now } },
+        ],
+      },
+      data: { expiresAt: newExpiresAt },
+    });
+
+    res.json({
+      success: true,
+      updatedCount: result.count,
+      newExpiresAt,
+      message: `${result.count} elan 30 gün üçün yeniləndi.`,
+    });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
 // ===================== COURIER MANAGEMENT =====================
 
 // Create Courier
