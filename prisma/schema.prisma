@@ -147,6 +147,12 @@ model User {
   latitude          Float?
   longitude         Float?
 
+  // Usta / satıcı ixtisası — hansı avtomobil markaları və hansı hissə
+  // kateqoriyaları üzrə xidmət göstərir (MECHANIC / PARTS_SELLER üçün).
+  serviceBrands     String[] @default([]) // seçilmiş marka adları (məs. ["BMW", "Mercedes-Benz"])
+  serviceAllBrands  Boolean  @default(false) // bütün markalarla işləyir
+  serviceCategories String[] @default([]) // seçilmiş hissə id-ləri (bax: sellerCategories.ts)
+
   @@index([phone])
   @@index([type])
   @@index([createdAt])

@@ -201,7 +201,10 @@ router.post('/register/complete', adminAuth, passportPairUpload, async (req: Aut
 // yekun JSON-u göndərir. Multipart variant geriyə uyğunluq üçün saxlanılır.
 router.post('/register/complete-json', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
-    const { name, type, vehicles, workplaces, city, address, latitude, longitude } = req.body as {
+    const {
+      name, type, vehicles, workplaces, city, address, latitude, longitude,
+      serviceBrands, serviceAllBrands, serviceCategories,
+    } = req.body as {
       name: string;
       type: 'CAR_OWNER' | 'MECHANIC' | 'PARTS_SELLER';
       vehicles?: any[];
@@ -210,6 +213,9 @@ router.post('/register/complete-json', adminAuth, async (req: AuthRequest, res: 
       address?: string;
       latitude?: number | string;
       longitude?: number | string;
+      serviceBrands?: string[];
+      serviceAllBrands?: boolean;
+      serviceCategories?: string[];
     };
 
     const nameErr = validateName(name);
@@ -293,12 +299,21 @@ router.post('/register/complete-json', adminAuth, async (req: AuthRequest, res: 
           longitude: w.longitude ? parseFloat(w.longitude) : null,
         })),
       };
+
+      // Usta / satıcı ixtisası — yalnız təmiz string massivləri saxla.
+      const cleanStrArray = (arr: unknown): string[] =>
+        Array.isArray(arr)
+          ? Array.from(new Set(arr.filter((x): x is string => typeof x === 'string' && x.trim() !== '').map((x) => x.trim())))
+          : [];
+      updateData.serviceAllBrands = serviceAllBrands === true;
+      updateData.serviceBrands = updateData.serviceAllBrands ? [] : cleanStrArray(serviceBrands);
+      updateData.serviceCategories = cleanStrArray(serviceCategories);
     }
 
     const user = await prisma.user.update({
       where: { id: userId },
       data: updateData,
-      select: { id: true, name: true, phone: true, email: true, type: true, role: true, verified: true, profileComplete: true, sellerVerified: true },
+      select: { id: true, name: true, phone: true, email: true, type: true, role: true, verified: true, profileComplete: true, sellerVerified: true, serviceBrands: true, serviceAllBrands: true, serviceCategories: true },
     });
     res.json({ success: true, user });
   } catch (error: any) {

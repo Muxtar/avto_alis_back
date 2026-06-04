@@ -159,7 +159,7 @@ router.get('/sellers/:id', async (req: Request, res: Response) => {
   try {
     const user = await prisma.user.findUnique({
       where: { id: parseInt(req.params.id) },
-      select: { id: true, name: true, phone: true, type: true, createdAt: true, workplaces: true },
+      select: { id: true, name: true, phone: true, type: true, createdAt: true, workplaces: true, serviceBrands: true, serviceAllBrands: true, serviceCategories: true },
     });
     if (!user) {
       res.status(404).json({ success: false, message: 'İstifadəçi tapılmadı' });
