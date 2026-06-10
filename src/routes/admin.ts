@@ -3,6 +3,7 @@ import { PrismaClient, Prisma, UserType } from '@prisma/client';
 import bcrypt from 'bcryptjs';
 import { adminAuth, requireAdmin, AuthRequest, generateToken } from '../middleware/auth';
 import { authLimiter } from '../middleware/rateLimiter';
+import { refund as kapitalRefund } from '../services/kapital';
 import fs from 'fs';
 import path from 'path';
 
@@ -451,6 +452,21 @@ router.put('/admin/returns/:id/override', requireAdmin, async (req: AuthRequest,
           } catch { /* listing may be deleted */ }
         }
       }
+
+      // Kart ödənişidirsə — pulu Kapital Bank vasitəsilə həqiqətən geri qaytar.
+      const order = ret.order;
+      if (order.gatewayOrderId && order.gatewayPassword && order.paymentStatus === 'PAID') {
+        const amt = refundAmount !== undefined ? parseFloat(refundAmount) : (ret.refundAmount ?? order.total);
+        try {
+          await kapitalRefund(order.gatewayOrderId, order.gatewayPassword, amt);
+          await prisma.order.update({
+            where: { id: order.id },
+            data: { paymentStatus: 'REFUNDED', gatewayStatus: 'Refunded' },
+          });
+        } catch (err: any) {
+          res.status(502).json({ success: false, message: 'Bank iadəsi alınmadı: ' + err.message }); return;
+        }
+      }
     }
 
     const updated = await prisma.returnRequest.update({
@@ -462,6 +478,168 @@ router.put('/admin/returns/:id/override', requireAdmin, async (req: AuthRequest,
       },
     });
     res.json({ success: true, returnRequest: updated });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+// ===================== ORDER STATUS (admin override) =====================
+
+const ORDER_STATUSES = ['PENDING', 'CONFIRMED', 'SHIPPED', 'DELIVERED', 'CANCELLED'] as const;
+
+// Admin sifariş statusunu dəyişir. CANCELLED olduqda stok geri qaytarılır.
+router.put('/admin/orders/:id/status', requireAdmin, async (req: AuthRequest, res: Response) => {
+  try {
+    const orderId = parseInt(req.params.id);
+    if (Number.isNaN(orderId)) { res.status(400).json({ success: false, message: 'Yanlış sifariş ID' }); return; }
+    const { status } = req.body;
+    if (!ORDER_STATUSES.includes(status)) {
+      res.status(400).json({ success: false, message: 'Yanlış status' }); return;
+    }
+    const order = await prisma.order.findUnique({ where: { id: orderId }, include: { items: true } });
+    if (!order) { res.status(404).json({ success: false, message: 'Sifariş tapılmadı' }); return; }
+
+    // Ləğv olunduqda və əvvəl ləğv olunmayıbsa — stoku geri qaytar.
+    if (status === 'CANCELLED' && order.status !== 'CANCELLED') {
+      for (const item of order.items) {
+        try {
+          await prisma.listing.update({ where: { id: item.listingId }, data: { stock: { increment: item.quantity } } });
+        } catch { /* listing silinmiş ola bilər */ }
+      }
+    }
+    const updated = await prisma.order.update({ where: { id: orderId }, data: { status } });
+    // Alıcıya bildiriş
+    try {
+      await prisma.notification.create({
+        data: { userId: order.buyerId, type: 'ORDER', title: 'Sifariş statusu yeniləndi', body: `Sifariş #${order.id}: ${status}`, link: `/orders/${order.id}` },
+      });
+    } catch { /* ignore */ }
+    res.json({ success: true, order: updated });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+// ===================== USER BLOCK / UNBLOCK =====================
+
+router.put('/admin/users/:id/block', requireAdmin, async (req: AuthRequest, res: Response) => {
+  try {
+    const targetId = parseInt(req.params.id);
+    if (Number.isNaN(targetId)) { res.status(400).json({ success: false, message: 'Yanlış ID' }); return; }
+    if (targetId === req.adminId) { res.status(403).json({ success: false, message: 'Öz hesabınızı bloklaya bilməzsiniz' }); return; }
+    const { blocked } = req.body;
+    const target = await prisma.user.findUnique({ where: { id: targetId }, select: { role: true } });
+    if (!target) { res.status(404).json({ success: false, message: 'İstifadəçi tapılmadı' }); return; }
+    if (target.role === 'ADMIN') { res.status(403).json({ success: false, message: 'Admini bloklamaq olmaz' }); return; }
+    const user = await prisma.user.update({
+      where: { id: targetId },
+      data: { isBlocked: blocked === true },
+      select: { id: true, name: true, isBlocked: true },
+    });
+    res.json({ success: true, user });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+// ===================== COMMENT / RATING MODERATION =====================
+
+router.get('/admin/comments', requireAdmin, async (req: AuthRequest, res: Response) => {
+  try {
+    const { page = '1', limit = '20' } = req.query;
+    const skip = (parseInt(page as string) - 1) * parseInt(limit as string);
+    const take = parseInt(limit as string);
+    const [comments, total] = await Promise.all([
+      prisma.comment.findMany({
+        include: {
+          user: { select: { id: true, name: true, phone: true } },
+          listing: { select: { id: true, title: true } },
+        },
+        orderBy: { createdAt: 'desc' },
+        skip, take,
+      }),
+      prisma.comment.count(),
+    ]);
+    res.json({ comments, total, page: parseInt(page as string), totalPages: Math.ceil(total / take) });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+router.delete('/admin/comments/:id', requireAdmin, async (req: AuthRequest, res: Response) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (Number.isNaN(id)) { res.status(400).json({ success: false, message: 'Yanlış ID' }); return; }
+    await prisma.comment.delete({ where: { id } });
+    res.json({ success: true });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+// ===================== BROADCAST NOTIFICATIONS =====================
+
+// Bütün (və ya tipə görə) istifadəçilərə bildiriş göndər.
+router.post('/admin/broadcast', requireAdmin, async (req: AuthRequest, res: Response) => {
+  try {
+    const { title, body, link, userType } = req.body;
+    if (!title || !body) { res.status(400).json({ success: false, message: 'Başlıq və mətn tələb olunur' }); return; }
+    const where: Prisma.UserWhereInput = { role: 'USER', isBlocked: false };
+    if (userType && ['CAR_OWNER', 'MECHANIC', 'PARTS_SELLER', 'COURIER'].includes(userType)) {
+      where.type = userType as UserType;
+    }
+    const users = await prisma.user.findMany({ where, select: { id: true } });
+    if (users.length === 0) { res.json({ success: true, count: 0 }); return; }
+    const result = await prisma.notification.createMany({
+      data: users.map((u) => ({
+        userId: u.id, type: 'SYSTEM', title: String(title), body: String(body), link: link ? String(link) : null,
+      })),
+    });
+    res.json({ success: true, count: result.count });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+// ===================== ANALYTICS =====================
+
+router.get('/admin/analytics', requireAdmin, async (_req: AuthRequest, res: Response) => {
+  try {
+    const now = new Date();
+    const last30 = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+
+    const [ordersByStatus, paidAgg, deliveredCount, last30Orders, newUsers30, blockedUsers, pendingKyc, openReturns] = await Promise.all([
+      prisma.order.groupBy({ by: ['status'], _count: true }),
+      prisma.order.aggregate({ _sum: { total: true }, where: { paymentStatus: 'PAID' } }),
+      prisma.order.count({ where: { status: 'DELIVERED' } }),
+      prisma.order.findMany({ where: { createdAt: { gte: last30 } }, select: { total: true, createdAt: true, status: true } }),
+      prisma.user.count({ where: { role: 'USER', createdAt: { gte: last30 } } }),
+      prisma.user.count({ where: { isBlocked: true } }),
+      prisma.sellerVerification.count({ where: { status: 'PENDING' } }),
+      prisma.returnRequest.count({ where: { status: { in: ['REQUESTED', 'APPROVED', 'RETURN_SHIPPED', 'RETURN_RECEIVED'] } } }),
+    ]);
+
+    // Son 30 gün — günlük gəlir/sifariş
+    const dailyMap = new Map<string, { revenue: number; orders: number }>();
+    for (const o of last30Orders) {
+      const day = o.createdAt.toISOString().slice(0, 10);
+      const cur = dailyMap.get(day) || { revenue: 0, orders: 0 };
+      cur.orders += 1;
+      if (o.status !== 'CANCELLED') cur.revenue += o.total;
+      dailyMap.set(day, cur);
+    }
+    const daily = Array.from(dailyMap.entries()).sort((a, b) => a[0].localeCompare(b[0])).map(([date, v]) => ({ date, ...v }));
+
+    res.json({
+      revenueTotal: paidAgg._sum.total || 0,
+      deliveredCount,
+      ordersByStatus: ordersByStatus.map((s) => ({ status: s.status, count: s._count })),
+      newUsers30,
+      blockedUsers,
+      pendingKyc,
+      openReturns,
+      daily,
+    });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }

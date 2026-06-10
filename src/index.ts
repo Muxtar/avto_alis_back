@@ -21,6 +21,7 @@ import ratingsRoutes from './routes/ratings';
 import notificationsRoutes from './routes/notifications';
 import sellerRoutes from './routes/seller';
 import searchRoutes from './routes/search';
+import paymentRoutes from './routes/payment';
 
 const app = express();
 const PORT = process.env.PORT || 5001;
@@ -87,6 +88,7 @@ app.use('/api', ratingsRoutes);
 app.use('/api', notificationsRoutes);
 app.use('/api', sellerRoutes);
 app.use('/api', searchRoutes);
+app.use('/api', paymentRoutes);
 
 app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok' });

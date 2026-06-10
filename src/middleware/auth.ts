@@ -57,9 +57,10 @@ export function requireType(allowed: UserType[]) {
       const decoded = jwt.verify(token, SIGNING_KEY) as { userId: number };
       const user = await prisma.user.findUnique({
         where: { id: decoded.userId },
-        select: { id: true, type: true, sellerVerified: true, profileComplete: true },
+        select: { id: true, type: true, sellerVerified: true, profileComplete: true, isBlocked: true },
       });
       if (!user) { res.status(401).json({ success: false, message: 'İstifadəçi tapılmadı' }); return; }
+      if (user.isBlocked) { res.status(403).json({ success: false, message: 'Hesabınız bloklanıb' }); return; }
       if (!allowed.includes(user.type)) {
         res.status(403).json({ success: false, message: 'Bu əməliyyat üçün icazəniz yoxdur' });
         return;

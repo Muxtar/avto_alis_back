@@ -105,6 +105,7 @@ model User {
   role              UserRole           @default(USER)
   password          String?
   verified          Boolean            @default(false)
+  isBlocked         Boolean            @default(false) // admin tərəfindən bloklanıb
   profileComplete   Boolean            @default(false)
   sellerVerified    Boolean            @default(false)
   sellerVerifiedAt  DateTime?
@@ -334,6 +335,11 @@ model Order {
   scheduledAt    DateTime?     // ileri tarihli siparis
   paymentMethod  PaymentMethod @default(CASH)
   paymentStatus  PaymentStatus @default(PENDING)
+  // Kapital Bank ödəniş şlüzü — kart ödənişində bir checkout-dakı bütün
+  // order-lər eyni gatewayOrderId-ni paylaşır (müştəri bir dəfə ödəyir).
+  gatewayOrderId Int?
+  gatewayPassword String?
+  gatewayStatus  String?
   promoCodeId    Int?
   // Canli takip icin
   latitude       Float?
@@ -354,6 +360,7 @@ model Order {
   @@index([buyerId, createdAt])
   @@index([sellerId, createdAt])
   @@index([status])
+  @@index([gatewayOrderId])
 }
 
 model EmailVerification {

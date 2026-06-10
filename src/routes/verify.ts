@@ -45,6 +45,13 @@ router.post('/verify/check', verifyLimiter, async (req: Request, res: Response) 
       return;
     }
 
+    // Bloklanmış istifadəçi daxil ola bilməz.
+    const existing = await prisma.user.findUnique({ where: { id: uid }, select: { isBlocked: true } });
+    if (existing?.isBlocked) {
+      res.status(403).json({ success: false, message: 'Hesabınız bloklanıb. Adminlə əlaqə saxlayın.' });
+      return;
+    }
+
     await prisma.verificationCode.update({ where: { id: record.id }, data: { verified: true } });
     const user = await prisma.user.update({
       where: { id: uid },

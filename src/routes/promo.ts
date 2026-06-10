@@ -99,6 +99,34 @@ router.get('/admin/promo', requireAdmin, async (_req: AuthRequest, res: Response
   }
 });
 
+// Admin: promo kod redaktə et / aktiv-deaktiv (toggle)
+router.put('/admin/promo/:id', requireAdmin, async (req: AuthRequest, res: Response) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (Number.isNaN(id)) { res.status(400).json({ success: false, message: 'Yanlış ID' }); return; }
+    const { code, description, discountType, discountValue, minOrderAmount, maxDiscount, usageLimit, validUntil, active } = req.body;
+    const data: any = {};
+    if (code !== undefined) data.code = String(code).toUpperCase();
+    if (description !== undefined) data.description = description || null;
+    if (discountType !== undefined) data.discountType = discountType;
+    if (discountValue !== undefined) data.discountValue = parseFloat(discountValue);
+    if (minOrderAmount !== undefined) data.minOrderAmount = minOrderAmount ? parseFloat(minOrderAmount) : null;
+    if (maxDiscount !== undefined) data.maxDiscount = maxDiscount ? parseFloat(maxDiscount) : null;
+    if (usageLimit !== undefined) data.usageLimit = usageLimit ? parseInt(usageLimit) : null;
+    if (validUntil !== undefined) data.validUntil = validUntil ? new Date(validUntil) : null;
+    if (active !== undefined) data.active = !!active;
+    try {
+      const promo = await prisma.promoCode.update({ where: { id }, data });
+      res.json({ success: true, promo });
+    } catch (err: any) {
+      if (err?.code === 'P2002') { res.status(400).json({ success: false, message: 'Bu kod artıq mövcuddur' }); return; }
+      throw err;
+    }
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
 // Admin: promo kod sil
 router.delete('/admin/promo/:id', requireAdmin, async (req: AuthRequest, res: Response) => {
   try {

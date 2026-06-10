@@ -1,6 +1,9 @@
 import { Router, Response } from 'express';
 import { PrismaClient, UserType } from '@prisma/client';
 import { adminAuth, requireType, AuthRequest } from '../middleware/auth';
+import { createOrder as createKapitalOrder, refund as kapitalRefund } from '../services/kapital';
+
+const PUBLIC_BACKEND_URL = process.env.PUBLIC_BACKEND_URL || `http://localhost:${process.env.PORT || 5001}`;
 
 const BUYER_TYPES: UserType[] = [UserType.CAR_OWNER, UserType.MECHANIC, UserType.PARTS_SELLER];
 
@@ -281,7 +284,8 @@ router.post('/cart/checkout', requireType(BUYER_TYPES), async (req: AuthRequest,
             deliveryType,
             scheduledAt: scheduledAt ? new Date(scheduledAt) : null,
             paymentMethod,
-            paymentStatus: paymentMethod === 'CASH' ? 'PENDING' : 'PAID',
+            // CARD → bank təsdiqləyənə qədər PENDING; WALLET → PAID; CASH → PENDING (çatdırılanda).
+            paymentStatus: paymentMethod === 'WALLET' ? 'PAID' : 'PENDING',
             promoCodeId: promoCodeRecord?.id || null,
             latitude: latitude ? parseFloat(latitude) : null,
             longitude: longitude ? parseFloat(longitude) : null,
@@ -352,9 +356,41 @@ router.post('/cart/checkout', requireType(BUYER_TYPES), async (req: AuthRequest,
       return createdOrders;
     });
 
+    // KART ÖDƏNİŞİ: transaction commit olandan SONRA (xarici API çağırışı
+    // tranzaksiya içində olmamalıdır) Kapital-də bir ödəniş yaradılır və
+    // checkout-dakı bütün order-lər həmin gatewayOrderId ilə bağlanır.
+    let paymentUrl: string | null = null;
+    if (paymentMethod === 'CARD') {
+      const grandTotal = orders.reduce((s, o) => s + o.total, 0);
+      if (grandTotal <= 0) {
+        // Tamamilə endirimlə örtülüb — ödənişə ehtiyac yoxdur.
+        await prisma.order.updateMany({ where: { id: { in: orders.map((o) => o.id) } }, data: { paymentStatus: 'PAID' } });
+      } else {
+        try {
+          const kapital = await createKapitalOrder({
+            amount: grandTotal,
+            title: 'AvtoBazar',
+            description: `Sifariş #${orders.map((o) => o.id).join(',')}`,
+            redirectUrl: `${PUBLIC_BACKEND_URL}/api/payment/callback`,
+          });
+          await prisma.order.updateMany({
+            where: { id: { in: orders.map((o) => o.id) } },
+            data: { gatewayOrderId: kapital.id, gatewayPassword: kapital.password, gatewayStatus: kapital.status },
+          });
+          paymentUrl = kapital.redirectUrl;
+        } catch (err: any) {
+          // Ödəniş yaradıla bilmədi — order-lər PENDING qalır, istifadəçi sonra yenidən cəhd edə bilər.
+          console.error('[checkout] Kapital createOrder failed:', err.message);
+          res.status(502).json({ success: false, message: 'Ödəniş başladıla bilmədi: ' + err.message, orders });
+          return;
+        }
+      }
+    }
+
     res.status(201).json({
       success: true,
       orders,
+      paymentUrl, // CARD olduqda — frontend bura yönəltməlidir
       totalDiscount: orders.reduce((s, o) => s + (o.discountAmount || 0), 0),
       pointsEarned: orders.reduce((s, o) => s + o.pointsEarned, 0),
     });
@@ -719,6 +755,18 @@ router.put('/returns/:id/refund', adminAuth, async (req: AuthRequest, res: Respo
     if (!ret || ret.sellerId !== req.adminId) { res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return; }
     if (ret.status !== 'RETURN_RECEIVED') { res.status(400).json({ success: false, message: 'Məhsul hələ qəbul edilməyib' }); return; }
 
+    // Kart ödənişidirsə — pulu BANK vasitəsilə geri qaytar (DB dəyişməzdən əvvəl).
+    const ord = ret.order;
+    const isCardPaid = !!(ord.gatewayOrderId && ord.gatewayPassword && ord.paymentStatus === 'PAID');
+    if (isCardPaid) {
+      const amt = ret.refundAmount ?? ord.total;
+      try {
+        await kapitalRefund(ord.gatewayOrderId!, ord.gatewayPassword!, amt);
+      } catch (err: any) {
+        res.status(502).json({ success: false, message: 'Bank iadəsi alınmadı: ' + err.message }); return;
+      }
+    }
+
     const stockWarnings: string[] = [];
 
     // Transaction ile refund + stock restore atomik yap
@@ -747,6 +795,10 @@ router.put('/returns/:id/refund', adminAuth, async (req: AuthRequest, res: Respo
             stockWarnings.push(`Elan #${item.listingId} silinib, stok bərpa edilə bilmədi`);
           }
         }
+      }
+
+      if (isCardPaid) {
+        await tx.order.update({ where: { id: ord.id }, data: { paymentStatus: 'REFUNDED', gatewayStatus: 'Refunded' } });
       }
 
       return await tx.returnRequest.update({ where: { id: ret.id }, data: { status: 'REFUNDED' } });
