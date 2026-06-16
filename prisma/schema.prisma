@@ -107,6 +107,8 @@ model User {
   verified          Boolean            @default(false)
   isBlocked         Boolean            @default(false) // admin tərəfindən bloklanıb
   profileComplete   Boolean            @default(false)
+  profession        String?            // məslək (qeydiyyatda soruşulur)
+  idNumber          String?            // kimlik / FIN (şəxsiyyət vəsiqəsi nömrəsi)
   sellerVerified    Boolean            @default(false) // ≥1 təsdiqlənmiş biznesi var
   sellerVerifiedAt  DateTime?
   sellerApplication SellerVerification?

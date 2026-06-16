@@ -204,9 +204,10 @@ router.post('/register/complete-json', adminAuth, async (req: AuthRequest, res: 
     const {
       name, type, vehicles, workplaces, city, address, latitude, longitude,
       serviceBrands, serviceAllBrands, serviceCategories,
+      profession, idNumber,
     } = req.body as {
       name: string;
-      type: 'CAR_OWNER' | 'MECHANIC' | 'PARTS_SELLER';
+      type?: 'CAR_OWNER' | 'MECHANIC' | 'PARTS_SELLER';
       vehicles?: any[];
       workplaces?: any[];
       city?: string;
@@ -216,14 +217,14 @@ router.post('/register/complete-json', adminAuth, async (req: AuthRequest, res: 
       serviceBrands?: string[];
       serviceAllBrands?: boolean;
       serviceCategories?: string[];
+      profession?: string;
+      idNumber?: string;
     };
 
     const nameErr = validateName(name);
     if (nameErr) { res.status(400).json({ success: false, message: nameErr }); return; }
-    if (!type || !['CAR_OWNER', 'MECHANIC', 'PARTS_SELLER'].includes(type)) {
-      res.status(400).json({ success: false, message: 'Düzgün istifadəçi tipi seçin' });
-      return;
-    }
+    // Ümumi platforma: tip məcburi deyil (default CAR_OWNER — daxili dəyər).
+    const effectiveType = (type && ['CAR_OWNER', 'MECHANIC', 'PARTS_SELLER'].includes(type)) ? type : 'CAR_OWNER';
 
     const userId = req.adminId!;
     const toFloat = (v: any) => {
@@ -233,18 +234,18 @@ router.post('/register/complete-json', adminAuth, async (req: AuthRequest, res: 
     };
     const updateData: any = {
       name: name.trim(),
-      type,
+      type: effectiveType,
       profileComplete: true,
+      profession: profession?.trim() || null,
+      idNumber: idNumber?.trim() || null,
       city: city || null,
       address: address || null,
       latitude: toFloat(latitude),
       longitude: toFloat(longitude),
     };
 
-    if (type === 'CAR_OWNER') {
-      if (!Array.isArray(vehicles) || vehicles.length === 0) {
-        res.status(400).json({ success: false, message: 'Ən azı bir avtomobil əlavə edin' }); return;
-      }
+    // Avtomobil(lər) yalnız göndərilibsə yaradılır (köhnə axın üçün geriyə uyğunluq).
+    if (Array.isArray(vehicles) && vehicles.length > 0) {
       for (let i = 0; i < vehicles.length; i++) {
         const v = vehicles[i];
         if (!v.passportImageFront || !v.passportImageBack) {
@@ -287,10 +288,7 @@ router.post('/register/complete-json', adminAuth, async (req: AuthRequest, res: 
         return row;
       });
       updateData.vehicles = { create: rows as any };
-    } else {
-      if (!Array.isArray(workplaces) || workplaces.length === 0) {
-        res.status(400).json({ success: false, message: 'Ən azı bir iş yeri əlavə edin' }); return;
-      }
+    } else if (Array.isArray(workplaces) && workplaces.length > 0) {
       await prisma.workplace.deleteMany({ where: { userId } });
       updateData.workplaces = {
         create: workplaces.map((w: any) => ({
