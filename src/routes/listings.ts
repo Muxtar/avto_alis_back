@@ -32,7 +32,8 @@ router.get('/listings', async (req: Request, res: Response) => {
         ],
       });
     }
-    if (category) where.category = category as string;
+    // Əsas kateqoriya seçiləndə alt-kateqoriyaları da tut (prefix uyğunluğu).
+    if (category) (where.AND as Prisma.ListingWhereInput[]).push({ category: { startsWith: category as string } });
     if (type && type !== 'all') where.type = type as any;
     if (condition) where.condition = condition as any;
     if (country) where.country = country as string;
