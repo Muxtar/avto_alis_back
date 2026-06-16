@@ -85,13 +85,31 @@ router.get('/me/listings', adminAuth, async (req: AuthRequest, res: Response) =>
 // location from their profile so listings always carry where they're from.
 router.post('/me/listings', listingWriteLimiter, adminAuth, upload.array('images', 5), processImages, async (req: AuthRequest, res: Response) => {
   try {
-    const { title, description, price, category, type, location, phone, condition, country, brand, stock, forVehicle, unit, unitValue, year, model, city, fuelType, paymentType } = req.body;
+    const { title, description, price, category, type, location, phone, condition, country, brand, stock, forVehicle, unit, unitValue, year, model, city, fuelType, paymentType, businessObjectId } = req.body;
 
     if (!title || !description || !price || !category || !type) {
       res.status(400).json({ success: false, message: 'Başlıq, təsvir, qiymət, kateqoriya və tip tələb olunur' }); return;
     }
     if (type !== 'PRODUCT' && type !== 'SERVICE') {
       res.status(400).json({ success: false, message: 'Tip yalnız PRODUCT və ya SERVICE ola bilər' }); return;
+    }
+
+    // Biznes obyekti seçilibsə — TƏSDİQLƏNMİŞ biznesə aid olmalıdır (kart üçün).
+    let bizId: number | null = null;
+    let bizObjId: number | null = null;
+    if (businessObjectId) {
+      const obj = await prisma.businessObject.findUnique({
+        where: { id: parseInt(String(businessObjectId)) },
+        include: { business: true },
+      });
+      if (!obj || obj.business.userId !== req.adminId) {
+        res.status(403).json({ success: false, message: 'Seçilmiş obyekt sizə aid deyil' }); return;
+      }
+      if (obj.business.status !== 'APPROVED') {
+        res.status(400).json({ success: false, message: 'Biznes hələ təsdiqlənməyib' }); return;
+      }
+      bizId = obj.businessId;
+      bizObjId = obj.id;
     }
 
     const files = req.files as Express.Multer.File[];
@@ -122,6 +140,8 @@ router.post('/me/listings', listingWriteLimiter, adminAuth, upload.array('images
         city: effectiveCity,
         fuelType: fuelType || null,
         paymentType: paymentType || null,
+        businessId: bizId,
+        businessObjectId: bizObjId,
         expiresAt,
       },
     });

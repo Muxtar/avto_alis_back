@@ -172,6 +172,26 @@ router.post('/cart/checkout', requireType(BUYER_TYPES), async (req: AuthRequest,
       }
     }
 
+    // KART ÖDƏNİŞİ yalnız BİZNESƏ bağlı elanlar üçün mümkündür (VÖEN + bank lazımdır).
+    // Fərdi satıcının məhsulu kartla alına bilməz — yalnız nağd/əldən (tap.az kimi).
+    if (paymentMethod === 'CARD') {
+      const nonBusiness = cart.items.filter((i) => !i.listing.businessId);
+      if (nonBusiness.length > 0) {
+        res.status(400).json({
+          success: false,
+          message: `Bu məhsul(lar) yalnız nağd alına bilər: ${nonBusiness.map((i) => `"${i.listing.title}"`).join(', ')}. Satıcı ilə birbaşa danışın.`,
+        });
+        return;
+      }
+      // Biznes aktiv VƏ təsdiqli olmalıdır.
+      const bizIds = Array.from(new Set(cart.items.map((i) => i.listing.businessId).filter((x): x is number => !!x)));
+      const okBiz = await prisma.business.findMany({ where: { id: { in: bizIds }, isActive: true, status: 'APPROVED' }, select: { id: true } });
+      if (okBiz.length !== bizIds.length) {
+        res.status(400).json({ success: false, message: 'Bu məhsulların biznesi hazırda aktiv deyil — kartla ödəniş mümkün deyil.' });
+        return;
+      }
+    }
+
     // Kullanici bilgilerini al (loyalty points kontrolu)
     const user = await prisma.user.findUnique({ where: { id: req.adminId! } });
     if (!user) {

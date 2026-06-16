@@ -107,9 +107,12 @@ model User {
   verified          Boolean            @default(false)
   isBlocked         Boolean            @default(false) // admin tərəfindən bloklanıb
   profileComplete   Boolean            @default(false)
-  sellerVerified    Boolean            @default(false)
+  sellerVerified    Boolean            @default(false) // ≥1 təsdiqlənmiş biznesi var
   sellerVerifiedAt  DateTime?
   sellerApplication SellerVerification?
+  businesses        Business[]
+  businessMemberships BusinessMember[] @relation("BusinessMemberships")
+  publicId          String?          @unique // hər kəsə verilən xüsusi ID (profildə)
   createdAt         DateTime           @default(now())
   vehicles          Vehicle[]
   workplaces        Workplace[]
@@ -254,9 +257,14 @@ model Listing {
   paymentType PaymentType?
   viewCount   Int         @default(0)
   expiresAt   DateTime?
+  // Biznes bağlantısı — elan bir obyektə (filiala) aiddirsə kart ödənişi mümkün olur.
+  businessId       Int?
+  businessObjectId Int?
   createdAt   DateTime    @default(now())
   updatedAt   DateTime    @updatedAt
   user        User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  business        Business?       @relation(fields: [businessId], references: [id], onDelete: SetNull)
+  businessObject  BusinessObject? @relation(fields: [businessObjectId], references: [id], onDelete: SetNull)
   messages    Message[]
   comments    Comment[]
   cartItems     CartItem[]
@@ -272,6 +280,8 @@ model Listing {
   @@index([city])
   @@index([fuelType])
   @@index([paymentType])
+  @@index([businessId])
+  @@index([businessObjectId])
 }
 
 model Message {
@@ -552,4 +562,99 @@ model Notification {
 
   @@index([userId, read])
   @@index([userId, createdAt])
+}
+
+// ==================== BİZNES HESABI ====================
+// Bir istifadəçi çoxlu biznes əlavə edə bilər. Biznes admin tərəfindən
+// təsdiqlənəndə həmin biznesə bağlı elanlar KART ödənişi qəbul edir
+// (VÖEN + bank hesabı olmadan bank pul köçürə bilmir).
+
+enum BusinessKind {
+  LEGAL     // Hüquqi şəxs
+  PHYSICAL  // Fiziki şəxs
+}
+
+enum BusinessProofType {
+  TAX_DOC            // Vergi qeydiyyatını təsdiq edən sənəd
+  POWER_OF_ATTORNEY  // Etibarnamə (+ şirkət sənədi)
+}
+
+model Business {
+  id              Int                @id @default(autoincrement())
+  userId          Int
+  kind            BusinessKind       @default(PHYSICAL)
+  proofType       BusinessProofType  @default(TAX_DOC)
+  name            String
+  voen            String
+  ownerName       String
+  founderName     String
+  phone           String?            // şirkət telefonu
+  status          VerificationStatus @default(PENDING)
+  isActive        Boolean            @default(true) // sahibi tərəfindən aktiv/deaktiv
+  rejectionReason String?
+  createdAt       DateTime           @default(now())
+  reviewedAt      DateTime?
+
+  // KYC sənədləri (fayl adları)
+  taxDocImage          String?       // vergi qeydiyyatı sənədi (TAX_DOC)
+  companyDocImage      String?       // şirkət sənədi (POWER_OF_ATTORNEY halında)
+  powerOfAttorneyImage String?       // etibarnamə
+  idCardImage          String?       // şəxsiyyət vəsiqəsi
+  selfieImage          String?       // üz tanıma üçün selfie (admin əllə yoxlayır)
+
+  user      User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  objects   BusinessObject[]
+  listings  Listing[]
+  banks     BankAccount[]
+  members   BusinessMember[]
+
+  @@index([userId])
+  @@index([status])
+}
+
+model BankAccount {
+  id         Int      @id @default(autoincrement())
+  businessId Int
+  iban       String   // bank hesabı / IBAN
+  title      String?  // bank adı / qeyd
+  isActive   Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  @@index([businessId])
+}
+
+model BusinessObject {
+  id            Int       @id @default(autoincrement())
+  businessId    Int
+  name          String    // obyekt adı (məs. "Aptek №3")
+  phone         String?   // obyekt telefonu
+  activityAreas String[]  @default([]) // fəaliyyət sahələri (16 kateqoriya adları)
+  isActive      Boolean   @default(true) // aktiv/passiv
+  address       String
+  city          String?
+  latitude      Float?
+  longitude     Float?
+  createdAt     DateTime  @default(now())
+  business      Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  listings      Listing[]
+  managers      BusinessMember[]
+
+  @@index([businessId])
+}
+
+// Səlahiyyət vermə — sahibi başqa istifadəçiyə bütün biznesin və ya
+// konkret obyektin idarəsini verə bilər (objectId null = bütün biznes).
+model BusinessMember {
+  id         Int             @id @default(autoincrement())
+  businessId Int
+  userId     Int
+  objectId   Int?
+  createdAt  DateTime        @default(now())
+  business   Business        @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  user       User            @relation("BusinessMemberships", fields: [userId], references: [id], onDelete: Cascade)
+  object     BusinessObject? @relation(fields: [objectId], references: [id], onDelete: Cascade)
+
+  @@unique([businessId, userId, objectId])
+  @@index([userId])
 }

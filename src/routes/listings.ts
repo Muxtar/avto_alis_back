@@ -15,7 +15,12 @@ router.get('/listings', async (req: Request, res: Response) => {
     const take = parseInt(limit as string);
 
     const where: Prisma.ListingWhereInput = {
-      AND: [{ OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }] }],
+      AND: [
+        { OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }] },
+        // Deaktiv biznes/obyektin elanları marketplace-də görünməsin.
+        { OR: [{ businessId: null }, { business: { isActive: true } }] },
+        { OR: [{ businessObjectId: null }, { businessObject: { isActive: true } }] },
+      ],
     };
     if (search) {
       (where.AND as Prisma.ListingWhereInput[]).push({
