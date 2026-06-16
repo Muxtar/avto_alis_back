@@ -216,7 +216,7 @@ router.put('/me/listings/:id', adminAuth, upload.array('images', 5), processImag
 });
 
 // Bulk publish from desktop sync — accepts up to 100 items at once.
-// Used by Kassa SQL desktop app to push local inventory to AvtoBazar.
+// Used by Kassa SQL desktop app to push local inventory to tradixai.
 router.post('/me/listings/bulk', bulkLimiter, adminAuth, async (req: AuthRequest, res: Response) => {
   try {
     const items = req.body?.items;

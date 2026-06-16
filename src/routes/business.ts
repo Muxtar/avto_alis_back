@@ -6,12 +6,12 @@ import { upload } from '../middleware/upload';
 const router = Router();
 const prisma = new PrismaClient();
 
-// Hər kəsə verilən xüsusi public ID (məs. "AB-7F3K2Q").
+// Hər kəsə verilən xüsusi public ID (məs. "TX-7F3K2Q").
 const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 function randomCode(len = 6): string {
   let s = '';
   for (let i = 0; i < len; i++) s += ALPHABET[Math.floor(Math.random() * ALPHABET.length)];
-  return 'AB-' + s;
+  return 'TX-' + s;
 }
 async function ensurePublicId(userId: number): Promise<string> {
   const u = await prisma.user.findUnique({ where: { id: userId }, select: { publicId: true } });
@@ -118,14 +118,21 @@ router.post('/me/businesses', adminAuth, docFields, async (req: AuthRequest, res
   }
 });
 
-// Biznesin redaktəsi — yalnız "yüngül" sahələr. Sübut sənədi/VÖEN/növ dəyişmək
-// üçün biznes silinib yenidən yaradılmalıdır (təsdiq sıfırlanır).
+// Biznesin redaktəsi. Telefon "yüngül" sahədir; lakin KYC kimliyi (ad/sahib/təsisçi)
+// dəyişirsə təsdiq etibarsızlaşır → status yenidən PENDING-ə qaytarılır.
+// Sübut sənədi/VÖEN/növ dəyişmək üçün biznes silinib yenidən yaradılmalıdır.
 router.put('/me/businesses/:id', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
     const id = parseInt(req.params.id);
     const biz = await prisma.business.findUnique({ where: { id } });
     if (!biz || biz.userId !== req.adminId) { res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return; }
     const { name, ownerName, founderName, phone } = req.body;
+    // KYC kimliyi dəyişdimi?
+    const identityChanged =
+      (name !== undefined && String(name).trim() !== biz.name) ||
+      (ownerName !== undefined && String(ownerName).trim() !== biz.ownerName) ||
+      (founderName !== undefined && String(founderName).trim() !== biz.founderName);
+    const resetApproval = identityChanged && biz.status === 'APPROVED';
     const updated = await prisma.business.update({
       where: { id },
       data: {
@@ -133,8 +140,16 @@ router.put('/me/businesses/:id', adminAuth, async (req: AuthRequest, res: Respon
         ...(ownerName !== undefined && { ownerName: String(ownerName).trim() }),
         ...(founderName !== undefined && { founderName: String(founderName).trim() }),
         ...(phone !== undefined && { phone: phone?.trim() || null }),
+        ...(resetApproval && { status: 'PENDING' as any }),
       },
     });
+    // Təsdiq sıfırlandısa və başqa təsdiqli biznes qalmayıbsa — sellerVerified-i geri al.
+    if (resetApproval) {
+      const stillApproved = await prisma.business.count({ where: { userId: biz.userId, status: 'APPROVED' } });
+      if (stillApproved === 0) {
+        await prisma.user.update({ where: { id: biz.userId }, data: { sellerVerified: false } }).catch(() => {});
+      }
+    }
     res.json({ success: true, business: updated });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
@@ -386,11 +401,19 @@ router.get('/me/businesses/:id/orders', adminAuth, async (req: AuthRequest, res:
 });
 
 // Biznes sifarişinin statusunu dəyiş (sahibi VƏ YA səlahiyyətli üzv).
+// Fərdi satıcı axını (cart.ts) ilə eyni state machine — geriyə/qanunsuz keçidlər qadağandır.
 const ORDER_STATUSES = ['PENDING', 'CONFIRMED', 'SHIPPED', 'DELIVERED', 'CANCELLED'];
+const ORDER_TRANSITIONS: Record<string, string[]> = {
+  PENDING: ['CONFIRMED', 'CANCELLED'],
+  CONFIRMED: ['SHIPPED', 'CANCELLED'],
+  SHIPPED: ['DELIVERED'],
+  DELIVERED: [],
+  CANCELLED: [],
+};
 router.put('/me/business-orders/:orderId/status', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
     const orderId = parseInt(req.params.orderId);
-    const { status } = req.body;
+    const status = String(req.body?.status || '').toUpperCase();
     if (!ORDER_STATUSES.includes(status)) { res.status(400).json({ success: false, message: 'Yanlış status' }); return; }
 
     const order = await prisma.order.findUnique({
@@ -398,6 +421,16 @@ router.put('/me/business-orders/:orderId/status', adminAuth, async (req: AuthReq
       include: { items: { include: { listing: { select: { businessId: true, businessObjectId: true } } } } },
     });
     if (!order) { res.status(404).json({ success: false, message: 'Sifariş tapılmadı' }); return; }
+
+    // State machine: yalnız icazəli keçidlər (PENDING→CONFIRMED→SHIPPED→DELIVERED, ləğv).
+    const allowedNext = ORDER_TRANSITIONS[order.status] || [];
+    if (!allowedNext.includes(status)) {
+      res.status(400).json({ success: false, message: `${order.status} → ${status} keçidi icazə verilmir` }); return;
+    }
+    // Kartla ödənilən sifarişi ödəniş təsdiqlənmədən göndərmək olmaz.
+    if (order.paymentMethod === 'CARD' && order.paymentStatus !== 'PAID' && (status === 'SHIPPED' || status === 'DELIVERED')) {
+      res.status(400).json({ success: false, message: 'Ödəniş təsdiqlənməyib — sifarişi göndərmək olmaz' }); return;
+    }
 
     // Order-dəki elanların biznes/obyektləri
     const bizIds = Array.from(new Set(order.items.map((i) => i.listing.businessId).filter((x): x is number => !!x)));
@@ -421,7 +454,7 @@ router.put('/me/business-orders/:orderId/status', adminAuth, async (req: AuthReq
         try { await prisma.listing.update({ where: { id: it.listingId }, data: { stock: { increment: it.quantity } } }); } catch { /* silinmiş ola bilər */ }
       }
     }
-    const updated = await prisma.order.update({ where: { id: orderId }, data: { status } });
+    const updated = await prisma.order.update({ where: { id: orderId }, data: { status: status as any } });
     await prisma.notification.create({
       data: { userId: order.buyerId, type: 'ORDER', title: 'Sifariş statusu', body: `Sifariş #${order.id}: ${status}`, link: `/orders/${order.id}` },
     }).catch(() => {});

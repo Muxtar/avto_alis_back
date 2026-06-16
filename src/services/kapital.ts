@@ -54,8 +54,8 @@ export async function createOrder(input: CreateOrderInput): Promise<CreatedOrder
       amount: input.amount.toFixed(2),
       currency: 'AZN',
       language: input.language || 'az',
-      title: input.title || 'AvtoBazar',
-      description: input.description || 'AvtoBazar sifariş',
+      title: input.title || 'tradixai',
+      description: input.description || 'tradixai sifariş',
       hppRedirectUrl: input.redirectUrl,
     },
   });

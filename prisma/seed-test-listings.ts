@@ -14,46 +14,46 @@ const LISTINGS: Seed[] = [
   { title: 'Honda PCX 150 skuter', category: 'Nəqliyyat › Motosiklet və mopedlər', type: 'PRODUCT', price: 4500, brand: 'Honda', desc: 'Az işlənmiş skuter.' },
   // Avtomobil ehtiyat hissələri
   { title: 'Bosch əyləc diski', category: 'Avtomobil ehtiyat hissələri › Əyləc sistemi', type: 'PRODUCT', price: 65, brand: 'Bosch', desc: 'Ön əyləc diski, original.' },
-  { title: 'Mahle hava filtri', category: 'Avtomobil ehtiyat hissələri › Filtrlər və servis', type: 'PRODUCT', price: 18, brand: 'Mahle', desc: 'Universal hava filtri.' },
+  { title: 'Mahle hava filtri', category: 'Avtomobil ehtiyat hissələri › Filtrlər və yağlar', type: 'PRODUCT', price: 18, brand: 'Mahle', desc: 'Universal hava filtri.' },
   // Daşınmaz əmlak
-  { title: '2 otaqlı mənzil, Nizami', category: 'Daşınmaz əmlak › Mənzillər', type: 'PRODUCT', price: 95000, desc: 'Təmirli, sənədli mənzil.' },
+  { title: '2 otaqlı mənzil, Nizami', category: 'Daşınmaz əmlak › Mənzillər (yeni tikili)', type: 'PRODUCT', price: 95000, desc: 'Təmirli, sənədli mənzil.' },
   { title: 'Həyət evi, Mərdəkan', category: 'Daşınmaz əmlak › Evlər və villalar', type: 'PRODUCT', price: 180000, desc: '4 otaqlı həyət evi.' },
   // Elektronika
-  { title: 'iPhone 14 Pro 128GB', category: 'Elektronika › Telefonlar və aksesuarlar', type: 'PRODUCT', price: 1800, brand: 'Apple', desc: 'İdeal vəziyyətdə.' },
-  { title: 'Lenovo IdeaPad noutbuk', category: 'Elektronika › Kompüter və noutbuk', type: 'PRODUCT', price: 950, brand: 'Lenovo', desc: 'i5, 16GB RAM, SSD.' },
-  { title: 'Samsung 55" TV', category: 'Elektronika › TV, audio, video', type: 'PRODUCT', price: 1100, brand: 'Samsung', desc: '4K Smart TV.' },
+  { title: 'iPhone 14 Pro 128GB', category: 'Elektronika › Telefonlar', type: 'PRODUCT', price: 1800, brand: 'Apple', desc: 'İdeal vəziyyətdə.' },
+  { title: 'Lenovo IdeaPad noutbuk', category: 'Elektronika › Noutbuklar', type: 'PRODUCT', price: 950, brand: 'Lenovo', desc: 'i5, 16GB RAM, SSD.' },
+  { title: 'Samsung 55" TV', category: 'Elektronika › TV və proyektorlar', type: 'PRODUCT', price: 1100, brand: 'Samsung', desc: '4K Smart TV.' },
   // Məişət texnikası
-  { title: 'Bosch soyuducu', category: 'Məişət texnikası › İri texnika', type: 'PRODUCT', price: 850, brand: 'Bosch', desc: 'No Frost, 2 kameralı.' },
+  { title: 'Bosch soyuducu', category: 'Məişət texnikası › Soyuducular', type: 'PRODUCT', price: 850, brand: 'Bosch', desc: 'No Frost, 2 kameralı.' },
   { title: 'Philips blender', category: 'Məişət texnikası › Mətbəx texnikası', type: 'PRODUCT', price: 75, brand: 'Philips', desc: '700W güclü blender.' },
   // Ev və bağ
   { title: 'Künc divan', category: 'Ev və bağ › Mebel', type: 'PRODUCT', price: 600, desc: 'Açılan künc divan.' },
-  { title: 'Əl işi xalça 2x3', category: 'Ev və bağ › Ev dekoru', type: 'PRODUCT', price: 320, desc: 'Yun xalça.' },
+  { title: 'Əl işi xalça 2x3', category: 'Ev və bağ › Xalça və tekstil', type: 'PRODUCT', price: 320, desc: 'Yun xalça.' },
   // Tikinti və təmir
   { title: 'Makita drel', category: 'Tikinti və təmir › Alət və avadanlıq', type: 'PRODUCT', price: 140, brand: 'Makita', desc: 'Şarjlı drel, 2 batareya.' },
-  { title: 'Sement (50kq) topdan', category: 'Tikinti və təmir › İnşaat materialları', type: 'PRODUCT', price: 12, desc: 'Portland sement.' },
+  { title: 'Sement (50kq) topdan', category: 'Tikinti və təmir › Sement, qum, kərpic', type: 'PRODUCT', price: 12, desc: 'Portland sement.' },
   // Geyim və aksesuar
   { title: 'Kişi dəri gödəkçə', category: 'Geyim və aksesuar › Kişi geyimi', type: 'PRODUCT', price: 130, desc: 'Original dəri.' },
-  { title: 'Qadın çantası', category: 'Geyim və aksesuar › Çanta və aksesuar', type: 'PRODUCT', price: 85, desc: 'Yeni model çanta.' },
+  { title: 'Qadın çantası', category: 'Geyim və aksesuar › Çantalar', type: 'PRODUCT', price: 85, desc: 'Yeni model çanta.' },
   { title: 'Nike Air Max krossovka', category: 'Geyim və aksesuar › Ayaqqabı', type: 'PRODUCT', price: 160, brand: 'Nike', desc: '42 ölçü.' },
   // Gözəllik və sağlamlıq
   { title: 'Dior ətir 100ml', category: 'Gözəllik və sağlamlıq › Ətriyyat', type: 'PRODUCT', price: 190, brand: 'Dior', desc: 'Original ətir.' },
   // Uşaq aləmi
-  { title: 'Uşaq arabası 3in1', category: 'Uşaq aləmi › Uşaq əşyaları', type: 'PRODUCT', price: 280, desc: 'Tam komplekt.' },
+  { title: 'Uşaq arabası 3in1', category: 'Uşaq aləmi › Uşaq arabaları', type: 'PRODUCT', price: 280, desc: 'Tam komplekt.' },
   { title: 'Lego konstruktor dəsti', category: 'Uşaq aləmi › Oyuncaqlar', type: 'PRODUCT', price: 60, brand: 'Lego', desc: '500+ detal.' },
   // Hobbi və idman
-  { title: 'Velosiped 26"', category: 'Hobbi və idman › İdman', type: 'PRODUCT', price: 240, desc: 'Dağ velosipedi.' },
+  { title: 'Velosiped 26"', category: 'Hobbi və idman › Velosipedlər', type: 'PRODUCT', price: 240, desc: 'Dağ velosipedi.' },
   { title: 'Yamaha akustik gitara', category: 'Hobbi və idman › Musiqi alətləri', type: 'PRODUCT', price: 210, brand: 'Yamaha', desc: 'Yeni simlərlə.' },
   // Heyvanlar
-  { title: 'Alman çoban iti balası', category: 'Heyvanlar › Ev heyvanları', type: 'PRODUCT', price: 400, desc: 'Sənədli, peyvəndli.' },
+  { title: 'Alman çoban iti balası', category: 'Heyvanlar › İtlər', type: 'PRODUCT', price: 400, desc: 'Sənədli, peyvəndli.' },
   // Kənd təsərrüfatı
-  { title: 'Təbii arı balı 1kq', category: 'Kənd təsərrüfatı › Məhsullar', type: 'PRODUCT', price: 25, desc: 'Dağ balı.' },
+  { title: 'Təbii arı balı 1kq', category: 'Kənd təsərrüfatı › Məhsullar (bal, meyvə)', type: 'PRODUCT', price: 25, desc: 'Dağ balı.' },
 
   // ===== XİDMƏTLƏR =====
-  { title: 'Avtomobil diaqnostikası', category: 'Xidmətlər › Avto xidmət', type: 'SERVICE', price: 30, desc: 'Kompüter diaqnostikası, bütün markalar.' },
-  { title: 'Mənzil təmiri (anbar açar)', category: 'Xidmətlər › Təmir və tikinti', type: 'SERVICE', price: 0, desc: 'Tam təmir, m² ilə razılaşma.' },
+  { title: 'Avtomobil diaqnostikası', category: 'Xidmətlər › Avtomobil xidmətləri', type: 'SERVICE', price: 30, desc: 'Kompüter diaqnostikası, bütün markalar.' },
+  { title: 'Mənzil təmiri (anbar açar)', category: 'Xidmətlər › Təmir və tikinti xidmətləri', type: 'SERVICE', price: 0, desc: 'Tam təmir, m² ilə razılaşma.' },
   { title: 'Soyuducu təmiri evdə', category: 'Xidmətlər › Məişət texnikası təmiri', type: 'SERVICE', price: 20, desc: 'Yerində təmir, zəmanətlə.' },
   { title: 'İngilis dili repetitoru', category: 'Xidmətlər › Təhsil və repetitor', type: 'SERVICE', price: 15, desc: 'Fərdi dərslər, onlayn/oflayn.' },
-  { title: 'Sayt və mobil tətbiq hazırlanması', category: 'Xidmətlər › IT və dizayn', type: 'SERVICE', price: 500, desc: 'Peşəkar veb/mobil həllər.' },
+  { title: 'Sayt və mobil tətbiq hazırlanması', category: 'Xidmətlər › Veb sayt və dizayn', type: 'SERVICE', price: 500, desc: 'Peşəkar veb/mobil həllər.' },
 ];
 
 async function main() {

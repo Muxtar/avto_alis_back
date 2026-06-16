@@ -17,10 +17,12 @@ router.get('/payment/callback', async (req: Request, res: Response) => {
     if (Number.isNaN(gatewayOrderId)) {
       return res.redirect(`${FRONTEND_URL}/payment/return?status=error`);
     }
-    const orders = await prisma.order.findMany({ where: { gatewayOrderId } });
+    // Əvvəlki vəziyyəti bilmək üçün order-ləri item-lərlə birlikdə əvvəlcədən oxu (idempotentlik).
+    const orders = await prisma.order.findMany({ where: { gatewayOrderId }, include: { items: true } });
     if (orders.length === 0) {
       return res.redirect(`${FRONTEND_URL}/payment/return?status=error`);
     }
+    const wasPaid = orders.some((o) => o.paymentStatus === 'PAID');
 
     // Banka birbaşa sorğu ilə həqiqi statusu al (callback STATUS-a güvənmə).
     const { status } = await getOrderStatus(gatewayOrderId);
@@ -28,17 +30,24 @@ router.get('/payment/callback', async (req: Request, res: Response) => {
 
     await prisma.order.updateMany({
       where: { gatewayOrderId },
-      data: {
-        gatewayStatus: status || null,
-        paymentStatus: paid ? 'PAID' : 'FAILED',
-        ...(paid ? { status: 'CONFIRMED' } : {}),
-      },
+      data: { gatewayStatus: status || null, paymentStatus: paid ? 'PAID' : 'FAILED' },
     });
 
-    // Ödəniş uğursuzdursa — stoku geri qaytar (checkout-da azalmışdı).
-    if (!paid) {
-      const withItems = await prisma.order.findMany({ where: { gatewayOrderId }, include: { items: true } });
-      for (const o of withItems) {
+    if (paid) {
+      // Yalnız hələ PENDING olanları təsdiqlə — satıcı/biznes artıq CANCELLED edibsə dirçəltmə.
+      await prisma.order.updateMany({ where: { gatewayOrderId, status: 'PENDING' }, data: { status: 'CONFIRMED' } });
+      // Loyalty xalını yalnız indi (ödəniş təsdiqində) və bir dəfə hesabla (idempotent).
+      if (!wasPaid) {
+        const byBuyer = new Map<number, number>();
+        for (const o of orders) if (o.pointsEarned > 0) byBuyer.set(o.buyerId, (byBuyer.get(o.buyerId) || 0) + o.pointsEarned);
+        for (const [buyerId, pts] of byBuyer) {
+          try { await prisma.user.update({ where: { id: buyerId }, data: { loyaltyPoints: { increment: pts } } }); } catch { /* istifadəçi silinmiş ola bilər */ }
+        }
+      }
+    } else {
+      // Ödəniş uğursuz — stoku geri qaytar (yalnız bir dəfə: əvvəl FAILED deyilsə).
+      for (const o of orders) {
+        if (o.paymentStatus === 'FAILED') continue;
         for (const it of o.items) {
           try { await prisma.listing.update({ where: { id: it.listingId }, data: { stock: { increment: it.quantity } } }); } catch { /* listing silinmiş ola bilər */ }
         }

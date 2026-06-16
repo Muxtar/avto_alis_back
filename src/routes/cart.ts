@@ -335,8 +335,11 @@ router.post('/cart/checkout', requireType(BUYER_TYPES), async (req: AuthRequest,
       }
 
       // M14: Single user.update for net loyalty change (was 2 round-trips).
+      // CARD: qazanılan xal yalnız ödəniş təsdiqlənəndə (payment callback) hesablanır;
+      // burada yalnız istifadə olunan xal çıxılır. CASH/WALLET: dərhal hesablanır.
       const totalPointsEarned = createdOrders.reduce((s, o) => s + o.pointsEarned, 0);
-      const netPointsDelta = totalPointsEarned - pointsToUse;
+      const earnedNow = paymentMethod === 'CARD' ? 0 : totalPointsEarned;
+      const netPointsDelta = earnedNow - pointsToUse;
       if (netPointsDelta !== 0) {
         await tx.user.update({
           where: { id: req.adminId! },
@@ -389,7 +392,7 @@ router.post('/cart/checkout', requireType(BUYER_TYPES), async (req: AuthRequest,
         try {
           const kapital = await createKapitalOrder({
             amount: grandTotal,
-            title: 'AvtoBazar',
+            title: 'tradixai',
             description: `Sifariş #${orders.map((o) => o.id).join(',')}`,
             redirectUrl: `${PUBLIC_BACKEND_URL}/api/payment/callback`,
           });
@@ -399,9 +402,27 @@ router.post('/cart/checkout', requireType(BUYER_TYPES), async (req: AuthRequest,
           });
           paymentUrl = kapital.redirectUrl;
         } catch (err: any) {
-          // Ödəniş yaradıla bilmədi — order-lər PENDING qalır, istifadəçi sonra yenidən cəhd edə bilər.
+          // Ödəniş başlaya bilmədi → kompensasiya: stok, istifadə olunan xal, promo
+          // və order-ləri geri qaytar (yoxsa stok bloklanmış, order PENDING ilişib qalır).
           console.error('[checkout] Kapital createOrder failed:', err.message);
-          res.status(502).json({ success: false, message: 'Ödəniş başladıla bilmədi: ' + err.message, orders });
+          try {
+            await prisma.$transaction(async (tx) => {
+              const its = await tx.orderItem.findMany({ where: { orderId: { in: orders.map((o) => o.id) } }, select: { listingId: true, quantity: true } });
+              for (const it of its) {
+                await tx.listing.update({ where: { id: it.listingId }, data: { stock: { increment: it.quantity } } }).catch(() => {});
+              }
+              if (pointsToUse > 0) {
+                await tx.user.update({ where: { id: req.adminId! }, data: { loyaltyPoints: { increment: pointsToUse } } });
+              }
+              if (promoCodeRecord) {
+                await tx.promoCode.update({ where: { id: promoCodeRecord.id }, data: { usageCount: { decrement: 1 } } }).catch(() => {});
+              }
+              await tx.order.updateMany({ where: { id: { in: orders.map((o) => o.id) } }, data: { status: 'CANCELLED', paymentStatus: 'FAILED' } });
+            });
+          } catch (rbErr: any) {
+            console.error('[checkout] rollback failed:', rbErr.message);
+          }
+          res.status(502).json({ success: false, message: 'Ödəniş başladıla bilmədi: ' + err.message });
           return;
         }
       }
@@ -545,6 +566,11 @@ router.put('/orders/:id/status', adminAuth, async (req: AuthRequest, res: Respon
         success: false,
         message: `${order.status} → ${next} keçidi icazə verilmir`,
       });
+      return;
+    }
+    // Kartla ödənilən sifarişi ödəniş təsdiqlənmədən göndərmək olmaz.
+    if (order.paymentMethod === 'CARD' && order.paymentStatus !== 'PAID' && (next === 'SHIPPED' || next === 'DELIVERED')) {
+      res.status(400).json({ success: false, message: 'Ödəniş təsdiqlənməyib — sifarişi göndərmək olmaz' });
       return;
     }
     const updated = await prisma.order.update({
