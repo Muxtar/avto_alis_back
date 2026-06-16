@@ -58,10 +58,13 @@ const LISTINGS: Seed[] = [
 
 async function main() {
   // Elanları sahiblənəcək satıcı — varsa ilk istifadəçi, yoxsa yeni yarat.
-  let seller = await prisma.user.findFirst({ where: { role: 'USER' }, orderBy: { id: 'asc' } });
+  // `select` ilə yalnız köhnə sütunları oxuyuruq (schema drift-ə qarşı dayanıqlı).
+  const sel = { id: true, name: true, phone: true } as const;
+  let seller = await prisma.user.findFirst({ where: { role: 'USER' }, orderBy: { id: 'asc' }, select: sel });
   if (!seller) {
     seller = await prisma.user.create({
       data: { name: 'Test Satıcı', phone: '+994500000000', type: 'PARTS_SELLER', profileComplete: true, verified: true },
+      select: sel,
     });
   }
   console.log(`Satıcı: #${seller.id} (${seller.name || seller.phone})`);
@@ -85,6 +88,7 @@ async function main() {
         city: pick(CITIES, i),
         expiresAt,
       },
+      select: { id: true },
     });
     n++;
   }
