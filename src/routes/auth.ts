@@ -319,6 +319,47 @@ router.post('/register/complete-json', adminAuth, async (req: AuthRequest, res: 
   }
 });
 
+// Profili kimlik vəsiqəsi şəkli + selfie ilə tamamla (FIN mətni əvəzinə).
+// Üz uyğunluğu brauzerdə face-api.js ilə hesablanır (faceMatchScore 0–1);
+// idVerifyStatus = PENDING qoyulur — admin son təsdiqi verir.
+const idPairUpload = upload.fields([
+  { name: 'idCardImage', maxCount: 1 },
+  { name: 'selfieImage', maxCount: 1 },
+]);
+router.post('/register/complete-id', adminAuth, idPairUpload, async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.adminId!;
+    const { name, profession, faceMatchScore } = req.body as { name?: string; profession?: string; faceMatchScore?: string };
+    const nameErr = validateName(name || '');
+    if (nameErr) { res.status(400).json({ success: false, message: nameErr }); return; }
+
+    const files = req.files as Record<string, Express.Multer.File[]> | undefined;
+    const idCardImage = files?.['idCardImage']?.[0]?.filename || null;
+    const selfieImage = files?.['selfieImage']?.[0]?.filename || null;
+    if (!idCardImage || !selfieImage) {
+      res.status(400).json({ success: false, message: 'Şəxsiyyət vəsiqəsi şəkli və selfie tələb olunur' }); return;
+    }
+    const scoreNum = faceMatchScore !== undefined ? parseFloat(String(faceMatchScore)) : NaN;
+
+    const user = await prisma.user.update({
+      where: { id: userId },
+      data: {
+        name: (name || '').trim(),
+        profession: profession?.trim() || null,
+        idCardImage,
+        selfieImage,
+        faceMatchScore: Number.isFinite(scoreNum) ? scoreNum : null,
+        idVerifyStatus: 'PENDING',
+        profileComplete: true,
+      },
+      select: { id: true, name: true, phone: true, email: true, type: true, role: true, verified: true, profileComplete: true, sellerVerified: true, idVerifyStatus: true, faceMatchScore: true },
+    });
+    res.json({ success: true, user });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
 // Resend verification code for a given phone (used on OTP screen)
 router.post('/verify/resend', verifyLimiter, async (req: Request, res: Response) => {
   try {

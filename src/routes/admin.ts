@@ -645,4 +645,52 @@ router.get('/admin/analytics', requireAdmin, async (_req: AuthRequest, res: Resp
   }
 });
 
+// ==================== KİMLİK (FACE) YOXLAMASI ====================
+// İstifadəçilərin kimlik vəsiqəsi + selfie yoxlamaları (face-api.js balı + admin gözü).
+router.get('/admin/id-verifications', requireAdmin, async (req: AuthRequest, res: Response) => {
+  try {
+    const status = String(req.query.status || 'PENDING').toUpperCase();
+    const where: Prisma.UserWhereInput = status === 'ALL'
+      ? { idCardImage: { not: null } }
+      : { idVerifyStatus: status as any };
+    const users = await prisma.user.findMany({
+      where,
+      orderBy: { id: 'desc' },
+      select: {
+        id: true, name: true, phone: true, profession: true,
+        idCardImage: true, selfieImage: true, faceMatchScore: true, idVerifyStatus: true,
+      },
+      take: 200,
+    });
+    res.json({ success: true, users });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+router.post('/admin/id-verifications/:userId/:action', requireAdmin, async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = parseInt(req.params.userId);
+    const action = String(req.params.action);
+    if (!['approve', 'reject'].includes(action)) { res.status(400).json({ success: false, message: 'Yanlış əməliyyat' }); return; }
+    const user = await prisma.user.update({
+      where: { id: userId },
+      data: { idVerifyStatus: action === 'approve' ? 'APPROVED' : 'REJECTED' },
+      select: { id: true, idVerifyStatus: true },
+    });
+    await prisma.notification.create({
+      data: {
+        userId,
+        type: 'SYSTEM',
+        title: 'Kimlik yoxlaması',
+        body: action === 'approve' ? 'Kimliyiniz təsdiqləndi ✓' : 'Kimlik yoxlaması rədd edildi. Yenidən cəhd edin.',
+        link: '/profile',
+      },
+    }).catch(() => {});
+    res.json({ success: true, user });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
 export default router;

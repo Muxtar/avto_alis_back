@@ -108,7 +108,11 @@ model User {
   isBlocked         Boolean            @default(false) // admin tərəfindən bloklanıb
   profileComplete   Boolean            @default(false)
   profession        String?            // məslək (qeydiyyatda soruşulur)
-  idNumber          String?            // kimlik / FIN (şəxsiyyət vəsiqəsi nömrəsi)
+  idNumber          String?            // kimlik / FIN (köhnə — indi şəkil istənir)
+  idCardImage       String?            // şəxsiyyət vəsiqəsi şəkli (FIN əvəzinə)
+  selfieImage       String?            // selfie (üz tanıma üçün)
+  faceMatchScore    Float?             // face-api.js oxşarlıq balı (0–1, brauzerdə)
+  idVerifyStatus    VerificationStatus? // null=təqdim olunmayıb, PENDING=admin gözləyir
   sellerVerified    Boolean            @default(false) // ≥1 təsdiqlənmiş biznesi var
   sellerVerifiedAt  DateTime?
   sellerApplication SellerVerification?
