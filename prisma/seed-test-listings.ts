@@ -69,10 +69,17 @@ async function main() {
   }
   console.log(`Satıcı: #${seller.id} (${seller.name || seller.phone})`);
 
+  // İdempotent: əvvəlki test elanlarını (eyni başlıqlı) sil, sonra yenidən yarat.
+  const titles = LISTINGS.map((l) => l.title);
+  const del = await prisma.listing.deleteMany({ where: { userId: seller.id, title: { in: titles } } });
+  if (del.count > 0) console.log(`Köhnə test elanları silindi: ${del.count}`);
+
   const expiresAt = new Date(Date.now() + 20 * 24 * 60 * 60 * 1000);
   let n = 0;
   for (let i = 0; i < LISTINGS.length; i++) {
     const l = LISTINGS[i];
+    // Stabil demo şəkil (picsum — real foto, etibarlı CDN). 1 şəkil hər elana.
+    const img = `https://picsum.photos/seed/tradixai-${i + 1}/600/450`;
     await prisma.listing.create({
       data: {
         userId: seller.id,
@@ -81,7 +88,7 @@ async function main() {
         price: l.price,
         category: l.category,
         type: l.type,
-        images: [],
+        images: [img],
         condition: 'NEW',
         brand: l.brand || null,
         stock: l.type === 'SERVICE' ? 1 : 10,
