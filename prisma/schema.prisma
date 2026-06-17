@@ -132,6 +132,7 @@ model User {
   sellerOrders      Order[]          @relation("SellerOrders")
   courierOrders     Order[]          @relation("CourierOrders")
   emailVerifications EmailVerification[]
+  socialLinks       SocialLink[]
   buyerReturns      ReturnRequest[]  @relation("BuyerReturns")
   sellerReturns     ReturnRequest[]  @relation("SellerReturns")
   buyerInquiries    Inquiry[]        @relation("BuyerInquiries")
@@ -388,6 +389,20 @@ model EmailVerification {
   verified  Boolean  @default(false)
   createdAt DateTime @default(now())
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+// İstifadəçinin sosial media hesabları — admin tərəfindən təsdiqlənir,
+// təsdiqlənənlər public profildə "✓" ilə göstərilir.
+model SocialLink {
+  id        Int      @id @default(autoincrement())
+  userId    Int
+  platform  String   // instagram, facebook, tiktok, youtube, linkedin, twitter, telegram, website
+  url       String
+  verified  Boolean  @default(false)
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, platform])
 }
 
 model OrderItem {

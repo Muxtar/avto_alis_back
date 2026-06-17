@@ -72,6 +72,12 @@ router.get('/me/businesses', adminAuth, async (req: AuthRequest, res: Response) 
 // Yeni biznes (multipart — sənədlər + sahələr + banks JSON)
 router.post('/me/businesses', adminAuth, docFields, async (req: AuthRequest, res: Response) => {
   try {
+    // Kimlik + üz təsdiqi olmadan biznes yaratmaq olmaz (profili tamamlamalıdır).
+    const me = await prisma.user.findUnique({ where: { id: req.adminId! }, select: { idVerifyStatus: true } });
+    if (!me?.idVerifyStatus) {
+      res.status(403).json({ success: false, code: 'ID_NOT_VERIFIED', message: 'Biznes yaratmaq üçün əvvəlcə profilinizi tamamlayın (kimlik + üz təsdiqi).' });
+      return;
+    }
     const { kind, proofType, name, voen, ownerName, founderName, phone, banks } = req.body;
     if (!name?.trim() || !voen?.trim() || !ownerName?.trim() || !founderName?.trim()) {
       res.status(400).json({ success: false, message: 'Ad, VÖEN, sahibi və təsisçi tələb olunur' }); return;

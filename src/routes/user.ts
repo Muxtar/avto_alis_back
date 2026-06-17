@@ -1,6 +1,7 @@
-import { Router, Response } from 'express';
+import { Router, Request, Response } from 'express';
 import { PrismaClient } from '@prisma/client';
 import { adminAuth, AuthRequest } from '../middleware/auth';
+import { getProvider, isConfigured, signState, verifyState, OAUTH_PLATFORMS } from '../services/socialOauth';
 import { upload } from '../middleware/upload';
 import { processImages } from '../middleware/imageProcess';
 import { listingWriteLimiter, bulkLimiter } from '../middleware/rateLimiter';
@@ -19,8 +20,10 @@ router.get('/me', adminAuth, async (req: AuthRequest, res: Response) => {
       select: {
         id: true, name: true, phone: true, email: true, type: true, role: true, verified: true,
         profileComplete: true, sellerVerified: true, sellerVerifiedAt: true, createdAt: true,
+        idVerifyStatus: true, profession: true,
         city: true, address: true, latitude: true, longitude: true,
         workplaces: true, vehicles: true,
+        socialLinks: { select: { id: true, platform: true, url: true, verified: true } },
         sellerApplication: { select: { status: true, rejectionReason: true, submittedAt: true } },
         _count: { select: { listings: true, sentMessages: true, receivedMessages: true } },
       },
@@ -378,6 +381,66 @@ router.post('/me/email/verify', adminAuth, async (req: AuthRequest, res: Respons
     res.json({ success: true, user });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+// ===================== SOSIAL MEDIA HESABLARI (yalnız OAuth ilə təsdiq) =====================
+router.get('/me/social', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const links = await prisma.socialLink.findMany({ where: { userId: req.adminId! }, orderBy: { id: 'asc' } });
+    res.json({ success: true, links });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
+router.delete('/me/social/:id', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const id = parseInt(req.params.id);
+    const link = await prisma.socialLink.findUnique({ where: { id } });
+    if (!link || link.userId !== req.adminId) { res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return; }
+    await prisma.socialLink.delete({ where: { id } });
+    res.json({ success: true });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
+// ---- OAuth ilə təsdiq ("hesabla daxil ol" — ən güclü üsul) ----
+const SOCIAL_FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000';
+
+// Hansı platformalar OAuth üçün konfiqurasiya olunub (env açarı var)?
+router.get('/social/oauth/providers', async (_req: Request, res: Response) => {
+  res.json({ success: true, configured: OAUTH_PLATFORMS.filter(isConfigured) });
+});
+
+// OAuth başlat — imzalı state ilə platformanın authorize URL-ini qaytarır.
+router.get('/me/social/oauth/:platform/start', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const platform = req.params.platform;
+    const provider = getProvider(platform);
+    if (!provider) { res.status(400).json({ success: false, message: 'Platforma dəstəklənmir' }); return; }
+    if (!isConfigured(platform)) { res.status(400).json({ success: false, message: `${platform} üçün OAuth açarları konfiqurasiya olunmayıb` }); return; }
+    res.json({ success: true, url: provider.buildAuthUrl(signState(req.adminId!, platform)) });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
+// OAuth callback — platforma buraya yönləndirir: token mübadiləsi + linki verified saxla.
+router.get('/social/oauth/:platform/callback', async (req: Request, res: Response) => {
+  const platform = req.params.platform;
+  const fail = (msg: string) => res.redirect(`${SOCIAL_FRONTEND_URL}/profile?social=error&msg=${encodeURIComponent(msg)}`);
+  try {
+    const code = String(req.query.code || '');
+    const state = String(req.query.state || '');
+    const decoded = verifyState(state);
+    const provider = getProvider(platform);
+    if (!decoded || decoded.platform !== platform || !provider) return fail('Etibarsız sorğu');
+    if (!code) return fail('Kod gəlmədi');
+    const { url } = await provider.exchange(code);
+    await prisma.socialLink.upsert({
+      where: { userId_platform: { userId: decoded.userId, platform } },
+      update: { url, verified: true },
+      create: { userId: decoded.userId, platform, url, verified: true },
+    });
+    return res.redirect(`${SOCIAL_FRONTEND_URL}/profile?social=connected`);
+  } catch (e: any) {
+    return fail(e.message || 'OAuth xətası');
   }
 });
 

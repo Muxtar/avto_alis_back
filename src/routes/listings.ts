@@ -165,7 +165,13 @@ router.get('/sellers/:id', async (req: Request, res: Response) => {
   try {
     const user = await prisma.user.findUnique({
       where: { id: parseInt(req.params.id) },
-      select: { id: true, name: true, phone: true, type: true, createdAt: true, workplaces: true, serviceBrands: true, serviceAllBrands: true, serviceCategories: true },
+      select: {
+        id: true, name: true, phone: true, type: true, createdAt: true, workplaces: true,
+        serviceBrands: true, serviceAllBrands: true, serviceCategories: true,
+        sellerVerified: true, idVerifyStatus: true,
+        // Yalnız təsdiqlənmiş sosial hesablar public profildə görünür.
+        socialLinks: { where: { verified: true }, select: { platform: true, url: true } },
+      },
     });
     if (!user) {
       res.status(404).json({ success: false, message: 'İstifadəçi tapılmadı' });
