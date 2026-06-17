@@ -108,6 +108,7 @@ model User {
   isBlocked         Boolean            @default(false) // admin tərəfindən bloklanıb
   profileComplete   Boolean            @default(false)
   profession        String?            // məslək (qeydiyyatda soruşulur)
+  avatar            String?            // profil şəkli
   idNumber          String?            // kimlik / FIN (köhnə — indi şəkil istənir)
   idCardImage       String?            // şəxsiyyət vəsiqəsi şəkli (FIN əvəzinə)
   selfieImage       String?            // selfie (üz tanıma üçün)

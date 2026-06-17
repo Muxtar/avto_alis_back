@@ -20,7 +20,7 @@ router.get('/me', adminAuth, async (req: AuthRequest, res: Response) => {
       select: {
         id: true, name: true, phone: true, email: true, type: true, role: true, verified: true,
         profileComplete: true, sellerVerified: true, sellerVerifiedAt: true, createdAt: true,
-        idVerifyStatus: true, profession: true,
+        idVerifyStatus: true, profession: true, avatar: true,
         city: true, address: true, latitude: true, longitude: true,
         workplaces: true, vehicles: true,
         socialLinks: { select: { id: true, platform: true, url: true, verified: true } },
@@ -35,11 +35,25 @@ router.get('/me', adminAuth, async (req: AuthRequest, res: Response) => {
   }
 });
 
+// Profil şəkli yüklə.
+router.post('/me/avatar', adminAuth, upload.single('avatar'), async (req: AuthRequest, res: Response) => {
+  try {
+    const file = req.file as Express.Multer.File | undefined;
+    if (!file) { res.status(400).json({ success: false, message: 'Şəkil tələb olunur' }); return; }
+    const user = await prisma.user.update({
+      where: { id: req.adminId! },
+      data: { avatar: file.filename },
+      select: { id: true, name: true, phone: true, email: true, type: true, role: true, verified: true, profileComplete: true, profession: true, avatar: true },
+    });
+    res.json({ success: true, user });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
 // Update my profile. city/address/latitude/longitude are the user's default
 // location used to auto-fill listings and power the /locations browser.
 router.put('/me', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
-    const { name, phone, city, address, latitude, longitude } = req.body;
+    const { name, phone, city, address, latitude, longitude, profession } = req.body;
     const toFloat = (v: any) => {
       if (v === null || v === '' || v === undefined) return null;
       const n = typeof v === 'number' ? v : parseFloat(v);
@@ -50,6 +64,7 @@ router.put('/me', adminAuth, async (req: AuthRequest, res: Response) => {
       data: {
         ...(name !== undefined && { name }),
         ...(phone !== undefined && { phone }),
+        ...(profession !== undefined && { profession: profession?.trim() || null }),
         ...(city !== undefined && { city: city || null }),
         ...(address !== undefined && { address: address || null }),
         ...(latitude !== undefined && { latitude: toFloat(latitude) }),
@@ -57,6 +72,7 @@ router.put('/me', adminAuth, async (req: AuthRequest, res: Response) => {
       },
       select: {
         id: true, name: true, phone: true, email: true, type: true, role: true, verified: true, createdAt: true,
+        profession: true, avatar: true,
         city: true, address: true, latitude: true, longitude: true,
       },
     });
