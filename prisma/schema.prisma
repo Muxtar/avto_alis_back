@@ -261,6 +261,7 @@ model Listing {
   model       String?
   city        String?
   fuelType    FuelType?
+  attributes  Json?       // kateqoriyaya xüsusi sahələr (otaq sayı, sahə, ölçü, yürüş...)
   paymentType PaymentType?
   viewCount   Int         @default(0)
   expiresAt   DateTime?

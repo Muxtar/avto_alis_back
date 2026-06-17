@@ -88,7 +88,8 @@ router.get('/me/listings', adminAuth, async (req: AuthRequest, res: Response) =>
 // location from their profile so listings always carry where they're from.
 router.post('/me/listings', listingWriteLimiter, adminAuth, upload.array('images', 5), processImages, async (req: AuthRequest, res: Response) => {
   try {
-    const { title, description, price, category, type, location, phone, condition, country, brand, stock, forVehicle, unit, unitValue, year, model, city, fuelType, paymentType, businessObjectId } = req.body;
+    const { title, description, price, category, type, location, phone, condition, country, brand, stock, forVehicle, unit, unitValue, year, model, city, fuelType, paymentType, businessObjectId, attributes } = req.body;
+    const parsedAttrs = (() => { try { const o = attributes ? JSON.parse(attributes) : null; return o && typeof o === 'object' && Object.keys(o).length ? o : undefined; } catch { return undefined; } })();
 
     if (!title || !description || !price || !category || !type) {
       res.status(400).json({ success: false, message: 'Başlıq, təsvir, qiymət, kateqoriya və tip tələb olunur' }); return;
@@ -143,6 +144,7 @@ router.post('/me/listings', listingWriteLimiter, adminAuth, upload.array('images
         city: effectiveCity,
         fuelType: fuelType || null,
         paymentType: paymentType || null,
+        attributes: parsedAttrs ?? undefined,
         businessId: bizId,
         businessObjectId: bizObjId,
         expiresAt,
@@ -165,7 +167,8 @@ router.put('/me/listings/:id', adminAuth, upload.array('images', 5), processImag
     if (!existing || existing.userId !== req.adminId) {
       res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return;
     }
-    const { title, description, price, category, type, location, phone, condition, country, brand, stock, forVehicle, unit, unitValue, year, model, city, fuelType, paymentType, existingImages } = req.body;
+    const { title, description, price, category, type, location, phone, condition, country, brand, stock, forVehicle, unit, unitValue, year, model, city, fuelType, paymentType, existingImages, attributes } = req.body;
+    const parsedAttrs = attributes !== undefined ? (() => { try { const o = JSON.parse(attributes); return o && typeof o === 'object' ? o : {}; } catch { return {}; } })() : undefined;
 
     let nextImages: string[] | undefined;
     const isMultipart = (req.headers['content-type'] || '').includes('multipart/form-data');
@@ -209,6 +212,7 @@ router.put('/me/listings/:id', adminAuth, upload.array('images', 5), processImag
         ...(city !== undefined && { city: city || null }),
         ...(fuelType !== undefined && { fuelType: fuelType || null }),
         ...(paymentType !== undefined && { paymentType: paymentType || null }),
+        ...(parsedAttrs !== undefined && { attributes: parsedAttrs }),
         ...(nextImages !== undefined && { images: nextImages }),
       },
     });
