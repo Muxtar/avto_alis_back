@@ -469,3 +469,87 @@ Qeyd: Azərbaycan hərflərinin transliterasiyasını (ə↔e) və ad/soyad sır
     reason: typeof parsed.reason === 'string' ? parsed.reason : '',
   };
 }
+
+// ---- Bank sənədindən hesab nömrələrinin (IBAN) çıxarılması ----
+
+export interface BankAccountExtract { iban: string; bankName: string | null; holder: string | null; }
+export interface BankDocAnalysis {
+  ok: boolean;
+  accounts: BankAccountExtract[];
+  documentValid: boolean;
+  reason: string;
+  error?: string;
+}
+
+// IBAN-ı normallaşdır (boşluqları sil, böyük hərf). Azərbaycan IBAN: AZ + 2 rəqəm + 4 hərf + 20 simvol = 28.
+function normalizeIban(s: string): string | null {
+  const v = String(s || '').replace(/\s+/g, '').toUpperCase();
+  return /^[A-Z]{2}\d{2}[A-Z0-9]{10,30}$/.test(v) ? v : null;
+}
+
+/**
+ * Bank hesabı sənədindən (bank arayışı, hesab açılışı və s.) IBAN-ları oxuyur.
+ */
+export async function extractBankAccounts(bankDocPath: string): Promise<BankDocAnalysis> {
+  const ai = getClient();
+  if (!ai) return { ok: false, accounts: [], documentValid: false, reason: '', error: 'AI açarı qoyulmayıb — admin əl ilə yoxlayacaq.' };
+
+  let b64: string;
+  try { b64 = (await fs.promises.readFile(bankDocPath)).toString('base64'); }
+  catch { return { ok: false, accounts: [], documentValid: false, reason: '', error: 'Sənəd oxunmadı.' }; }
+
+  const prompt = `Bu, bir bank sənədidir (bank arayışı, hesab açılışı və ya hesab məlumatı). Sənəddəki BÜTÜN bank hesabı nömrələrini (IBAN) oxu.
+YALNIZ bu JSON formatında cavab ver (başqa heç nə yazma):
+{
+  "accounts": [
+    { "iban": "tam IBAN (məs. AZ21NABZ00000000137010001944)", "bankName": "bankın adı və ya null", "holder": "hesab sahibinin adı və ya null" }
+  ],
+  "documentValid": true/false,   // sənəd əsl bank sənədi və oxunaqlı görünürmü
+  "reason": "Azərbaycan dilində 1 cümlə qısa izah"
+}
+Qeyd: IBAN-ı tam və boşluqsuz yaz. Hesab tapılmırsa accounts boş massiv olsun. Azərbaycan IBAN-ları "AZ" ilə başlayır və 28 simvoldur.`;
+
+  let text: string;
+  try {
+    const res = await ai.messages.create({
+      model: AI_MODEL,
+      max_tokens: 1200,
+      messages: [{ role: 'user', content: [
+        { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: b64 } },
+        { type: 'text', text: prompt },
+      ] }],
+    });
+    text = res.content.filter((b: any) => b.type === 'text').map((b: any) => b.text).join('\n').trim();
+  } catch (e: any) {
+    return { ok: false, accounts: [], documentValid: false, reason: '', error: `AI oxuya bilmədi: ${e?.message || 'xəta'}` };
+  }
+
+  const jsonStr = (() => {
+    const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+    if (fence) return fence[1].trim();
+    const brace = text.match(/\{[\s\S]*\}/);
+    return brace ? brace[0] : text;
+  })();
+
+  let parsed: any;
+  try { parsed = JSON.parse(jsonStr); }
+  catch { return { ok: false, accounts: [], documentValid: false, reason: '', error: 'AI cavabı oxunmadı.' }; }
+
+  const accounts: BankAccountExtract[] = Array.isArray(parsed.accounts)
+    ? parsed.accounts.map((a: any) => {
+        const iban = normalizeIban(a?.iban);
+        if (!iban) return null;
+        return { iban, bankName: typeof a?.bankName === 'string' && a.bankName.trim() ? a.bankName.trim() : null, holder: typeof a?.holder === 'string' && a.holder.trim() ? a.holder.trim() : null };
+      }).filter(Boolean).slice(0, 10)
+    : [];
+  // Təkrarları sil.
+  const seen = new Set<string>();
+  const unique = accounts.filter((a) => (seen.has(a.iban) ? false : (seen.add(a.iban), true)));
+
+  return {
+    ok: true,
+    accounts: unique,
+    documentValid: Boolean(parsed.documentValid),
+    reason: typeof parsed.reason === 'string' ? parsed.reason : '',
+  };
+}

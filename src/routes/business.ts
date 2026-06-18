@@ -3,7 +3,7 @@ import { PrismaClient } from '@prisma/client';
 import { adminAuth, requireAdmin, AuthRequest } from '../middleware/auth';
 import { upload } from '../middleware/upload';
 import { processImages } from '../middleware/imageProcess';
-import { verifyBusinessAI, BusinessDoc } from '../services/credentialAI';
+import { verifyBusinessAI, BusinessDoc, extractBankAccounts } from '../services/credentialAI';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -33,6 +33,7 @@ const docFields = upload.fields([
   { name: 'taxDocImage', maxCount: 1 },
   { name: 'companyDocImage', maxCount: 1 },
   { name: 'powerOfAttorneyImage', maxCount: 1 },
+  { name: 'bankDocImage', maxCount: 1 },
   { name: 'idCardImage', maxCount: 1 },
   { name: 'selfieImage', maxCount: 1 },
 ]);
@@ -114,6 +115,14 @@ router.post('/me/businesses', adminAuth, docFields, processImages, async (req: A
       res.status(400).json({ success: false, message: 'Şəxsiyyət vəsiqəsi və selfie tələb olunur' }); return;
     }
 
+    // Bank sənədi tələb olunur — IBAN-lar buradan AI ilə oxunur.
+    const bankDocImage = fileName(req, 'bankDocImage');
+    if (!bankDocImage) { res.status(400).json({ success: false, message: 'Bank hesabı sənədi tələb olunur' }); return; }
+    const bankDocPath = filePath(req, 'bankDocImage');
+    const bankAI = bankDocPath
+      ? await extractBankAccounts(bankDocPath)
+      : { ok: false, accounts: [] as { iban: string; bankName: string | null; holder: string | null }[], documentValid: false, reason: '' };
+
     // ---- Claude AI ilə şirkət sənədlərinin yoxlanması ----
     // Profil sahibi rəhbər (vergi sənədi) və ya etibarnaməli isə avtomatik təsdiq.
     const docs: BusinessDoc[] = [];
@@ -140,7 +149,7 @@ router.post('/me/businesses', adminAuth, docFields, processImages, async (req: A
         name: name.trim(), voen: voen.trim(),
         ownerName: ownerName.trim(), founderName: founderName.trim(),
         phone: phone?.trim() || null,
-        taxDocImage, companyDocImage, powerOfAttorneyImage, idCardImage, selfieImage,
+        taxDocImage, companyDocImage, powerOfAttorneyImage, bankDocImage, idCardImage, selfieImage,
         aiAuthorized: ai.ok ? ai.authorized : null,
         aiVoenMatch: ai.ok ? ai.voenMatch : null,
         aiConfidence: ai.ok ? ai.confidence : null,
@@ -159,21 +168,32 @@ router.post('/me/businesses', adminAuth, docFields, processImages, async (req: A
       }).catch(() => {});
     }
 
-    // Banks JSON (ixtiyari) — [{iban,title}]
+    // Bank hesabları: əvvəlcə bank sənədindən AI ilə oxunan IBAN-lar, sonra əl ilə əlavə olunanlar.
+    const bankRows: { businessId: number; iban: string; title: string | null }[] = [];
+    const seenIban = new Set<string>();
+    for (const acc of bankAI.accounts) {
+      if (!seenIban.has(acc.iban)) { seenIban.add(acc.iban); bankRows.push({ businessId: business.id, iban: acc.iban, title: acc.bankName }); }
+    }
     try {
       const arr = banks ? JSON.parse(banks) : [];
-      if (Array.isArray(arr) && arr.length > 0) {
-        await prisma.bankAccount.createMany({
-          data: arr.filter((b: any) => b?.iban?.trim()).map((b: any) => ({ businessId: business.id, iban: String(b.iban).trim(), title: b.title?.trim() || null })),
-        });
+      if (Array.isArray(arr)) {
+        for (const b of arr) {
+          const iban = String(b?.iban || '').replace(/\s+/g, '').toUpperCase();
+          if (iban && !seenIban.has(iban)) { seenIban.add(iban); bankRows.push({ businessId: business.id, iban, title: b?.title?.trim() || null }); }
+        }
       }
     } catch { /* banks formatı yanlışdırsa keç */ }
+    if (bankRows.length > 0) {
+      await prisma.bankAccount.createMany({ data: bankRows }).catch(() => {});
+    }
 
     res.status(201).json({
       success: true,
       business,
       autoApproved: autoApprove,
       ai: { ok: ai.ok, authorized: ai.authorized, reason: ai.error || ai.reason },
+      bankAccountsFound: bankRows.length,
+      bankAi: { ok: bankAI.ok, count: bankAI.accounts.length, reason: (bankAI as any).error || bankAI.reason },
     });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });

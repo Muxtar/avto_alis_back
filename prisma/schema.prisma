@@ -654,6 +654,7 @@ model Business {
   taxDocImage          String?       // vergi qeydiyyatı sənədi (TAX_DOC)
   companyDocImage      String?       // şirkət sənədi (POWER_OF_ATTORNEY halında)
   powerOfAttorneyImage String?       // etibarnamə
+  bankDocImage         String?       // bank hesabı sənədi (IBAN-lar buradan AI ilə oxunur)
   idCardImage          String?       // şəxsiyyət vəsiqəsi
   selfieImage          String?       // üz tanıma üçün selfie (admin əllə yoxlayır)
 
