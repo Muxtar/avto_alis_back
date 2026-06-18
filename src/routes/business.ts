@@ -120,8 +120,10 @@ router.post('/me/businesses', adminAuth, docFields, processImages, async (req: A
     const faceOk = (me.faceMatchScore ?? 0) > 0.5 || me.idAiFaceMatch === true || (me.idAiFaceScore ?? 0) > 0.5;
     const identityReusable = !!me.idCardImage && !!me.selfieImage && faceOk;
     const { kind, proofType, name, voen, ownerName, founderName, phone, banks } = req.body;
-    if (!name?.trim() || !voen?.trim() || !ownerName?.trim() || !founderName?.trim()) {
-      res.status(400).json({ success: false, message: 'Ad, VÖEN, sahibi və təsisçi tələb olunur' }); return;
+    // Şirkət məlumatları sənəddən oxunur. Təsisçi sənəddə olmaya bilər — sahibə bərabər götürülür.
+    const founder = (founderName?.trim() || ownerName?.trim() || '');
+    if (!name?.trim() || !voen?.trim() || !ownerName?.trim()) {
+      res.status(400).json({ success: false, message: 'Şirkət sənədi oxunmadı (ad/VÖEN/sahib) — sənədi yenidən yükləyin' }); return;
     }
     if (!['LEGAL', 'PHYSICAL'].includes(kind)) { res.status(400).json({ success: false, message: 'Şəxs növü seçin' }); return; }
     if (!['TAX_DOC', 'POWER_OF_ATTORNEY'].includes(proofType)) { res.status(400).json({ success: false, message: 'Sənəd növü seçin' }); return; }
@@ -161,7 +163,7 @@ router.post('/me/businesses', adminAuth, docFields, processImages, async (req: A
     const ai = await verifyBusinessAI(
       docs,
       proofType as 'TAX_DOC' | 'POWER_OF_ATTORNEY',
-      { name: name.trim(), voen: voen.trim(), ownerName: ownerName.trim(), founderName: founderName.trim() },
+      { name: name.trim(), voen: voen.trim(), ownerName: ownerName.trim(), founderName: founder },
       (me?.name || '').trim(),
     );
     // Avtomatik təsdiq şərti: səlahiyyətli + sənəd əsl + VÖEN uyğun + yüksək əminlik + saxtakarlıq yoxdur.
@@ -173,7 +175,7 @@ router.post('/me/businesses', adminAuth, docFields, processImages, async (req: A
         userId: req.adminId!,
         kind, proofType,
         name: name.trim(), voen: voen.trim(),
-        ownerName: ownerName.trim(), founderName: founderName.trim(),
+        ownerName: ownerName.trim(), founderName: founder,
         phone: phone?.trim() || null,
         taxDocImage, companyDocImage, powerOfAttorneyImage,
         bankDocImage: bankDocImages[0] || null, bankDocImages,
