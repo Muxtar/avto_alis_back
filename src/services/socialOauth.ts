@@ -61,12 +61,13 @@ const PROVIDERS: Record<string, Provider> = {
   instagram: {
     clientId: process.env.INSTAGRAM_CLIENT_ID,
     clientSecret: process.env.INSTAGRAM_CLIENT_SECRET,
+    // Yeni "Instagram API with Instagram Login" axını (Basic Display 2024-də ləğv olunub).
     buildAuthUrl(state) {
       const p = new URLSearchParams({
         client_id: this.clientId!, redirect_uri: redirectUri('instagram'),
-        scope: 'user_profile', response_type: 'code', state,
+        scope: 'instagram_business_basic', response_type: 'code', state,
       });
-      return `https://api.instagram.com/oauth/authorize?${p}`;
+      return `https://www.instagram.com/oauth/authorize?${p}`;
     },
     async exchange(code) {
       const body = new URLSearchParams({
@@ -76,8 +77,10 @@ const PROVIDERS: Record<string, Provider> = {
       const tok = await jsonFetch('https://api.instagram.com/oauth/access_token', {
         method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body,
       });
-      if (!tok.access_token) throw new Error(tok.error_message || 'Token alınmadı');
-      const me = await jsonFetch(`https://graph.instagram.com/me?fields=username&access_token=${tok.access_token}`);
+      // Yeni axın token-i həm birbaşa, həm də data[] içində qaytara bilər.
+      const accessToken = tok.access_token || tok?.data?.[0]?.access_token;
+      if (!accessToken) throw new Error(tok.error_message || tok.error?.message || 'Token alınmadı');
+      const me = await jsonFetch(`https://graph.instagram.com/me?fields=username&access_token=${accessToken}`);
       return { url: me.username ? `https://instagram.com/${me.username}` : 'https://instagram.com' };
     },
   },
