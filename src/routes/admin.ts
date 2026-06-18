@@ -659,6 +659,7 @@ router.get('/admin/id-verifications', requireAdmin, async (req: AuthRequest, res
       select: {
         id: true, name: true, phone: true, profession: true,
         idCardImage: true, selfieImage: true, faceMatchScore: true, idVerifyStatus: true,
+        idAiNameMatch: true, idAiNameScore: true, idAiFaceMatch: true, idAiFaceScore: true, idAiReason: true,
       },
       take: 200,
     });
@@ -688,6 +689,51 @@ router.post('/admin/id-verifications/:userId/:action', requireAdmin, async (req:
       },
     }).catch(() => {});
     res.json({ success: true, user });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+// ==================== PEŞƏ SƏNƏDLƏRİ (AI ad-soyad yoxlaması) ====================
+router.get('/admin/credentials', requireAdmin, async (req: AuthRequest, res: Response) => {
+  try {
+    const status = String(req.query.status || 'PENDING').toUpperCase();
+    const where: Prisma.ProfessionDocumentWhereInput = status === 'ALL' ? {} : { status: status as any };
+    const documents = await prisma.professionDocument.findMany({
+      where, orderBy: { id: 'desc' }, take: 200,
+      select: {
+        id: true, title: true, image: true, documentType: true, issuer: true, holderName: true,
+        nameMatch: true, nameMatchScore: true, professionMatch: true, confidence: true,
+        fraudSignals: true, aiReason: true, status: true, createdAt: true,
+        user: { select: { id: true, name: true, phone: true, profession: true } },
+      },
+    });
+    res.json({ success: true, documents });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+router.post('/admin/credentials/:id/:action', requireAdmin, async (req: AuthRequest, res: Response) => {
+  try {
+    const id = parseInt(req.params.id);
+    const action = String(req.params.action);
+    if (!['approve', 'reject'].includes(action)) { res.status(400).json({ success: false, message: 'Yanlış əməliyyat' }); return; }
+    const doc = await prisma.professionDocument.update({
+      where: { id },
+      data: { status: action === 'approve' ? 'APPROVED' : 'REJECTED' },
+      select: { id: true, status: true, userId: true, title: true },
+    });
+    await prisma.notification.create({
+      data: {
+        userId: doc.userId,
+        type: 'SYSTEM',
+        title: 'Peşə sənədi',
+        body: action === 'approve' ? `"${doc.title}" sənədiniz təsdiqləndi ✓` : `"${doc.title}" sənədiniz rədd edildi.`,
+        link: '/profile',
+      },
+    }).catch(() => {});
+    res.json({ success: true, document: doc });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }

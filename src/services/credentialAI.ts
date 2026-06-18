@@ -40,6 +40,10 @@ function normalizeName(s: string): string {
     .trim();
 }
 
+// Model env ilə dəyişilə bilər (xərc/keyfiyyət balansı). Default: ən güclü vision modeli.
+// Daha ucuz üçün Railway-də CREDENTIAL_AI_MODEL=claude-sonnet-4-6 qoyula bilər.
+const AI_MODEL = process.env.CREDENTIAL_AI_MODEL || 'claude-opus-4-8';
+
 let client: Anthropic | null = null;
 function getClient(): Anthropic | null {
   if (!process.env.ANTHROPIC_API_KEY) return null;
@@ -92,7 +96,7 @@ Qeyd: ad-soyad müqayisəsində Azərbaycan hərflərinin transliterasiyasını 
   let text: string;
   try {
     const res = await ai.messages.create({
-      model: 'claude-opus-4-8',
+      model: AI_MODEL,
       max_tokens: 1500,
       messages: [{
         role: 'user',
@@ -219,7 +223,7 @@ Qeyd: Azərbaycan hərflərinin transliterasiyasını (ə↔e) və ad/soyad sır
   let text: string;
   try {
     const res = await ai.messages.create({
-      model: 'claude-opus-4-8',
+      model: AI_MODEL,
       max_tokens: 1200,
       messages: [{
         role: 'user',
