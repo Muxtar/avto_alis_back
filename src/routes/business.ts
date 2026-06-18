@@ -3,7 +3,7 @@ import { PrismaClient } from '@prisma/client';
 import { adminAuth, requireAdmin, AuthRequest } from '../middleware/auth';
 import { upload, docUpload } from '../middleware/upload';
 import { processImages } from '../middleware/imageProcess';
-import { verifyBusinessAI, BusinessDoc, extractBankAccounts, extractBusinessInfo } from '../services/credentialAI';
+import { verifyBusinessAI, BusinessDoc, extractBankAccounts, extractBusinessInfo, nameOverlapScore } from '../services/credentialAI';
 import fs from 'fs';
 
 const router = Router();
@@ -88,7 +88,22 @@ router.post('/me/extract-business-info', adminAuth, docUpload.single('doc'), pro
     if (!file) { res.status(400).json({ success: false, message: 'Sənəd tələb olunur' }); return; }
     const r = await extractBusinessInfo(file.path);
     fs.promises.unlink(file.path).catch(() => {}); // yalnız oxumaq üçün — əsl yükləmə formada olur
-    res.json({ success: true, ...r });
+
+    // İstifadəçinin (kimlikdəki) adı şirkətin rəhbəri/sahibi ilə uyğundurmu?
+    const me = await prisma.user.findUnique({ where: { id: req.adminId! }, select: { name: true } });
+    const userName = (me?.name || '').trim();
+    const ownerScore = Math.max(
+      nameOverlapScore(userName, r.ownerName || ''),
+      nameOverlapScore(userName, r.founderName || ''),
+    );
+    const isOwner = !!userName && ownerScore >= 0.5;
+    const ownerMessage = !r.ok
+      ? (r.error || 'Sənəd oxunmadı')
+      : isOwner
+        ? 'Kimliyiniz şirkətin rəhbəri/sahibi ilə uyğundur.'
+        : `Kimliyinizdəki ad ("${userName || '—'}") şirkətin rəhbəri ("${r.ownerName || '—'}") ilə uyğun deyil. Yalnız rəhbər və ya etibarnaməli şəxs biznes yarada bilər.`;
+
+    res.json({ success: true, ...r, userName, isOwner, ownerScore, ownerMessage });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
 
@@ -166,6 +181,16 @@ router.post('/me/businesses', adminAuth, docFields, processImages, async (req: A
       { name: name.trim(), voen: voen.trim(), ownerName: ownerName.trim(), founderName: founder },
       (me?.name || '').trim(),
     );
+    // TAX_DOC: kimlik şirkətin rəhbəri ilə uyğun deyilsə biznes yaradılmır (AI açarı varsa).
+    // (Etibarnamə halında səlahiyyət etibarnamə ilə verilir — bloklanmır.)
+    const userOwnerScore = Math.max(
+      nameOverlapScore((me?.name || '').trim(), ownerName.trim()),
+      nameOverlapScore((me?.name || '').trim(), founder),
+    );
+    if (proofType === 'TAX_DOC' && ai.ok && !ai.authorized && userOwnerScore < 0.5) {
+      res.status(403).json({ success: false, code: 'NOT_OWNER', message: 'Kimliyinizdəki ad şirkətin rəhbəri ilə uyğun deyil — yalnız rəhbər və ya etibarnaməli şəxs biznes yarada bilər.' });
+      return;
+    }
     // Avtomatik təsdiq şərti: səlahiyyətli + sənəd əsl + VÖEN uyğun + yüksək əminlik + saxtakarlıq yoxdur.
     const autoApprove = ai.ok && ai.authorized && ai.documentValid && ai.voenMatch
       && ai.confidence >= 0.75 && ai.fraudSignals.length === 0;

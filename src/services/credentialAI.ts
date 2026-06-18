@@ -40,6 +40,15 @@ function normalizeName(s: string): string {
     .trim();
 }
 
+// İki adın söz-örtüşmə balı (0..1) — transliterasiya/ad sırası nəzərə alınır.
+export function nameOverlapScore(a: string, b: string): number {
+  const sa = new Set(normalizeName(a || '').split(' ').filter(Boolean));
+  const sb = new Set(normalizeName(b || '').split(' ').filter(Boolean));
+  if (!sa.size || !sb.size) return 0;
+  let common = 0; sa.forEach((w) => { if (sb.has(w)) common++; });
+  return common / Math.max(sa.size, sb.size);
+}
+
 // Model env ilə dəyişilə bilər (xərc/keyfiyyət balansı). Default: ən güclü vision modeli.
 // Daha ucuz üçün Railway-də CREDENTIAL_AI_MODEL=claude-sonnet-4-6 qoyula bilər.
 const AI_MODEL = process.env.CREDENTIAL_AI_MODEL || 'claude-opus-4-8';
