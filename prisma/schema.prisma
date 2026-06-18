@@ -134,6 +134,7 @@ model User {
   courierOrders     Order[]          @relation("CourierOrders")
   emailVerifications EmailVerification[]
   socialLinks       SocialLink[]
+  professionDocuments ProfessionDocument[]
   buyerReturns      ReturnRequest[]  @relation("BuyerReturns")
   sellerReturns     ReturnRequest[]  @relation("SellerReturns")
   buyerInquiries    Inquiry[]        @relation("BuyerInquiries")
@@ -405,6 +406,29 @@ model SocialLink {
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([userId, platform])
+}
+
+// Peşə sənədləri (diplom, sertifikat, lisenziya). AI ad-soyad uyğunluğunu yoxlayır.
+model ProfessionDocument {
+  id             Int                @id @default(autoincrement())
+  userId         Int
+  title          String             // istifadəçinin verdiyi başlıq (məs. "Diplom", "Həkimlik lisenziyası")
+  image          String             // uploads/ faylının adı
+  documentType   String?            // AI: diplom / sertifikat / lisenziya
+  issuer         String?            // AI: kim verib
+  holderName     String?            // AI: sənəddəki ad-soyad
+  nameMatch      Boolean            @default(false) // ad-soyad istifadəçi ilə uyğundur?
+  nameMatchScore Float?             // 0..1
+  professionMatch Boolean?          // məsləklə uyğundur?
+  confidence     Float?             // 0..1
+  fraudSignals   String[]           @default([])
+  aiReason       String?            // AI-ın qısa izahı
+  status         VerificationStatus @default(PENDING) // PENDING / APPROVED / REJECTED (admin son sözü)
+  createdAt      DateTime           @default(now())
+  user           User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([status])
 }
 
 model OrderItem {

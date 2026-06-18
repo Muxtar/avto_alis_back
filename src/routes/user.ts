@@ -6,6 +6,7 @@ import { upload } from '../middleware/upload';
 import { processImages } from '../middleware/imageProcess';
 import { listingWriteLimiter, bulkLimiter } from '../middleware/rateLimiter';
 import { extractPassportFromFiles } from '../services/vehiclePassportAI';
+import { analyzeCredential } from '../services/credentialAI';
 import fs from 'fs';
 import path from 'path';
 
@@ -25,6 +26,14 @@ router.get('/me', adminAuth, async (req: AuthRequest, res: Response) => {
         city: true, address: true, latitude: true, longitude: true,
         workplaces: true, vehicles: true,
         socialLinks: { select: { id: true, platform: true, url: true, verified: true } },
+        professionDocuments: {
+          select: {
+            id: true, title: true, image: true, documentType: true, holderName: true,
+            nameMatch: true, nameMatchScore: true, professionMatch: true, confidence: true,
+            aiReason: true, status: true, createdAt: true,
+          },
+          orderBy: { createdAt: 'desc' },
+        },
         sellerApplication: { select: { status: true, rejectionReason: true, submittedAt: true } },
         _count: { select: { listings: true, sentMessages: true, receivedMessages: true } },
       },
@@ -57,6 +66,78 @@ router.post('/me/identity', adminAuth, identityUpload, async (req: AuthRequest, 
       select: { id: true, name: true, idVerifyStatus: true, faceMatchScore: true, idCardImage: true, selfieImage: true },
     });
     res.json({ success: true, user });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
+// Peşə sənədi yüklə + AI ad-soyad uyğunluğunu yoxla.
+// Bir neçə sənəd ayrı-ayrı sorğularla yüklənə bilər (hərəsində başlıq + 1 şəkil).
+router.get('/me/credentials', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const docs = await prisma.professionDocument.findMany({
+      where: { userId: req.adminId! },
+      orderBy: { createdAt: 'desc' },
+      select: {
+        id: true, title: true, image: true, documentType: true, holderName: true,
+        nameMatch: true, nameMatchScore: true, professionMatch: true, confidence: true,
+        fraudSignals: true, aiReason: true, status: true, createdAt: true,
+      },
+    });
+    res.json({ success: true, documents: docs });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
+router.post('/me/credentials', adminAuth, upload.single('document'), processImages, async (req: AuthRequest, res: Response) => {
+  try {
+    const file = req.file as Express.Multer.File | undefined;
+    const title = String(req.body.title || '').trim();
+    if (!file) { res.status(400).json({ success: false, message: 'Sənəd şəkli tələb olunur' }); return; }
+    if (!title) { res.status(400).json({ success: false, message: 'Sənədin başlığını yazın (məs. Diplom)' }); return; }
+
+    const me = await prisma.user.findUnique({
+      where: { id: req.adminId! },
+      select: { name: true, profession: true },
+    });
+    const expectedName = (me?.name || '').trim();
+
+    // AI analizi — ad-soyad uyğunluğunu yoxlayır. Xəta olsa belə sənəd saxlanılır (admin yoxlayar).
+    const ai = await analyzeCredential(file.path, expectedName, me?.profession || null);
+
+    const doc = await prisma.professionDocument.create({
+      data: {
+        userId: req.adminId!,
+        title,
+        image: file.filename,
+        documentType: ai.documentType,
+        issuer: ai.issuer,
+        holderName: ai.holderName,
+        nameMatch: ai.nameMatch,
+        nameMatchScore: ai.ok ? ai.nameMatchScore : null,
+        professionMatch: ai.professionMatch,
+        confidence: ai.ok ? ai.confidence : null,
+        fraudSignals: ai.fraudSignals,
+        aiReason: ai.error ? ai.error : ai.reason,
+        status: 'PENDING',
+      },
+      select: {
+        id: true, title: true, image: true, documentType: true, holderName: true,
+        nameMatch: true, nameMatchScore: true, professionMatch: true, confidence: true,
+        fraudSignals: true, aiReason: true, status: true, createdAt: true,
+      },
+    });
+    res.status(201).json({ success: true, document: doc, ai: { ok: ai.ok, error: ai.error } });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
+router.delete('/me/credentials/:id', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (Number.isNaN(id)) { res.status(400).json({ success: false, message: 'Yanlış ID' }); return; }
+    const doc = await prisma.professionDocument.findUnique({ where: { id }, select: { userId: true, image: true } });
+    if (!doc || doc.userId !== req.adminId) { res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return; }
+    await prisma.professionDocument.delete({ where: { id } });
+    // Faylı da sil (best-effort).
+    if (doc.image) fs.promises.unlink(path.join(__dirname, '../../uploads', doc.image)).catch(() => {});
+    res.json({ success: true });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
 
