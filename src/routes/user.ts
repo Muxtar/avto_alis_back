@@ -21,6 +21,7 @@ router.get('/me', adminAuth, async (req: AuthRequest, res: Response) => {
         id: true, name: true, phone: true, email: true, type: true, role: true, verified: true,
         profileComplete: true, sellerVerified: true, sellerVerifiedAt: true, createdAt: true,
         idVerifyStatus: true, profession: true, avatar: true,
+        idCardImage: true, selfieImage: true, faceMatchScore: true, idNumber: true,
         city: true, address: true, latitude: true, longitude: true,
         workplaces: true, vehicles: true,
         socialLinks: { select: { id: true, platform: true, url: true, verified: true } },
@@ -33,6 +34,30 @@ router.get('/me', adminAuth, async (req: AuthRequest, res: Response) => {
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }
+});
+
+// Kimlik təsdiqini yenidən təqdim et (profildən). Üz uyğunluğu brauzerdə hesablanır.
+const identityUpload = upload.fields([{ name: 'idCardImage', maxCount: 1 }, { name: 'selfieImage', maxCount: 1 }]);
+router.post('/me/identity', adminAuth, identityUpload, async (req: AuthRequest, res: Response) => {
+  try {
+    const files = req.files as Record<string, Express.Multer.File[]> | undefined;
+    const idCardImage = files?.['idCardImage']?.[0]?.filename || null;
+    const selfieImage = files?.['selfieImage']?.[0]?.filename || null;
+    if (!idCardImage || !selfieImage) {
+      res.status(400).json({ success: false, message: 'Şəxsiyyət vəsiqəsi şəkli və selfie tələb olunur' }); return;
+    }
+    const scoreNum = req.body.faceMatchScore !== undefined ? parseFloat(String(req.body.faceMatchScore)) : NaN;
+    const user = await prisma.user.update({
+      where: { id: req.adminId! },
+      data: {
+        idCardImage, selfieImage,
+        faceMatchScore: Number.isFinite(scoreNum) ? scoreNum : null,
+        idVerifyStatus: 'PENDING',
+      },
+      select: { id: true, name: true, idVerifyStatus: true, faceMatchScore: true, idCardImage: true, selfieImage: true },
+    });
+    res.json({ success: true, user });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
 
 // Profil şəkli yüklə.
