@@ -129,7 +129,7 @@ router.get('/me/listings', adminAuth, async (req: AuthRequest, res: Response) =>
 // location from their profile so listings always carry where they're from.
 router.post('/me/listings', listingWriteLimiter, adminAuth, upload.array('images', 5), processImages, async (req: AuthRequest, res: Response) => {
   try {
-    const { title, description, price, category, type, location, phone, condition, country, brand, stock, forVehicle, unit, unitValue, year, model, city, fuelType, paymentType, businessObjectId, attributes } = req.body;
+    const { title, description, price, category, type, location, phone, condition, country, brand, stock, forVehicle, unit, unitValue, year, model, city, fuelType, paymentType, businessObjectId, attributes, listingMode } = req.body;
     const parsedAttrs = (() => { try { const o = attributes ? JSON.parse(attributes) : null; return o && typeof o === 'object' && Object.keys(o).length ? o : undefined; } catch { return undefined; } })();
 
     if (!title || !description || !price || !category || !type) {
@@ -155,6 +155,11 @@ router.post('/me/listings', listingWriteLimiter, adminAuth, upload.array('images
       }
       bizId = obj.businessId;
       bizObjId = obj.id;
+    }
+
+    // VÖEN-li elan MÜTLƏQ təsdiqlənmiş biznes obyektinə bağlı olmalıdır (kartla satış).
+    if (listingMode === 'voen' && !bizObjId) {
+      res.status(400).json({ success: false, message: 'VÖEN-li elan üçün təsdiqlənmiş biznes və ona bağlı obyekt seçilməlidir' }); return;
     }
 
     const files = req.files as Express.Multer.File[];
@@ -268,6 +273,7 @@ router.put('/me/listings/:id', adminAuth, upload.array('images', 5), processImag
 router.post('/me/listings/bulk', bulkLimiter, adminAuth, async (req: AuthRequest, res: Response) => {
   try {
     const items = req.body?.items;
+    const { businessObjectId, listingMode } = req.body || {};
     if (!Array.isArray(items) || items.length === 0) {
       res.status(400).json({ success: false, message: 'items massiv tələb olunur' });
       return;
@@ -275,6 +281,28 @@ router.post('/me/listings/bulk', bulkLimiter, adminAuth, async (req: AuthRequest
     if (items.length > 100) {
       res.status(400).json({ success: false, message: 'Maksimum 100 məhsul bir sorğuda' });
       return;
+    }
+
+    // Bütün toplu elanlar bir təsdiqlənmiş biznes obyektinə bağlanır (kartla satış üçün).
+    let bizId: number | null = null;
+    let bizObjId: number | null = null;
+    if (businessObjectId) {
+      const obj = await prisma.businessObject.findUnique({
+        where: { id: parseInt(String(businessObjectId)) },
+        include: { business: true },
+      });
+      if (!obj || obj.business.userId !== req.adminId) {
+        res.status(403).json({ success: false, message: 'Seçilmiş obyekt sizə aid deyil' }); return;
+      }
+      if (obj.business.status !== 'APPROVED') {
+        res.status(400).json({ success: false, message: 'Biznes hələ təsdiqlənməyib' }); return;
+      }
+      bizId = obj.businessId;
+      bizObjId = obj.id;
+    }
+    // VÖEN-li toplu yükləmədə obyekt mütləqdir.
+    if (listingMode === 'voen' && !bizObjId) {
+      res.status(400).json({ success: false, message: 'VÖEN-li toplu yükləmə üçün təsdiqlənmiş biznes obyekti seçilməlidir' }); return;
     }
     const expiresAt = new Date(Date.now() + 20 * 24 * 60 * 60 * 1000);
     const created: { index: number; id: number; externalId?: string }[] = [];
@@ -303,6 +331,8 @@ router.post('/me/listings/bulk', bulkLimiter, adminAuth, async (req: AuthRequest
             year: it.year ? parseInt(String(it.year)) : null,
             city: it.city ? String(it.city) : null,
             forVehicle: it.forVehicle ? String(it.forVehicle) : null,
+            businessId: bizId,
+            businessObjectId: bizObjId,
             expiresAt,
           },
         });
