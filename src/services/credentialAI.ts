@@ -226,6 +226,9 @@ Qeyd: Azərbaycan vəsiqələrində ad/soyad latın hərfləri ilə yazılır. A
 export interface IdentityAnalysis {
   ok: boolean;
   idName: string | null;       // vəsiqədəki ad-soyad
+  birthDate: string | null;    // doğum tarixi (YYYY-MM-DD) və ya null
+  gender: string | null;       // "Kişi" / "Qadın" və ya null
+  idNumber: string | null;     // FIN / şəxsiyyət nömrəsi
   nameMatch: boolean;          // qeydiyyat ad-soyadı ilə uyğun?
   nameMatchScore: number;      // 0..1
   faceMatch: boolean;          // vəsiqə şəkli ilə selfie eyni şəxs?
@@ -237,7 +240,8 @@ export interface IdentityAnalysis {
 }
 
 const EMPTY_ID: IdentityAnalysis = {
-  ok: false, idName: null, nameMatch: false, nameMatchScore: 0,
+  ok: false, idName: null, birthDate: null, gender: null, idNumber: null,
+  nameMatch: false, nameMatchScore: 0,
   faceMatch: false, faceMatchScore: 0, documentValid: false, fraudSignals: [], reason: '',
 };
 
@@ -273,6 +277,9 @@ export async function verifyIdentityAI(
 Hər iki şəkli diqqətlə analiz et və YALNIZ bu JSON formatında cavab ver (başqa heç nə yazma):
 {
   "idName": "vəsiqədəki tam ad-soyad və ya null",
+  "birthDate": "doğum tarixi YYYY-MM-DD formatında və ya null",
+  "gender": "Kişi / Qadın və ya null",
+  "idNumber": "FIN / şəxsiyyət vəsiqəsi nömrəsi və ya null",
   "nameMatch": true/false,        // vəsiqədəki ad istifadəçinin ad-soyadı ilə eyni şəxsdirmi
   "nameMatchScore": 0.0-1.0,      // ad uyğunluğu (transliterasiya/ad sırasını nəzərə al)
   "faceMatch": true/false,        // vəsiqədəki foto ilə selfidəki üz eyni şəxsdirmi
@@ -327,9 +334,18 @@ Qeyd: Azərbaycan hərflərinin transliterasiyasını (ə↔e) və ad/soyad sır
     }
   }
 
+  const isoDate = (v: any): string | null => {
+    if (typeof v !== 'string') return null;
+    const m = v.trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    return m ? v.trim() : null;
+  };
+
   return {
     ok: true,
     idName,
+    birthDate: isoDate(parsed.birthDate),
+    gender: typeof parsed.gender === 'string' && parsed.gender.trim() ? parsed.gender.trim() : null,
+    idNumber: typeof parsed.idNumber === 'string' && parsed.idNumber.trim() ? parsed.idNumber.trim() : null,
     nameMatch: Boolean(parsed.nameMatch) || nameScore >= 0.6,
     nameMatchScore: nameScore,
     faceMatch: Boolean(parsed.faceMatch),

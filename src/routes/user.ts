@@ -23,6 +23,7 @@ router.get('/me', adminAuth, async (req: AuthRequest, res: Response) => {
         profileComplete: true, sellerVerified: true, sellerVerifiedAt: true, createdAt: true,
         idVerifyStatus: true, profession: true, avatar: true,
         idCardImage: true, selfieImage: true, faceMatchScore: true, idNumber: true,
+        birthDate: true, gender: true,
         idAiNameMatch: true, idAiNameScore: true, idAiFaceMatch: true, idAiFaceScore: true, idAiReason: true,
         city: true, address: true, latitude: true, longitude: true,
         workplaces: true, vehicles: true,
@@ -72,6 +73,9 @@ router.post('/me/identity', adminAuth, identityUpload, processImages, async (req
       where: { id: req.adminId! },
       data: {
         idCardImage: idCardFile.filename, selfieImage: selfieFile.filename,
+        ...(ai.birthDate ? { birthDate: new Date(ai.birthDate) } : {}),
+        ...(ai.gender ? { gender: ai.gender } : {}),
+        ...(ai.idNumber ? { idNumber: ai.idNumber } : {}),
         faceMatchScore: Number.isFinite(scoreNum) ? scoreNum : (ai.ok ? ai.faceMatchScore : null),
         idAiNameMatch: ai.ok ? ai.nameMatch : null,
         idAiNameScore: ai.ok ? ai.nameMatchScore : null,

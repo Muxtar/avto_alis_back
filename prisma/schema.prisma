@@ -110,6 +110,8 @@ model User {
   profession        String?            // məslək (qeydiyyatda soruşulur)
   avatar            String?            // profil şəkli
   idNumber          String?            // kimlik / FIN (köhnə — indi şəkil istənir)
+  birthDate         DateTime?          // doğum tarixi (vəsiqədən AI ilə)
+  gender            String?            // cinsiyyət (vəsiqədən AI ilə: "Kişi"/"Qadın")
   idCardImage       String?            // şəxsiyyət vəsiqəsi şəkli (FIN əvəzinə)
   selfieImage       String?            // selfie (üz tanıma üçün)
   faceMatchScore    Float?             // face-api.js oxşarlıq balı (0–1, brauzerdə)

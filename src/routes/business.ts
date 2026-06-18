@@ -79,11 +79,18 @@ router.get('/me/businesses', adminAuth, async (req: AuthRequest, res: Response) 
 router.post('/me/businesses', adminAuth, docFields, processImages, async (req: AuthRequest, res: Response) => {
   try {
     // Kimlik + üz təsdiqi olmadan biznes yaratmaq olmaz (profili tamamlamalıdır).
-    const me = await prisma.user.findUnique({ where: { id: req.adminId! }, select: { idVerifyStatus: true, name: true } });
+    const me = await prisma.user.findUnique({
+      where: { id: req.adminId! },
+      select: { idVerifyStatus: true, name: true, idCardImage: true, selfieImage: true, faceMatchScore: true, idAiFaceMatch: true, idAiFaceScore: true },
+    });
     if (!me?.idVerifyStatus) {
       res.status(403).json({ success: false, code: 'ID_NOT_VERIFIED', message: 'Biznes yaratmaq üçün əvvəlcə profilinizi tamamlayın (kimlik + üz təsdiqi).' });
       return;
     }
+    // Profildə kimlik artıq təsdiqlənib və üz uyğunluğu 50%-dən çoxdursa — biznesdə
+    // təkrar kimlik+selfie istənilmir, profildəki sənədlər istifadə olunur.
+    const faceOk = (me.faceMatchScore ?? 0) > 0.5 || me.idAiFaceMatch === true || (me.idAiFaceScore ?? 0) > 0.5;
+    const identityReusable = !!me.idCardImage && !!me.selfieImage && faceOk;
     const { kind, proofType, name, voen, ownerName, founderName, phone, banks } = req.body;
     if (!name?.trim() || !voen?.trim() || !ownerName?.trim() || !founderName?.trim()) {
       res.status(400).json({ success: false, message: 'Ad, VÖEN, sahibi və təsisçi tələb olunur' }); return;
@@ -94,14 +101,18 @@ router.post('/me/businesses', adminAuth, docFields, processImages, async (req: A
     const taxDocImage = fileName(req, 'taxDocImage');
     const companyDocImage = fileName(req, 'companyDocImage');
     const powerOfAttorneyImage = fileName(req, 'powerOfAttorneyImage');
-    const idCardImage = fileName(req, 'idCardImage');
-    const selfieImage = fileName(req, 'selfieImage');
+    // Kimlik artıq təsdiqlənibsə profildəki şəkilləri istifadə et; əks halda formdan götür.
+    const idCardImage = fileName(req, 'idCardImage') || (identityReusable ? me.idCardImage : null);
+    const selfieImage = fileName(req, 'selfieImage') || (identityReusable ? me.selfieImage : null);
 
     if (proofType === 'TAX_DOC' && !taxDocImage) { res.status(400).json({ success: false, message: 'Vergi qeydiyyatı sənədi tələb olunur' }); return; }
     if (proofType === 'POWER_OF_ATTORNEY' && (!companyDocImage || !powerOfAttorneyImage)) {
       res.status(400).json({ success: false, message: 'Şirkət sənədi və etibarnamə tələb olunur' }); return;
     }
-    if (!idCardImage || !selfieImage) { res.status(400).json({ success: false, message: 'Şəxsiyyət vəsiqəsi və selfie tələb olunur' }); return; }
+    // Kimlik təkrar yalnız profildə təsdiq yoxdursa tələb olunur.
+    if (!identityReusable && (!idCardImage || !selfieImage)) {
+      res.status(400).json({ success: false, message: 'Şəxsiyyət vəsiqəsi və selfie tələb olunur' }); return;
+    }
 
     // ---- Claude AI ilə şirkət sənədlərinin yoxlanması ----
     // Profil sahibi rəhbər (vergi sənədi) və ya etibarnaməli isə avtomatik təsdiq.
