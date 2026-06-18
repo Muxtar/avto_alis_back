@@ -2,6 +2,8 @@ import { Router, Request, Response } from 'express';
 import { PrismaClient } from '@prisma/client';
 import { adminAuth, requireAdmin, AuthRequest } from '../middleware/auth';
 import { upload } from '../middleware/upload';
+import { processImages } from '../middleware/imageProcess';
+import { verifyBusinessAI, BusinessDoc } from '../services/credentialAI';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -38,6 +40,10 @@ function fileName(req: Request, key: string): string | null {
   const files = req.files as Record<string, Express.Multer.File[]> | undefined;
   return files?.[key]?.[0]?.filename || null;
 }
+function filePath(req: Request, key: string): string | null {
+  const files = req.files as Record<string, Express.Multer.File[]> | undefined;
+  return files?.[key]?.[0]?.path || null;
+}
 
 // ==================== İSTİFADƏÇİ: PUBLIC ID ====================
 router.get('/me/public-id', adminAuth, async (req: AuthRequest, res: Response) => {
@@ -70,10 +76,10 @@ router.get('/me/businesses', adminAuth, async (req: AuthRequest, res: Response) 
 });
 
 // Yeni biznes (multipart — sənədlər + sahələr + banks JSON)
-router.post('/me/businesses', adminAuth, docFields, async (req: AuthRequest, res: Response) => {
+router.post('/me/businesses', adminAuth, docFields, processImages, async (req: AuthRequest, res: Response) => {
   try {
     // Kimlik + üz təsdiqi olmadan biznes yaratmaq olmaz (profili tamamlamalıdır).
-    const me = await prisma.user.findUnique({ where: { id: req.adminId! }, select: { idVerifyStatus: true } });
+    const me = await prisma.user.findUnique({ where: { id: req.adminId! }, select: { idVerifyStatus: true, name: true } });
     if (!me?.idVerifyStatus) {
       res.status(403).json({ success: false, code: 'ID_NOT_VERIFIED', message: 'Biznes yaratmaq üçün əvvəlcə profilinizi tamamlayın (kimlik + üz təsdiqi).' });
       return;
@@ -97,6 +103,25 @@ router.post('/me/businesses', adminAuth, docFields, async (req: AuthRequest, res
     }
     if (!idCardImage || !selfieImage) { res.status(400).json({ success: false, message: 'Şəxsiyyət vəsiqəsi və selfie tələb olunur' }); return; }
 
+    // ---- Claude AI ilə şirkət sənədlərinin yoxlanması ----
+    // Profil sahibi rəhbər (vergi sənədi) və ya etibarnaməli isə avtomatik təsdiq.
+    const docs: BusinessDoc[] = [];
+    if (proofType === 'TAX_DOC') {
+      const p = filePath(req, 'taxDocImage'); if (p) docs.push({ label: 'Vergi qeydiyyatı sənədi', path: p });
+    } else {
+      const c = filePath(req, 'companyDocImage'); if (c) docs.push({ label: 'Şirkət sənədi', path: c });
+      const a = filePath(req, 'powerOfAttorneyImage'); if (a) docs.push({ label: 'Etibarnamə', path: a });
+    }
+    const ai = await verifyBusinessAI(
+      docs,
+      proofType as 'TAX_DOC' | 'POWER_OF_ATTORNEY',
+      { name: name.trim(), voen: voen.trim(), ownerName: ownerName.trim(), founderName: founderName.trim() },
+      (me?.name || '').trim(),
+    );
+    // Avtomatik təsdiq şərti: səlahiyyətli + sənəd əsl + VÖEN uyğun + yüksək əminlik + saxtakarlıq yoxdur.
+    const autoApprove = ai.ok && ai.authorized && ai.documentValid && ai.voenMatch
+      && ai.confidence >= 0.75 && ai.fraudSignals.length === 0;
+
     const business = await prisma.business.create({
       data: {
         userId: req.adminId!,
@@ -105,8 +130,23 @@ router.post('/me/businesses', adminAuth, docFields, async (req: AuthRequest, res
         ownerName: ownerName.trim(), founderName: founderName.trim(),
         phone: phone?.trim() || null,
         taxDocImage, companyDocImage, powerOfAttorneyImage, idCardImage, selfieImage,
+        aiAuthorized: ai.ok ? ai.authorized : null,
+        aiVoenMatch: ai.ok ? ai.voenMatch : null,
+        aiConfidence: ai.ok ? ai.confidence : null,
+        aiFraudSignals: ai.fraudSignals,
+        aiReason: ai.error ? ai.error : ai.reason,
+        autoApproved: autoApprove,
+        ...(autoApprove ? { status: 'APPROVED' as any, reviewedAt: new Date() } : {}),
       },
     });
+
+    // Avtomatik təsdiqlənibsə — satıcı statusunu ver + bildiriş.
+    if (autoApprove) {
+      await prisma.user.update({ where: { id: req.adminId! }, data: { sellerVerified: true, sellerVerifiedAt: new Date() } }).catch(() => {});
+      await prisma.notification.create({
+        data: { userId: req.adminId!, type: 'SYSTEM', title: 'Biznes təsdiqləndi', body: `"${name.trim()}" AI tərəfindən təsdiqləndi — artıq kartla satış mümkündür.`, link: '/business' },
+      }).catch(() => {});
+    }
 
     // Banks JSON (ixtiyari) — [{iban,title}]
     try {
@@ -118,7 +158,12 @@ router.post('/me/businesses', adminAuth, docFields, async (req: AuthRequest, res
       }
     } catch { /* banks formatı yanlışdırsa keç */ }
 
-    res.status(201).json({ success: true, business });
+    res.status(201).json({
+      success: true,
+      business,
+      autoApproved: autoApprove,
+      ai: { ok: ai.ok, authorized: ai.authorized, reason: ai.error || ai.reason },
+    });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }

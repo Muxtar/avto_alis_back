@@ -275,3 +275,117 @@ Qeyd: Azərbaycan hərflərinin transliterasiyasını (ə↔e) və ad/soyad sır
     reason: typeof parsed.reason === 'string' ? parsed.reason : '',
   };
 }
+
+// ---- Biznes sənədlərinin yoxlanması (avtomatik təsdiq üçün) ----
+
+export interface BusinessDoc { label: string; path: string; }
+
+export interface BusinessAnalysis {
+  ok: boolean;
+  authorized: boolean;     // profil sahibi rəhbər/etibarnaməli olaraq təsdiqləndi?
+  isDirector: boolean;     // vergi sənədinə görə rəhbər/sahibdir?
+  hasPowerOfAttorney: boolean; // etibarnamə ilə səlahiyyət verilib?
+  voenMatch: boolean;      // sənədlərdəki VÖEN forma ilə uyğundur?
+  documentValid: boolean;  // sənədlər əsl və oxunaqlı görünür?
+  confidence: number;      // 0..1
+  fraudSignals: string[];
+  reason: string;
+  error?: string;
+}
+
+const EMPTY_BIZ: BusinessAnalysis = {
+  ok: false, authorized: false, isDirector: false, hasPowerOfAttorney: false,
+  voenMatch: false, documentValid: false, confidence: 0, fraudSignals: [], reason: '',
+};
+
+/**
+ * Şirkət sənədlərini Claude ilə yoxlayır və profil sahibinin biznes açmağa
+ * səlahiyyətli olub-olmadığını təyin edir:
+ *  - TAX_DOC: profil sahibi vergi sənədində rəhbər/sahib kimi görünürmü,
+ *  - POWER_OF_ATTORNEY: etibarnamədə profil sahibinə səlahiyyət verilibmi.
+ * @param docs        yoxlanacaq sənəd şəkilləri (label + path)
+ * @param proofType   'TAX_DOC' | 'POWER_OF_ATTORNEY'
+ * @param form        formdan: ad, VÖEN, sahibi, təsisçi
+ * @param registeredName  biznesi yaradan istifadəçinin qeydiyyat ad-soyadı
+ */
+export async function verifyBusinessAI(
+  docs: BusinessDoc[],
+  proofType: 'TAX_DOC' | 'POWER_OF_ATTORNEY',
+  form: { name: string; voen: string; ownerName: string; founderName: string },
+  registeredName: string,
+): Promise<BusinessAnalysis> {
+  const ai = getClient();
+  if (!ai) return { ...EMPTY_BIZ, error: 'AI açarı (ANTHROPIC_API_KEY) qoyulmayıb — admin əl ilə yoxlayacaq.' };
+  if (!docs.length) return { ...EMPTY_BIZ, error: 'Yoxlanacaq sənəd yoxdur.' };
+
+  let images: { label: string; b64: string }[];
+  try {
+    images = await Promise.all(docs.map(async (d) => ({ label: d.label, b64: (await fs.promises.readFile(d.path)).toString('base64') })));
+  } catch {
+    return { ...EMPTY_BIZ, error: 'Sənəd şəkilləri oxunmadı.' };
+  }
+
+  const docList = docs.map((d, i) => `${i + 1}-ci şəkil — ${d.label}`).join('\n');
+  const rule = proofType === 'TAX_DOC'
+    ? 'Sənəd növü: VERGI QEYDİYYATI. Profil sahibi yalnız sənəddə şirkətin RƏHBƏRİ/DİREKTORU/SAHİBİ kimi göstərilibsə səlahiyyətlidir (authorized=true).'
+    : 'Sənəd növü: ETİBARNAMƏ + ŞİRKƏT SƏNƏDİ. Profil sahibi yalnız etibarnamədə bu şirkət adından fəaliyyət üçün ona AÇIQ səlahiyyət verilibsə səlahiyyətlidir (authorized=true). Etibarnamədəki adın profil sahibi ilə uyğunluğunu yoxla.';
+
+  const prompt = `Sən şirkət sənədlərini yoxlayan KYC analitiksən. Sənə bir neçə sənəd şəkli verilir:
+${docList}
+
+Biznesi yaratmaq istəyən şəxsin qeydiyyat ad-soyadı: "${registeredName}"
+Formda göstərilən: şirkət adı = "${form.name}", VÖEN = "${form.voen}", sahibi = "${form.ownerName}", təsisçi = "${form.founderName}".
+
+${rule}
+
+Sənədləri diqqətlə analiz et və YALNIZ bu JSON formatında cavab ver (başqa heç nə yazma):
+{
+  "companyName": "sənəddəki şirkət adı və ya null",
+  "voenInDoc": "sənəddəki VÖEN və ya null",
+  "voenMatch": true/false,          // sənəddəki VÖEN formdakı VÖEN ilə uyğundurmu
+  "isDirector": true/false,         // profil sahibi vergi sənədində rəhbər/sahib kimi görünürmü
+  "hasPowerOfAttorney": true/false, // etibarnamə ilə profil sahibinə səlahiyyət verilibmi
+  "authorized": true/false,         // yuxarıdakı qaydaya görə biznes açmağa səlahiyyətlidirmi
+  "documentValid": true/false,      // sənədlər əsl, oxunaqlı və dəyişdirilməmiş görünürmü
+  "confidence": 0.0-1.0,            // ümumi əminlik
+  "fraudSignals": ["..."],          // saxtakarlıq/montaj əlamətləri (yoxdursa boş massiv)
+  "reason": "Azərbaycan dilində 1-2 cümlə qısa izah"
+}
+
+Qeyd: Azərbaycan hərflərinin transliterasiyasını (ə↔e) və ad/soyad sırasını nəzərə al. Əmin deyilsənsə authorized=false qoy — şübhə varsa təsdiq vermə.`;
+
+  let text: string;
+  try {
+    const content: any[] = images.map((im) => ({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: im.b64 } }));
+    content.push({ type: 'text', text: prompt });
+    const res = await ai.messages.create({ model: AI_MODEL, max_tokens: 1500, messages: [{ role: 'user', content }] });
+    text = res.content.filter((b: any) => b.type === 'text').map((b: any) => b.text).join('\n').trim();
+  } catch (e: any) {
+    return { ...EMPTY_BIZ, error: `AI analizi alınmadı: ${e?.message || 'naməlum xəta'}` };
+  }
+
+  const jsonStr = (() => {
+    const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+    if (fence) return fence[1].trim();
+    const brace = text.match(/\{[\s\S]*\}/);
+    return brace ? brace[0] : text;
+  })();
+
+  let parsed: any;
+  try { parsed = JSON.parse(jsonStr); }
+  catch { return { ...EMPTY_BIZ, error: 'AI cavabı oxunmadı.', reason: text.slice(0, 200) }; }
+
+  const clamp01 = (n: any) => { const x = Number(n); return Number.isFinite(x) ? Math.min(1, Math.max(0, x)) : 0; };
+
+  return {
+    ok: true,
+    authorized: Boolean(parsed.authorized),
+    isDirector: Boolean(parsed.isDirector),
+    hasPowerOfAttorney: Boolean(parsed.hasPowerOfAttorney),
+    voenMatch: Boolean(parsed.voenMatch),
+    documentValid: Boolean(parsed.documentValid),
+    confidence: clamp01(parsed.confidence),
+    fraudSignals: Array.isArray(parsed.fraudSignals) ? parsed.fraudSignals.map(String).slice(0, 10) : [],
+    reason: typeof parsed.reason === 'string' ? parsed.reason : '',
+  };
+}

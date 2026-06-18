@@ -655,6 +655,14 @@ model Business {
   idCardImage          String?       // şəxsiyyət vəsiqəsi
   selfieImage          String?       // üz tanıma üçün selfie (admin əllə yoxlayır)
 
+  // Claude AI sənəd yoxlaması (avtomatik təsdiq üçün)
+  aiAuthorized    Boolean?   // profil sahibi rəhbər/etibarnaməli olaraq təsdiqləndi?
+  aiVoenMatch     Boolean?   // sənədlərdəki VÖEN forma ilə uyğun?
+  aiConfidence    Float?     // 0..1
+  aiFraudSignals  String[]   @default([])
+  aiReason        String?    // AI-ın qısa izahı
+  autoApproved    Boolean    @default(false) // AI tərəfindən avtomatik təsdiqləndi?
+
   user      User             @relation(fields: [userId], references: [id], onDelete: Cascade)
   objects   BusinessObject[]
   listings  Listing[]
