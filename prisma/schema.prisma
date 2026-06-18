@@ -654,7 +654,8 @@ model Business {
   taxDocImage          String?       // vergi qeydiyyatı sənədi (TAX_DOC)
   companyDocImage      String?       // şirkət sənədi (POWER_OF_ATTORNEY halında)
   powerOfAttorneyImage String?       // etibarnamə
-  bankDocImage         String?       // bank hesabı sənədi (IBAN-lar buradan AI ilə oxunur)
+  bankDocImage         String?       // (köhnə) tək bank sənədi
+  bankDocImages        String[]      @default([]) // bir neçə bank hesabı sənədi (IBAN-lar AI ilə oxunur)
   idCardImage          String?       // şəxsiyyət vəsiqəsi
   selfieImage          String?       // üz tanıma üçün selfie (admin əllə yoxlayır)
 
@@ -682,6 +683,8 @@ model BankAccount {
   iban       String   // bank hesabı / IBAN
   title      String?  // bank adı / qeyd
   isActive   Boolean  @default(true)
+  isPrimary  Boolean  @default(false) // ödəniş bu hesab üzərindən gedir ("yes" seçilən)
+  docImage   String?  // bu hesabın aid olduğu bank sənədi (fayl adı)
   createdAt  DateTime @default(now())
   business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
 

@@ -51,6 +51,72 @@ function getClient(): Anthropic | null {
   return client;
 }
 
+// Faylı Claude content blokuna çevirir — PDF üçün "document", şəkil üçün "image".
+async function fileToContentBlock(path: string): Promise<any> {
+  const data = (await fs.promises.readFile(path)).toString('base64');
+  if (/\.pdf$/i.test(path)) {
+    return { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data } };
+  }
+  return { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data } };
+}
+
+// JSON cavabını mətndən çıxarır (model bəzən ```json ... ``` ilə bükür).
+function parseJson(text: string): any | null {
+  const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  const candidate = fence ? fence[1].trim() : (text.match(/\{[\s\S]*\}/)?.[0] || text);
+  try { return JSON.parse(candidate); } catch { return null; }
+}
+
+export interface BusinessInfoResult {
+  ok: boolean;
+  companyName: string | null;
+  voen: string | null;
+  ownerName: string | null;   // rəhbər / sahib
+  founderName: string | null; // təsisçi
+  error?: string;
+}
+
+/**
+ * Vergi qeydiyyatı sənədindən (şəkil və ya PDF) şirkət məlumatlarını oxuyur:
+ * şirkət adı, VÖEN, rəhbər/sahib, təsisçi — biznes formasını avtomatik doldurmaq üçün.
+ */
+export async function extractBusinessInfo(docPath: string): Promise<BusinessInfoResult> {
+  const EMPTY: BusinessInfoResult = { ok: false, companyName: null, voen: null, ownerName: null, founderName: null };
+  const ai = getClient();
+  if (!ai) return { ...EMPTY, error: 'AI açarı qoyulmayıb.' };
+
+  let block: any;
+  try { block = await fileToContentBlock(docPath); }
+  catch { return { ...EMPTY, error: 'Sənəd oxunmadı.' }; }
+
+  const prompt = `Bu, bir şirkətin vergi qeydiyyatı / qeydiyyat sənədidir (şəkil və ya PDF). Sənəddən şirkət məlumatlarını oxu.
+YALNIZ bu JSON formatında cavab ver (başqa heç nə yazma):
+{
+  "companyName": "şirkətin tam adı və ya null",
+  "voen": "VÖEN (vergi ödəyicisinin eyniləşdirmə nömrəsi) və ya null",
+  "ownerName": "rəhbər / direktor / sahibin ad-soyadı və ya null",
+  "founderName": "təsisçinin ad-soyadı və ya null"
+}
+Qeyd: VÖEN adətən 10 rəqəmdir. Tapılmayan sahəni null qoy.`;
+
+  let text: string;
+  try {
+    const res = await ai.messages.create({ model: AI_MODEL, max_tokens: 800, messages: [{ role: 'user', content: [block, { type: 'text', text: prompt }] }] });
+    text = res.content.filter((b: any) => b.type === 'text').map((b: any) => b.text).join('\n').trim();
+  } catch (e: any) { return { ...EMPTY, error: `AI oxuya bilmədi: ${e?.message || 'xəta'}` }; }
+
+  const parsed = parseJson(text);
+  if (!parsed) return { ...EMPTY, error: 'AI cavabı oxunmadı.' };
+  const str = (v: any) => (typeof v === 'string' && v.trim() ? v.trim() : null);
+  return {
+    ok: true,
+    companyName: str(parsed.companyName),
+    voen: str(parsed.voen),
+    ownerName: str(parsed.ownerName),
+    founderName: str(parsed.founderName),
+  };
+}
+
 /**
  * Sənədi Claude ilə analiz edir və ad-soyad uyğunluğunu yoxlayır.
  * @param filePath   uploads/ içindəki JPEG faylının tam yolu
@@ -409,14 +475,14 @@ export async function verifyBusinessAI(
   if (!ai) return { ...EMPTY_BIZ, error: 'AI açarı (ANTHROPIC_API_KEY) qoyulmayıb — admin əl ilə yoxlayacaq.' };
   if (!docs.length) return { ...EMPTY_BIZ, error: 'Yoxlanacaq sənəd yoxdur.' };
 
-  let images: { label: string; b64: string }[];
+  let blocks: any[];
   try {
-    images = await Promise.all(docs.map(async (d) => ({ label: d.label, b64: (await fs.promises.readFile(d.path)).toString('base64') })));
+    blocks = await Promise.all(docs.map((d) => fileToContentBlock(d.path)));
   } catch {
-    return { ...EMPTY_BIZ, error: 'Sənəd şəkilləri oxunmadı.' };
+    return { ...EMPTY_BIZ, error: 'Sənədlər oxunmadı.' };
   }
 
-  const docList = docs.map((d, i) => `${i + 1}-ci şəkil — ${d.label}`).join('\n');
+  const docList = docs.map((d, i) => `${i + 1}-ci sənəd — ${d.label}`).join('\n');
   const rule = proofType === 'TAX_DOC'
     ? 'Sənəd növü: VERGI QEYDİYYATI. Profil sahibi yalnız sənəddə şirkətin RƏHBƏRİ/DİREKTORU/SAHİBİ kimi göstərilibsə səlahiyyətlidir (authorized=true).'
     : 'Sənəd növü: ETİBARNAMƏ + ŞİRKƏT SƏNƏDİ. Profil sahibi yalnız etibarnamədə bu şirkət adından fəaliyyət üçün ona AÇIQ səlahiyyət verilibsə səlahiyyətlidir (authorized=true). Etibarnamədəki adın profil sahibi ilə uyğunluğunu yoxla.';
@@ -447,7 +513,7 @@ Qeyd: Azərbaycan hərflərinin transliterasiyasını (ə↔e) və ad/soyad sır
 
   let text: string;
   try {
-    const content: any[] = images.map((im) => ({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: im.b64 } }));
+    const content: any[] = [...blocks];
     content.push({ type: 'text', text: prompt });
     const res = await ai.messages.create({ model: AI_MODEL, max_tokens: 1500, messages: [{ role: 'user', content }] });
     text = res.content.filter((b: any) => b.type === 'text').map((b: any) => b.text).join('\n').trim();
@@ -505,8 +571,8 @@ export async function extractBankAccounts(bankDocPath: string): Promise<BankDocA
   const ai = getClient();
   if (!ai) return { ok: false, accounts: [], documentValid: false, reason: '', error: 'AI açarı qoyulmayıb — admin əl ilə yoxlayacaq.' };
 
-  let b64: string;
-  try { b64 = (await fs.promises.readFile(bankDocPath)).toString('base64'); }
+  let block: any;
+  try { block = await fileToContentBlock(bankDocPath); }
   catch { return { ok: false, accounts: [], documentValid: false, reason: '', error: 'Sənəd oxunmadı.' }; }
 
   const prompt = `Bu, bir bank sənədidir (bank arayışı, hesab açılışı və ya hesab məlumatı). Sənəddəki BÜTÜN bank hesabı nömrələrini (IBAN) oxu.
@@ -525,10 +591,7 @@ Qeyd: IBAN-ı tam və boşluqsuz yaz. Hesab tapılmırsa accounts boş massiv ol
     const res = await ai.messages.create({
       model: AI_MODEL,
       max_tokens: 1200,
-      messages: [{ role: 'user', content: [
-        { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: b64 } },
-        { type: 'text', text: prompt },
-      ] }],
+      messages: [{ role: 'user', content: [block, { type: 'text', text: prompt }] }],
     });
     text = res.content.filter((b: any) => b.type === 'text').map((b: any) => b.text).join('\n').trim();
   } catch (e: any) {

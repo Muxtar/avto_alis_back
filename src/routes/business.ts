@@ -1,9 +1,10 @@
 import { Router, Request, Response } from 'express';
 import { PrismaClient } from '@prisma/client';
 import { adminAuth, requireAdmin, AuthRequest } from '../middleware/auth';
-import { upload } from '../middleware/upload';
+import { upload, docUpload } from '../middleware/upload';
 import { processImages } from '../middleware/imageProcess';
-import { verifyBusinessAI, BusinessDoc, extractBankAccounts } from '../services/credentialAI';
+import { verifyBusinessAI, BusinessDoc, extractBankAccounts, extractBusinessInfo } from '../services/credentialAI';
+import fs from 'fs';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -29,14 +30,18 @@ async function ensurePublicId(userId: number): Promise<string> {
 }
 
 // KYC sənədləri üçün multipart sahələri.
-const docFields = upload.fields([
+const docFields = docUpload.fields([
   { name: 'taxDocImage', maxCount: 1 },
   { name: 'companyDocImage', maxCount: 1 },
   { name: 'powerOfAttorneyImage', maxCount: 1 },
-  { name: 'bankDocImage', maxCount: 1 },
+  { name: 'bankDocImage', maxCount: 5 }, // bir neçə bank sənədi
   { name: 'idCardImage', maxCount: 1 },
   { name: 'selfieImage', maxCount: 1 },
 ]);
+function filesOf(req: Request, key: string): Express.Multer.File[] {
+  const files = req.files as Record<string, Express.Multer.File[]> | undefined;
+  return files?.[key] || [];
+}
 function fileName(req: Request, key: string): string | null {
   const files = req.files as Record<string, Express.Multer.File[]> | undefined;
   return files?.[key]?.[0]?.filename || null;
@@ -74,6 +79,28 @@ router.get('/me/businesses', adminAuth, async (req: AuthRequest, res: Response) 
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }
+});
+
+// Vergi sənədindən (şəkil/PDF) şirkət məlumatlarını AI ilə oxu — forma avtomatik dolsun.
+router.post('/me/extract-business-info', adminAuth, docUpload.single('doc'), processImages, async (req: AuthRequest, res: Response) => {
+  try {
+    const file = req.file as Express.Multer.File | undefined;
+    if (!file) { res.status(400).json({ success: false, message: 'Sənəd tələb olunur' }); return; }
+    const r = await extractBusinessInfo(file.path);
+    fs.promises.unlink(file.path).catch(() => {}); // yalnız oxumaq üçün — əsl yükləmə formada olur
+    res.json({ success: true, ...r });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
+// Bank sənədindən (şəkil/PDF) IBAN-ları AI ilə oxu — yükləmədən qabaq göstərmək üçün.
+router.post('/me/extract-bank-doc', adminAuth, docUpload.single('doc'), processImages, async (req: AuthRequest, res: Response) => {
+  try {
+    const file = req.file as Express.Multer.File | undefined;
+    if (!file) { res.status(400).json({ success: false, message: 'Sənəd tələb olunur' }); return; }
+    const r = await extractBankAccounts(file.path);
+    fs.promises.unlink(file.path).catch(() => {});
+    res.json({ success: true, accounts: r.accounts, error: r.error });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
 
 // Yeni biznes (multipart — sənədlər + sahələr + banks JSON)
@@ -115,13 +142,12 @@ router.post('/me/businesses', adminAuth, docFields, processImages, async (req: A
       res.status(400).json({ success: false, message: 'Şəxsiyyət vəsiqəsi və selfie tələb olunur' }); return;
     }
 
-    // Bank sənədi tələb olunur — IBAN-lar buradan AI ilə oxunur.
-    const bankDocImage = fileName(req, 'bankDocImage');
-    if (!bankDocImage) { res.status(400).json({ success: false, message: 'Bank hesabı sənədi tələb olunur' }); return; }
-    const bankDocPath = filePath(req, 'bankDocImage');
-    const bankAI = bankDocPath
-      ? await extractBankAccounts(bankDocPath)
-      : { ok: false, accounts: [] as { iban: string; bankName: string | null; holder: string | null }[], documentValid: false, reason: '' };
+    // Bank sənədləri (bir neçə ola bilər) — IBAN-lar hər birindən AI ilə oxunur.
+    const bankFiles = filesOf(req, 'bankDocImage');
+    if (bankFiles.length === 0) { res.status(400).json({ success: false, message: 'Ən azı bir bank hesabı sənədi tələb olunur' }); return; }
+    const primaryIdx = (() => { const n = parseInt(String(req.body.primaryBankIndex)); return Number.isInteger(n) && n >= 0 && n < bankFiles.length ? n : 0; })();
+    const bankDocImages = bankFiles.map((f) => f.filename);
+    const perDoc = await Promise.all(bankFiles.map((f) => extractBankAccounts(f.path)));
 
     // ---- Claude AI ilə şirkət sənədlərinin yoxlanması ----
     // Profil sahibi rəhbər (vergi sənədi) və ya etibarnaməli isə avtomatik təsdiq.
@@ -149,7 +175,9 @@ router.post('/me/businesses', adminAuth, docFields, processImages, async (req: A
         name: name.trim(), voen: voen.trim(),
         ownerName: ownerName.trim(), founderName: founderName.trim(),
         phone: phone?.trim() || null,
-        taxDocImage, companyDocImage, powerOfAttorneyImage, bankDocImage, idCardImage, selfieImage,
+        taxDocImage, companyDocImage, powerOfAttorneyImage,
+        bankDocImage: bankDocImages[0] || null, bankDocImages,
+        idCardImage, selfieImage,
         aiAuthorized: ai.ok ? ai.authorized : null,
         aiVoenMatch: ai.ok ? ai.voenMatch : null,
         aiConfidence: ai.ok ? ai.confidence : null,
@@ -168,21 +196,31 @@ router.post('/me/businesses', adminAuth, docFields, processImages, async (req: A
       }).catch(() => {});
     }
 
-    // Bank hesabları: əvvəlcə bank sənədindən AI ilə oxunan IBAN-lar, sonra əl ilə əlavə olunanlar.
-    const bankRows: { businessId: number; iban: string; title: string | null }[] = [];
+    // Bank hesabları: hər sənədin IBAN-ları + əsas (primary) seçilən sənədin hesabı ödəniş üçün.
+    const bankRows: { businessId: number; iban: string; title: string | null; isPrimary: boolean; docImage: string | null }[] = [];
     const seenIban = new Set<string>();
-    for (const acc of bankAI.accounts) {
-      if (!seenIban.has(acc.iban)) { seenIban.add(acc.iban); bankRows.push({ businessId: business.id, iban: acc.iban, title: acc.bankName }); }
-    }
+    let primaryAssigned = false;
+    perDoc.forEach((d, idx) => {
+      for (const acc of d.accounts) {
+        if (seenIban.has(acc.iban)) continue;
+        seenIban.add(acc.iban);
+        const isPrimary = idx === primaryIdx && !primaryAssigned;
+        if (isPrimary) primaryAssigned = true;
+        bankRows.push({ businessId: business.id, iban: acc.iban, title: acc.bankName, isPrimary, docImage: bankFiles[idx].filename });
+      }
+    });
+    // Əl ilə əlavə olunanlar (ixtiyari).
     try {
       const arr = banks ? JSON.parse(banks) : [];
       if (Array.isArray(arr)) {
         for (const b of arr) {
           const iban = String(b?.iban || '').replace(/\s+/g, '').toUpperCase();
-          if (iban && !seenIban.has(iban)) { seenIban.add(iban); bankRows.push({ businessId: business.id, iban, title: b?.title?.trim() || null }); }
+          if (iban && !seenIban.has(iban)) { seenIban.add(iban); bankRows.push({ businessId: business.id, iban, title: b?.title?.trim() || null, isPrimary: false, docImage: null }); }
         }
       }
     } catch { /* banks formatı yanlışdırsa keç */ }
+    // Heç bir primary təyin olunmayıbsa (əsas sənəddə IBAN tapılmadısa) ilk hesabı primary et.
+    if (bankRows.length > 0 && !bankRows.some((r) => r.isPrimary)) bankRows[0].isPrimary = true;
     if (bankRows.length > 0) {
       await prisma.bankAccount.createMany({ data: bankRows }).catch(() => {});
     }
@@ -193,7 +231,6 @@ router.post('/me/businesses', adminAuth, docFields, processImages, async (req: A
       autoApproved: autoApprove,
       ai: { ok: ai.ok, authorized: ai.authorized, reason: ai.error || ai.reason },
       bankAccountsFound: bankRows.length,
-      bankAi: { ok: bankAI.ok, count: bankAI.accounts.length, reason: (bankAI as any).error || bankAI.reason },
     });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });

@@ -7,6 +7,8 @@ const MAX_DIMENSION = 1280;
 const JPEG_QUALITY = 80;
 
 async function processOne(file: Express.Multer.File): Promise<void> {
+  // PDF-ləri olduğu kimi saxla — sharp yalnız şəkilləri emal edir.
+  if (/\.pdf$/i.test(file.originalname) || file.mimetype === 'application/pdf') return;
   const buffer = await fs.promises.readFile(file.path);
   // limitInputPixels protects against decompression bombs (e.g. 50000x50000 PNG)
   // that decode into multi-GB pixel buffers and crash the server.
