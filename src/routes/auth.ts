@@ -346,6 +346,12 @@ router.post('/register/complete-id', adminAuth, idPairUpload, processImages, asy
     // Claude AI ilə kimlik doğrulaması — vəsiqədəki ad qeydiyyat adı ilə + üz selfie ilə uyğun?
     const ai = await verifyIdentityAI(idCardFile.path, selfieFile.path, (name || '').trim());
 
+    // Doğum tarixi/cins/FIN: əvvəlcə istifadəçinin formada yoxladığı dəyər, sonra AI.
+    const bodyStr = (k: string) => (typeof (req.body as any)[k] === 'string' && (req.body as any)[k].trim() ? (req.body as any)[k].trim() : null);
+    const bd = bodyStr('birthDate') || ai.birthDate;
+    const gender = bodyStr('gender') || ai.gender;
+    const idNumber = bodyStr('idNumber') || ai.idNumber;
+
     const user = await prisma.user.update({
       where: { id: userId },
       data: {
@@ -353,9 +359,9 @@ router.post('/register/complete-id', adminAuth, idPairUpload, processImages, asy
         profession: profession?.trim() || null,
         idCardImage: idCardFile.filename,
         selfieImage: selfieFile.filename,
-        ...(ai.birthDate ? { birthDate: new Date(ai.birthDate) } : {}),
-        ...(ai.gender ? { gender: ai.gender } : {}),
-        ...(ai.idNumber ? { idNumber: ai.idNumber } : {}),
+        ...(bd && /^\d{4}-\d{2}-\d{2}$/.test(bd) ? { birthDate: new Date(bd) } : {}),
+        ...(gender ? { gender } : {}),
+        ...(idNumber ? { idNumber } : {}),
         faceMatchScore: Number.isFinite(scoreNum) ? scoreNum : (ai.ok ? ai.faceMatchScore : null),
         idAiNameMatch: ai.ok ? ai.nameMatch : null,
         idAiNameScore: ai.ok ? ai.nameMatchScore : null,

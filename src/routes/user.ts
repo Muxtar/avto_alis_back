@@ -59,8 +59,9 @@ router.post('/me/identity', adminAuth, identityUpload, processImages, async (req
     }
     const scoreNum = req.body.faceMatchScore !== undefined ? parseFloat(String(req.body.faceMatchScore)) : NaN;
 
-    // Vəsiqədən oxunan ad-soyad varsa profil adını yenilə (kimlik = mənbə).
-    const idName = typeof req.body.name === 'string' ? req.body.name.trim() : '';
+    // İstifadəçinin formada yoxladığı (kimlikdən oxunan) sahələr — kimlik = mənbə.
+    const bodyStr = (k: string) => (typeof req.body[k] === 'string' && req.body[k].trim() ? req.body[k].trim() : null);
+    const idName = bodyStr('name');
     if (idName) {
       await prisma.user.update({ where: { id: req.adminId! }, data: { name: idName } }).catch(() => {});
     }
@@ -69,13 +70,18 @@ router.post('/me/identity', adminAuth, identityUpload, processImages, async (req
     // Claude AI ilə kimlik doğrulaması (vəsiqə adı + üz uyğunluğu).
     const ai = await verifyIdentityAI(idCardFile.path, selfieFile.path, (me?.name || '').trim());
 
+    // Doğum tarixi/cins/FIN: əvvəlcə istifadəçinin yoxladığı dəyər, sonra AI.
+    const bd = bodyStr('birthDate') || ai.birthDate;
+    const gender = bodyStr('gender') || ai.gender;
+    const idNumber = bodyStr('idNumber') || ai.idNumber;
+
     const user = await prisma.user.update({
       where: { id: req.adminId! },
       data: {
         idCardImage: idCardFile.filename, selfieImage: selfieFile.filename,
-        ...(ai.birthDate ? { birthDate: new Date(ai.birthDate) } : {}),
-        ...(ai.gender ? { gender: ai.gender } : {}),
-        ...(ai.idNumber ? { idNumber: ai.idNumber } : {}),
+        ...(bd && /^\d{4}-\d{2}-\d{2}$/.test(bd) ? { birthDate: new Date(bd) } : {}),
+        ...(gender ? { gender } : {}),
+        ...(idNumber ? { idNumber } : {}),
         faceMatchScore: Number.isFinite(scoreNum) ? scoreNum : (ai.ok ? ai.faceMatchScore : null),
         idAiNameMatch: ai.ok ? ai.nameMatch : null,
         idAiNameScore: ai.ok ? ai.nameMatchScore : null,

@@ -164,33 +164,41 @@ export interface IdNameResult {
   fullName: string | null;   // tam ad-soyad
   firstName: string | null;  // ad
   lastName: string | null;   // soyad
+  birthDate: string | null;  // doğum tarixi YYYY-MM-DD
+  gender: string | null;     // Kişi / Qadın
+  idNumber: string | null;   // FIN
   error?: string;
 }
 
 /**
- * Şəxsiyyət vəsiqəsi şəklindən ad-soyadı oxuyur (qeydiyyatda avtomatik doldurmaq üçün).
+ * Şəxsiyyət vəsiqəsindən ad, soyad, doğum tarixi, cins və FIN-i oxuyur
+ * (kimlik formasını avtomatik doldurmaq üçün).
  */
 export async function extractIdName(idCardPath: string): Promise<IdNameResult> {
+  const EMPTY: IdNameResult = { ok: false, fullName: null, firstName: null, lastName: null, birthDate: null, gender: null, idNumber: null };
   const ai = getClient();
-  if (!ai) return { ok: false, fullName: null, firstName: null, lastName: null, error: 'AI açarı qoyulmayıb.' };
+  if (!ai) return { ...EMPTY, error: 'AI açarı qoyulmayıb.' };
 
   let b64: string;
   try { b64 = (await fs.promises.readFile(idCardPath)).toString('base64'); }
-  catch { return { ok: false, fullName: null, firstName: null, lastName: null, error: 'Şəkil oxunmadı.' }; }
+  catch { return { ...EMPTY, error: 'Şəkil oxunmadı.' }; }
 
-  const prompt = `Bu, şəxsiyyət vəsiqəsinin şəklidir. Üzərindəki şəxsin AD və SOYADINI oxu.
+  const prompt = `Bu, şəxsiyyət vəsiqəsinin şəklidir. Üzərindəki şəxsin məlumatlarını oxu.
 YALNIZ bu JSON formatında cavab ver (başqa heç nə yazma):
 {
   "firstName": "ad (vəsiqədəki kimi) və ya null",
-  "lastName": "soyad (vəsiqədəki kimi) və ya null"
+  "lastName": "soyad (vəsiqədəki kimi) və ya null",
+  "birthDate": "doğum tarixi YYYY-MM-DD formatında və ya null",
+  "gender": "Kişi / Qadın və ya null",
+  "idNumber": "FIN / şəxsiyyət vəsiqəsi nömrəsi və ya null"
 }
-Qeyd: Azərbaycan vəsiqələrində ad/soyad latın hərfləri ilə yazılır. Atanın adını (orta ad) daxil etmə — yalnız ad və soyad. Oxunmursa null qoy.`;
+Qeyd: Azərbaycan vəsiqələrində ad/soyad latın hərfləri ilə yazılır. Atanın adını (orta ad) ada daxil etmə — yalnız ad və soyad. Oxunmayan sahəni null qoy.`;
 
   let text: string;
   try {
     const res = await ai.messages.create({
       model: AI_MODEL,
-      max_tokens: 400,
+      max_tokens: 500,
       messages: [{
         role: 'user',
         content: [
@@ -201,7 +209,7 @@ Qeyd: Azərbaycan vəsiqələrində ad/soyad latın hərfləri ilə yazılır. A
     });
     text = res.content.filter((b: any) => b.type === 'text').map((b: any) => b.text).join('\n').trim();
   } catch (e: any) {
-    return { ok: false, fullName: null, firstName: null, lastName: null, error: `AI oxuya bilmədi: ${e?.message || 'xəta'}` };
+    return { ...EMPTY, error: `AI oxuya bilmədi: ${e?.message || 'xəta'}` };
   }
 
   const jsonStr = (() => {
@@ -213,12 +221,15 @@ Qeyd: Azərbaycan vəsiqələrində ad/soyad latın hərfləri ilə yazılır. A
 
   let parsed: any;
   try { parsed = JSON.parse(jsonStr); }
-  catch { return { ok: false, fullName: null, firstName: null, lastName: null, error: 'AI cavabı oxunmadı.' }; }
+  catch { return { ...EMPTY, error: 'AI cavabı oxunmadı.' }; }
 
-  const firstName = typeof parsed.firstName === 'string' && parsed.firstName.trim() ? parsed.firstName.trim() : null;
-  const lastName = typeof parsed.lastName === 'string' && parsed.lastName.trim() ? parsed.lastName.trim() : null;
+  const str = (v: any) => (typeof v === 'string' && v.trim() ? v.trim() : null);
+  const firstName = str(parsed.firstName);
+  const lastName = str(parsed.lastName);
   const fullName = [firstName, lastName].filter(Boolean).join(' ') || null;
-  return { ok: !!fullName, fullName, firstName, lastName };
+  const bd = str(parsed.birthDate);
+  const birthDate = bd && /^\d{4}-\d{2}-\d{2}$/.test(bd) ? bd : null;
+  return { ok: !!fullName, fullName, firstName, lastName, birthDate, gender: str(parsed.gender), idNumber: str(parsed.idNumber) };
 }
 
 // ---- Kimlik doğrulaması: şəxsiyyət vəsiqəsi + selfie ----
