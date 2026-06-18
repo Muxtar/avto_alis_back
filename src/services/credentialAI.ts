@@ -157,6 +157,70 @@ Qeyd: ad-soyad müqayisəsində Azərbaycan hərflərinin transliterasiyasını 
   };
 }
 
+// ---- Şəxsiyyət vəsiqəsindən ad-soyad oxuma (avtomatik doldurma üçün) ----
+
+export interface IdNameResult {
+  ok: boolean;
+  fullName: string | null;   // tam ad-soyad
+  firstName: string | null;  // ad
+  lastName: string | null;   // soyad
+  error?: string;
+}
+
+/**
+ * Şəxsiyyət vəsiqəsi şəklindən ad-soyadı oxuyur (qeydiyyatda avtomatik doldurmaq üçün).
+ */
+export async function extractIdName(idCardPath: string): Promise<IdNameResult> {
+  const ai = getClient();
+  if (!ai) return { ok: false, fullName: null, firstName: null, lastName: null, error: 'AI açarı qoyulmayıb.' };
+
+  let b64: string;
+  try { b64 = (await fs.promises.readFile(idCardPath)).toString('base64'); }
+  catch { return { ok: false, fullName: null, firstName: null, lastName: null, error: 'Şəkil oxunmadı.' }; }
+
+  const prompt = `Bu, şəxsiyyət vəsiqəsinin şəklidir. Üzərindəki şəxsin AD və SOYADINI oxu.
+YALNIZ bu JSON formatında cavab ver (başqa heç nə yazma):
+{
+  "firstName": "ad (vəsiqədəki kimi) və ya null",
+  "lastName": "soyad (vəsiqədəki kimi) və ya null"
+}
+Qeyd: Azərbaycan vəsiqələrində ad/soyad latın hərfləri ilə yazılır. Atanın adını (orta ad) daxil etmə — yalnız ad və soyad. Oxunmursa null qoy.`;
+
+  let text: string;
+  try {
+    const res = await ai.messages.create({
+      model: AI_MODEL,
+      max_tokens: 400,
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: b64 } },
+          { type: 'text', text: prompt },
+        ],
+      }],
+    });
+    text = res.content.filter((b: any) => b.type === 'text').map((b: any) => b.text).join('\n').trim();
+  } catch (e: any) {
+    return { ok: false, fullName: null, firstName: null, lastName: null, error: `AI oxuya bilmədi: ${e?.message || 'xəta'}` };
+  }
+
+  const jsonStr = (() => {
+    const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+    if (fence) return fence[1].trim();
+    const brace = text.match(/\{[\s\S]*\}/);
+    return brace ? brace[0] : text;
+  })();
+
+  let parsed: any;
+  try { parsed = JSON.parse(jsonStr); }
+  catch { return { ok: false, fullName: null, firstName: null, lastName: null, error: 'AI cavabı oxunmadı.' }; }
+
+  const firstName = typeof parsed.firstName === 'string' && parsed.firstName.trim() ? parsed.firstName.trim() : null;
+  const lastName = typeof parsed.lastName === 'string' && parsed.lastName.trim() ? parsed.lastName.trim() : null;
+  const fullName = [firstName, lastName].filter(Boolean).join(' ') || null;
+  return { ok: !!fullName, fullName, firstName, lastName };
+}
+
 // ---- Kimlik doğrulaması: şəxsiyyət vəsiqəsi + selfie ----
 
 export interface IdentityAnalysis {

@@ -6,7 +6,7 @@ import { upload } from '../middleware/upload';
 import { processImages } from '../middleware/imageProcess';
 import { listingWriteLimiter, bulkLimiter } from '../middleware/rateLimiter';
 import { extractPassportFromFiles } from '../services/vehiclePassportAI';
-import { analyzeCredential, verifyIdentityAI } from '../services/credentialAI';
+import { analyzeCredential, verifyIdentityAI, extractIdName } from '../services/credentialAI';
 import fs from 'fs';
 import path from 'path';
 
@@ -58,7 +58,12 @@ router.post('/me/identity', adminAuth, identityUpload, processImages, async (req
     }
     const scoreNum = req.body.faceMatchScore !== undefined ? parseFloat(String(req.body.faceMatchScore)) : NaN;
 
-    // İstifadəçinin qeydiyyat ad-soyadı ilə müqayisə üçün adı götür.
+    // Vəsiqədən oxunan ad-soyad varsa profil adını yenilə (kimlik = mənbə).
+    const idName = typeof req.body.name === 'string' ? req.body.name.trim() : '';
+    if (idName) {
+      await prisma.user.update({ where: { id: req.adminId! }, data: { name: idName } }).catch(() => {});
+    }
+    // İstifadəçinin (yenilənmiş) ad-soyadı ilə müqayisə üçün adı götür.
     const me = await prisma.user.findUnique({ where: { id: req.adminId! }, select: { name: true } });
     // Claude AI ilə kimlik doğrulaması (vəsiqə adı + üz uyğunluğu).
     const ai = await verifyIdentityAI(idCardFile.path, selfieFile.path, (me?.name || '').trim());
@@ -78,6 +83,18 @@ router.post('/me/identity', adminAuth, identityUpload, processImages, async (req
       select: { id: true, name: true, idVerifyStatus: true, faceMatchScore: true, idCardImage: true, selfieImage: true, idAiNameMatch: true, idAiFaceMatch: true, idAiReason: true },
     });
     res.json({ success: true, user });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
+// Şəxsiyyət vəsiqəsi şəklindən ad-soyadı AI ilə oxu (qeydiyyatda/profildə avtomatik doldurma).
+router.post('/me/extract-id-name', adminAuth, upload.single('idCardImage'), processImages, async (req: AuthRequest, res: Response) => {
+  try {
+    const file = req.file as Express.Multer.File | undefined;
+    if (!file) { res.status(400).json({ success: false, message: 'Şəxsiyyət vəsiqəsi şəkli tələb olunur' }); return; }
+    const r = await extractIdName(file.path);
+    // Faylı saxlamırıq — yalnız ad oxumaq üçün idi (əsl yükləmə kimlik təsdiqində olur).
+    fs.promises.unlink(file.path).catch(() => {});
+    res.json({ success: true, ...r });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
 
