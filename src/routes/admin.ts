@@ -693,4 +693,31 @@ router.post('/admin/id-verifications/:userId/:action', requireAdmin, async (req:
   }
 });
 
+// ==================== SOSIAL MEDIA TƏSDİQİ ====================
+router.get('/admin/social-links', requireAdmin, async (req: AuthRequest, res: Response) => {
+  try {
+    const status = String(req.query.status || 'PENDING').toUpperCase();
+    const where: Prisma.SocialLinkWhereInput = status === 'VERIFIED' ? { verified: true } : status === 'ALL' ? {} : { verified: false };
+    const links = await prisma.socialLink.findMany({
+      where, orderBy: { id: 'desc' }, take: 200,
+      include: { user: { select: { id: true, name: true, phone: true } } },
+    });
+    res.json({ success: true, links });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+router.post('/admin/social-links/:id/:action', requireAdmin, async (req: AuthRequest, res: Response) => {
+  try {
+    const id = parseInt(req.params.id);
+    const action = String(req.params.action);
+    if (!['verify', 'reject'].includes(action)) { res.status(400).json({ success: false, message: 'Yanlış əməliyyat' }); return; }
+    const link = await prisma.socialLink.update({ where: { id }, data: { verified: action === 'verify' } });
+    res.json({ success: true, link });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
 export default router;

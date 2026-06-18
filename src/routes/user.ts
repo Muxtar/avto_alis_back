@@ -429,11 +429,29 @@ router.post('/me/email/verify', adminAuth, async (req: AuthRequest, res: Respons
   }
 });
 
-// ===================== SOSIAL MEDIA HESABLARI (yalnız OAuth ilə təsdiq) =====================
+// ===================== SOSIAL MEDIA HESABLARI =====================
+const SOCIAL_PLATFORMS = ['instagram', 'facebook', 'tiktok', 'youtube', 'linkedin', 'twitter', 'telegram', 'website'];
+
 router.get('/me/social', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
     const links = await prisma.socialLink.findMany({ where: { userId: req.adminId! }, orderBy: { id: 'asc' } });
     res.json({ success: true, links });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
+// Əl ilə link əlavə et — admin təsdiqindən sonra public profildə görünür.
+router.post('/me/social', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const platform = String(req.body.platform || '').toLowerCase().trim();
+    const url = String(req.body.url || '').trim();
+    if (!SOCIAL_PLATFORMS.includes(platform)) { res.status(400).json({ success: false, message: 'Platforma yanlışdır' }); return; }
+    if (!/^https?:\/\//i.test(url)) { res.status(400).json({ success: false, message: 'Düzgün link daxil edin (https://...)' }); return; }
+    const link = await prisma.socialLink.upsert({
+      where: { userId_platform: { userId: req.adminId!, platform } },
+      update: { url, verified: false },
+      create: { userId: req.adminId!, platform, url },
+    });
+    res.json({ success: true, link });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
 
