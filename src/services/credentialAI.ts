@@ -152,3 +152,122 @@ Qeyd: ad-soyad müqayisəsində Azərbaycan hərflərinin transliterasiyasını 
     reason: typeof parsed.reason === 'string' ? parsed.reason : '',
   };
 }
+
+// ---- Kimlik doğrulaması: şəxsiyyət vəsiqəsi + selfie ----
+
+export interface IdentityAnalysis {
+  ok: boolean;
+  idName: string | null;       // vəsiqədəki ad-soyad
+  nameMatch: boolean;          // qeydiyyat ad-soyadı ilə uyğun?
+  nameMatchScore: number;      // 0..1
+  faceMatch: boolean;          // vəsiqə şəkli ilə selfie eyni şəxs?
+  faceMatchScore: number;      // 0..1 (AI əminliyi)
+  documentValid: boolean;      // vəsiqə əsl və oxunaqlı görünür?
+  fraudSignals: string[];
+  reason: string;
+  error?: string;
+}
+
+const EMPTY_ID: IdentityAnalysis = {
+  ok: false, idName: null, nameMatch: false, nameMatchScore: 0,
+  faceMatch: false, faceMatchScore: 0, documentValid: false, fraudSignals: [], reason: '',
+};
+
+/**
+ * Şəxsiyyət vəsiqəsi + selfie şəkillərini Claude ilə yoxlayır:
+ *  1) vəsiqədəki ad-soyad qeydiyyat ad-soyadı ilə uyğundurmu,
+ *  2) vəsiqədəki üz selfie ilə eyni şəxsə aiddirmi.
+ */
+export async function verifyIdentityAI(
+  idCardPath: string,
+  selfiePath: string,
+  expectedName: string,
+): Promise<IdentityAnalysis> {
+  const ai = getClient();
+  if (!ai) return { ...EMPTY_ID, error: 'AI açarı (ANTHROPIC_API_KEY) qoyulmayıb — admin əl ilə yoxlayacaq.' };
+
+  let idB64: string, selfieB64: string;
+  try {
+    [idB64, selfieB64] = await Promise.all([
+      fs.promises.readFile(idCardPath).then((b) => b.toString('base64')),
+      fs.promises.readFile(selfiePath).then((b) => b.toString('base64')),
+    ]);
+  } catch {
+    return { ...EMPTY_ID, error: 'Şəkillər oxunmadı.' };
+  }
+
+  const prompt = `Sən kimlik doğrulaması aparan analitiksən. Sənə İKİ şəkil verilir:
+1-ci şəkil — şəxsiyyət vəsiqəsi (üzərində ad-soyad və şəxsin fotosu var).
+2-ci şəkil — həmin şəxsin canlı selfisi.
+
+İstifadəçinin qeydiyyatda göstərdiyi ad-soyad: "${expectedName}"
+
+Hər iki şəkli diqqətlə analiz et və YALNIZ bu JSON formatında cavab ver (başqa heç nə yazma):
+{
+  "idName": "vəsiqədəki tam ad-soyad və ya null",
+  "nameMatch": true/false,        // vəsiqədəki ad istifadəçinin ad-soyadı ilə eyni şəxsdirmi
+  "nameMatchScore": 0.0-1.0,      // ad uyğunluğu (transliterasiya/ad sırasını nəzərə al)
+  "faceMatch": true/false,        // vəsiqədəki foto ilə selfidəki üz eyni şəxsdirmi
+  "faceMatchScore": 0.0-1.0,      // üz uyğunluğuna əminlik
+  "documentValid": true/false,    // vəsiqə əsl, oxunaqlı və dəyişdirilməmiş görünürmü
+  "fraudSignals": ["..."],        // saxtakarlıq/montaj əlamətləri (yoxdursa boş massiv)
+  "reason": "Azərbaycan dilində 1-2 cümlə qısa izah"
+}
+
+Qeyd: Azərbaycan hərflərinin transliterasiyasını (ə↔e) və ad/soyad sırasını nəzərə al. Üz müqayisəsində işıq, bucaq və yaş fərqlərini nəzərə al — kiçik fərqlər normaldır.`;
+
+  let text: string;
+  try {
+    const res = await ai.messages.create({
+      model: 'claude-opus-4-8',
+      max_tokens: 1200,
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: idB64 } },
+          { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: selfieB64 } },
+          { type: 'text', text: prompt },
+        ],
+      }],
+    });
+    text = res.content.filter((b: any) => b.type === 'text').map((b: any) => b.text).join('\n').trim();
+  } catch (e: any) {
+    return { ...EMPTY_ID, error: `AI analizi alınmadı: ${e?.message || 'naməlum xəta'}` };
+  }
+
+  const jsonStr = (() => {
+    const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+    if (fence) return fence[1].trim();
+    const brace = text.match(/\{[\s\S]*\}/);
+    return brace ? brace[0] : text;
+  })();
+
+  let parsed: any;
+  try { parsed = JSON.parse(jsonStr); }
+  catch { return { ...EMPTY_ID, error: 'AI cavabı oxunmadı.', reason: text.slice(0, 200) }; }
+
+  const clamp01 = (n: any) => { const x = Number(n); return Number.isFinite(x) ? Math.min(1, Math.max(0, x)) : 0; };
+
+  const idName: string | null = typeof parsed.idName === 'string' ? parsed.idName : null;
+  let nameScore = clamp01(parsed.nameMatchScore);
+  if (idName && expectedName) {
+    const a = new Set(normalizeName(expectedName).split(' ').filter(Boolean));
+    const b = new Set(normalizeName(idName).split(' ').filter(Boolean));
+    if (a.size && b.size) {
+      let common = 0; a.forEach((w) => { if (b.has(w)) common++; });
+      nameScore = Math.max(nameScore, common / Math.max(a.size, b.size));
+    }
+  }
+
+  return {
+    ok: true,
+    idName,
+    nameMatch: Boolean(parsed.nameMatch) || nameScore >= 0.6,
+    nameMatchScore: nameScore,
+    faceMatch: Boolean(parsed.faceMatch),
+    faceMatchScore: clamp01(parsed.faceMatchScore),
+    documentValid: Boolean(parsed.documentValid),
+    fraudSignals: Array.isArray(parsed.fraudSignals) ? parsed.fraudSignals.map(String).slice(0, 10) : [],
+    reason: typeof parsed.reason === 'string' ? parsed.reason : '',
+  };
+}

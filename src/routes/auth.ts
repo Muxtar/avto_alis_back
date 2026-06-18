@@ -5,6 +5,8 @@ import { upload } from '../middleware/upload';
 import { generateToken, adminAuth, AuthRequest } from '../middleware/auth';
 import { authLimiter, registerLimiter, verifyLimiter } from '../middleware/rateLimiter';
 import { extractPassportFromFiles } from '../services/vehiclePassportAI';
+import { processImages } from '../middleware/imageProcess';
+import { verifyIdentityAI } from '../services/credentialAI';
 
 // Hər avtomobil üçün ön+arxa cüt şəkil. `passportImagesFront[i]` və
 // `passportImagesBack[i]` indeksləri eyni avtomobilə aiddir.
@@ -326,7 +328,7 @@ const idPairUpload = upload.fields([
   { name: 'idCardImage', maxCount: 1 },
   { name: 'selfieImage', maxCount: 1 },
 ]);
-router.post('/register/complete-id', adminAuth, idPairUpload, async (req: AuthRequest, res: Response) => {
+router.post('/register/complete-id', adminAuth, idPairUpload, processImages, async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.adminId!;
     const { name, profession, faceMatchScore } = req.body as { name?: string; profession?: string; faceMatchScore?: string };
@@ -334,21 +336,29 @@ router.post('/register/complete-id', adminAuth, idPairUpload, async (req: AuthRe
     if (nameErr) { res.status(400).json({ success: false, message: nameErr }); return; }
 
     const files = req.files as Record<string, Express.Multer.File[]> | undefined;
-    const idCardImage = files?.['idCardImage']?.[0]?.filename || null;
-    const selfieImage = files?.['selfieImage']?.[0]?.filename || null;
-    if (!idCardImage || !selfieImage) {
+    const idCardFile = files?.['idCardImage']?.[0];
+    const selfieFile = files?.['selfieImage']?.[0];
+    if (!idCardFile || !selfieFile) {
       res.status(400).json({ success: false, message: 'Şəxsiyyət vəsiqəsi şəkli və selfie tələb olunur' }); return;
     }
     const scoreNum = faceMatchScore !== undefined ? parseFloat(String(faceMatchScore)) : NaN;
+
+    // Claude AI ilə kimlik doğrulaması — vəsiqədəki ad qeydiyyat adı ilə + üz selfie ilə uyğun?
+    const ai = await verifyIdentityAI(idCardFile.path, selfieFile.path, (name || '').trim());
 
     const user = await prisma.user.update({
       where: { id: userId },
       data: {
         name: (name || '').trim(),
         profession: profession?.trim() || null,
-        idCardImage,
-        selfieImage,
-        faceMatchScore: Number.isFinite(scoreNum) ? scoreNum : null,
+        idCardImage: idCardFile.filename,
+        selfieImage: selfieFile.filename,
+        faceMatchScore: Number.isFinite(scoreNum) ? scoreNum : (ai.ok ? ai.faceMatchScore : null),
+        idAiNameMatch: ai.ok ? ai.nameMatch : null,
+        idAiNameScore: ai.ok ? ai.nameMatchScore : null,
+        idAiFaceMatch: ai.ok ? ai.faceMatch : null,
+        idAiFaceScore: ai.ok ? ai.faceMatchScore : null,
+        idAiReason: ai.error ? ai.error : ai.reason,
         idVerifyStatus: 'PENDING',
         profileComplete: true,
       },
