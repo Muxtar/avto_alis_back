@@ -144,6 +144,7 @@ model User {
   emailVerifications EmailVerification[]
   socialLinks       SocialLink[]
   professionDocuments ProfessionDocument[]
+  sharedCarts       SharedCart[]
   buyerReturns      ReturnRequest[]  @relation("BuyerReturns")
   sellerReturns     ReturnRequest[]  @relation("SellerReturns")
   buyerInquiries    Inquiry[]        @relation("BuyerInquiries")
@@ -333,6 +334,20 @@ model Cart {
   createdAt DateTime   @default(now())
   user      User       @relation(fields: [userId], references: [id], onDelete: Cascade)
   items     CartItem[]
+}
+
+// Paylaşılan səbət — istifadəçi səbəti link kimi paylaşır, linki açan şəxs
+// məhsulları öz səbətinə alıb sifariş verir (məhsuldan anlayan başqasına kömək edir).
+model SharedCart {
+  id        Int      @id @default(autoincrement())
+  token     String   @unique
+  userId    Int      // yaradan
+  title     String?  // ixtiyari ad ("Anama hədiyyə" və s.)
+  items     Json     // [{ listingId, quantity }]
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
 }
 
 model CartItem {

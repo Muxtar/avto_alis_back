@@ -36,6 +36,74 @@ router.get('/cart', adminAuth, async (req: AuthRequest, res: Response) => {
   }
 });
 
+// ====================== SƏBƏT PAYLAŞIMI ======================
+const SHARE_ALPHABET = 'abcdefghijklmnopqrstuvwxyz0123456789';
+function shareToken(len = 10): string {
+  let s = '';
+  for (let i = 0; i < len; i++) s += SHARE_ALPHABET[Math.floor(Math.random() * SHARE_ALPHABET.length)];
+  return s;
+}
+
+// Səbəti paylaş — cari səbətin surətini link kimi yarat.
+router.post('/cart/share', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const cart = await prisma.cart.findUnique({ where: { userId: req.adminId! }, include: { items: true } });
+    if (!cart || cart.items.length === 0) { res.status(400).json({ success: false, message: 'Səbət boşdur' }); return; }
+    const items = cart.items.map((i) => ({ listingId: i.listingId, quantity: i.quantity }));
+    let token = shareToken();
+    for (let i = 0; i < 5; i++) {
+      try { await prisma.sharedCart.create({ data: { token, userId: req.adminId!, title: req.body?.title?.trim() || null, items } }); break; }
+      catch { token = shareToken(); }
+    }
+    res.json({ success: true, token });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
+// Paylaşılan səbəti gör (açıq — linki açan giriş etmədən baxa bilər).
+router.get('/shared-cart/:token', async (req: AuthRequest, res: Response) => {
+  try {
+    const sc = await prisma.sharedCart.findUnique({ where: { token: req.params.token } });
+    if (!sc) { res.status(404).json({ success: false, message: 'Səbət tapılmadı' }); return; }
+    const by = await prisma.user.findUnique({ where: { id: sc.userId }, select: { id: true, name: true } });
+    const items = Array.isArray(sc.items) ? (sc.items as any[]) : [];
+    const ids = items.map((i) => i.listingId);
+    const listings = await prisma.listing.findMany({
+      where: { id: { in: ids }, OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }] },
+      select: { id: true, title: true, price: true, images: true, stock: true, businessId: true, user: { select: { id: true, name: true } } },
+    });
+    const byId = new Map(listings.map((l) => [l.id, l]));
+    const result = items
+      .map((i) => { const l = byId.get(i.listingId); return l ? { ...l, quantity: i.quantity } : null; })
+      .filter(Boolean);
+    const total = result.reduce((s: number, x: any) => s + x.price * x.quantity, 0);
+    res.json({ success: true, title: sc.title, by, items: result, total, count: result.length });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
+// Paylaşılan səbəti öz səbətimə əlavə et (linki alan şəxs öz adından alır).
+router.post('/cart/import/:token', requireType(BUYER_TYPES), async (req: AuthRequest, res: Response) => {
+  try {
+    const sc = await prisma.sharedCart.findUnique({ where: { token: req.params.token } });
+    if (!sc) { res.status(404).json({ success: false, message: 'Səbət tapılmadı' }); return; }
+    const items = Array.isArray(sc.items) ? (sc.items as any[]) : [];
+    let cart = await prisma.cart.findUnique({ where: { userId: req.adminId! } });
+    if (!cart) cart = await prisma.cart.create({ data: { userId: req.adminId! } });
+    let added = 0;
+    for (const it of items) {
+      const lid = Number(it.listingId); const qty = Math.max(1, Number(it.quantity) || 1);
+      const listing = await prisma.listing.findUnique({ where: { id: lid }, select: { id: true, expiresAt: true } });
+      if (!listing || (listing.expiresAt && listing.expiresAt <= new Date())) continue;
+      await prisma.cartItem.upsert({
+        where: { cartId_listingId: { cartId: cart.id, listingId: lid } },
+        update: { quantity: { increment: qty } },
+        create: { cartId: cart.id, listingId: lid, quantity: qty },
+      });
+      added++;
+    }
+    res.json({ success: true, added });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
 // Add to cart
 router.post('/cart/add', requireType(BUYER_TYPES), async (req: AuthRequest, res: Response) => {
   try {
