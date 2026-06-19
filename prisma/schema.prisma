@@ -369,6 +369,8 @@ model Order {
   gatewayOrderId Int?
   gatewayPassword String?
   gatewayStatus  String?
+  gatewayProvider String?      // 'kapital' | 'yigim'
+  gatewayRef     String?       // şlüz referansı (YIĞIM: reference; Kapital: order id)
   promoCodeId    Int?
   // Canli takip icin
   latitude       Float?
@@ -390,6 +392,7 @@ model Order {
   @@index([sellerId, createdAt])
   @@index([status])
   @@index([gatewayOrderId])
+  @@index([gatewayRef])
 }
 
 model EmailVerification {

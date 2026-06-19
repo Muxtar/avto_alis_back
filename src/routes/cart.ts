@@ -1,7 +1,7 @@
 import { Router, Response } from 'express';
 import { PrismaClient, UserType } from '@prisma/client';
 import { adminAuth, requireType, AuthRequest } from '../middleware/auth';
-import { createOrder as createKapitalOrder, refund as kapitalRefund } from '../services/kapital';
+import { createPayment as createGatewayPayment, refundOrder as gatewayRefundOrder } from '../services/paymentGateway';
 
 const PUBLIC_BACKEND_URL = process.env.PUBLIC_BACKEND_URL || `http://localhost:${process.env.PORT || 5001}`;
 
@@ -390,21 +390,30 @@ router.post('/cart/checkout', requireType(BUYER_TYPES), async (req: AuthRequest,
         await prisma.order.updateMany({ where: { id: { in: orders.map((o) => o.id) } }, data: { paymentStatus: 'PAID' } });
       } else {
         try {
-          const kapital = await createKapitalOrder({
+          // Şlüz facade YIĞIM (MAGNET) və ya Kapital-ı seçir (PAYMENT_GATEWAY env).
+          const ref = `TX${orders[0].id}`;
+          const pay = await createGatewayPayment({
             amount: grandTotal,
+            reference: ref,
             title: 'tradixai',
             description: `Sifariş #${orders.map((o) => o.id).join(',')}`,
-            redirectUrl: `${PUBLIC_BACKEND_URL}/api/payment/callback`,
+            callbackBase: PUBLIC_BACKEND_URL,
           });
           await prisma.order.updateMany({
             where: { id: { in: orders.map((o) => o.id) } },
-            data: { gatewayOrderId: kapital.id, gatewayPassword: kapital.password, gatewayStatus: kapital.status },
+            data: {
+              gatewayProvider: pay.provider,
+              gatewayRef: pay.ref,
+              gatewayOrderId: pay.gatewayOrderId,
+              gatewayPassword: pay.password,
+              gatewayStatus: pay.status,
+            },
           });
-          paymentUrl = kapital.redirectUrl;
+          paymentUrl = pay.redirectUrl;
         } catch (err: any) {
           // Ödəniş başlaya bilmədi → kompensasiya: stok, istifadə olunan xal, promo
           // və order-ləri geri qaytar (yoxsa stok bloklanmış, order PENDING ilişib qalır).
-          console.error('[checkout] Kapital createOrder failed:', err.message);
+          console.error('[checkout] gateway createPayment failed:', err.message);
           try {
             await prisma.$transaction(async (tx) => {
               const its = await tx.orderItem.findMany({ where: { orderId: { in: orders.map((o) => o.id) } }, select: { listingId: true, quantity: true } });
@@ -803,11 +812,11 @@ router.put('/returns/:id/refund', adminAuth, async (req: AuthRequest, res: Respo
 
     // Kart ödənişidirsə — pulu BANK vasitəsilə geri qaytar (DB dəyişməzdən əvvəl).
     const ord = ret.order;
-    const isCardPaid = !!(ord.gatewayOrderId && ord.gatewayPassword && ord.paymentStatus === 'PAID');
+    const isCardPaid = !!((ord.gatewayRef || ord.gatewayOrderId) && ord.paymentStatus === 'PAID');
     if (isCardPaid) {
       const amt = ret.refundAmount ?? ord.total;
       try {
-        await kapitalRefund(ord.gatewayOrderId!, ord.gatewayPassword!, amt);
+        await gatewayRefundOrder(ord, amt);
       } catch (err: any) {
         res.status(502).json({ success: false, message: 'Bank iadəsi alınmadı: ' + err.message }); return;
       }
