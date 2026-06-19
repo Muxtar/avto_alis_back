@@ -7,6 +7,7 @@ import { processImages } from '../middleware/imageProcess';
 import { listingWriteLimiter, bulkLimiter } from '../middleware/rateLimiter';
 import { extractPassportFromFiles } from '../services/vehiclePassportAI';
 import { analyzeCredential, verifyIdentityAI, extractIdName } from '../services/credentialAI';
+import { sendVerificationCode } from '../services/mailer';
 import fs from 'fs';
 import path from 'path';
 
@@ -19,7 +20,7 @@ router.get('/me', adminAuth, async (req: AuthRequest, res: Response) => {
     const user = await prisma.user.findUnique({
       where: { id: req.adminId },
       select: {
-        id: true, name: true, phone: true, email: true, type: true, role: true, verified: true,
+        id: true, name: true, phone: true, email: true, emailVerified: true, type: true, role: true, verified: true,
         profileComplete: true, sellerVerified: true, sellerVerifiedAt: true, createdAt: true,
         idVerifyStatus: true, profession: true, avatar: true,
         idCardImage: true, selfieImage: true, faceMatchScore: true, idNumber: true,
@@ -538,6 +539,10 @@ router.post('/me/email/send-code', adminAuth, async (req: AuthRequest, res: Resp
       res.status(400).json({ success: false, message: 'Email tələb olunur' });
       return;
     }
+    // Sadə email format yoxlaması.
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email))) {
+      res.status(400).json({ success: false, message: 'Düzgün email ünvanı yazın' }); return;
+    }
     const code = generateEmailCode();
     await prisma.emailVerification.create({
       data: {
@@ -547,9 +552,14 @@ router.post('/me/email/send-code', adminAuth, async (req: AuthRequest, res: Resp
         expiresAt: new Date(Date.now() + 5 * 60 * 1000),
       },
     });
-    // TEST MODE: kodu cavabda qaytarir. SMS_PROVIDER=twilio qoyulanda gizlədilir
-    const isDev = process.env.SMS_PROVIDER !== 'twilio';
-    res.json({ success: true, message: 'Doğrulama kodu göndərildi', ...(isDev && { code }) });
+    // SMTP qoyulubsa real email göndərilir; yoxdursa kod cavabda qaytarılır (dev).
+    const sent = await sendVerificationCode(String(email), code);
+    res.json({
+      success: true,
+      message: sent ? 'Doğrulama kodu emailinizə göndərildi' : 'Doğrulama kodu yaradıldı',
+      emailSent: sent,
+      ...(!sent && { code }), // SMTP yoxdursa kodu göstər (test üçün)
+    });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }
@@ -570,8 +580,8 @@ router.post('/me/email/verify', adminAuth, async (req: AuthRequest, res: Respons
     await prisma.emailVerification.update({ where: { id: record.id }, data: { verified: true } });
     const user = await prisma.user.update({
       where: { id: req.adminId! },
-      data: { email },
-      select: { id: true, name: true, phone: true, email: true, type: true, role: true, verified: true, createdAt: true },
+      data: { email, emailVerified: true },
+      select: { id: true, name: true, phone: true, email: true, emailVerified: true, type: true, role: true, verified: true, createdAt: true },
     });
     res.json({ success: true, user });
   } catch (error: any) {

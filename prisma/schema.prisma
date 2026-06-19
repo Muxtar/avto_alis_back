@@ -100,6 +100,7 @@ model User {
   name              String             @default("")
   phone             String
   email             String?
+  emailVerified     Boolean            @default(false) // email doğrulama kodu ilə təsdiqlənib
   telegramId        String?            @unique
   type              UserType           @default(CAR_OWNER)
   role              UserRole           @default(USER)
