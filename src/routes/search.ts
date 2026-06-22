@@ -52,6 +52,31 @@ router.post('/search/image', imageSearchLimiter, adminAuth, upload.single('image
 // GET /api/search/cities-summary — returns aggregated counts of active
 // listings + distinct sellers per city. Powers the /locations browse page.
 // Public endpoint — no auth required so anyone can browse.
+// GET /api/professionals?q=<peşə>&city=<şəhər> — peşəyə görə mütəxəssis axtarışı.
+router.get('/professionals', async (req: Request, res: Response) => {
+  try {
+    const q = String(req.query.q || '').trim();
+    const city = String(req.query.city || '').trim();
+    const where: any = { isBlocked: false };
+    if (q) where.profession = { contains: q, mode: 'insensitive' };
+    else where.AND = [{ profession: { not: null } }, { profession: { not: '' } }];
+    if (city) where.city = { contains: city, mode: 'insensitive' };
+    const professionals = await prisma.user.findMany({
+      where,
+      take: 60,
+      orderBy: [{ idVerifyStatus: 'asc' }, { avgRating: 'desc' }, { id: 'desc' }],
+      select: {
+        id: true, name: true, profession: true, avatar: true, city: true,
+        publicId: true, idVerifyStatus: true, avgRating: true, ratingCount: true,
+        _count: { select: { listings: true } },
+      },
+    });
+    res.json({ success: true, professionals });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
 router.get('/search/cities-summary', async (_req: Request, res: Response) => {
   try {
     const now = new Date();
