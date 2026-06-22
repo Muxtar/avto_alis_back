@@ -2,7 +2,7 @@ import { Router, Request, Response } from 'express';
 import { PrismaClient } from '@prisma/client';
 import { adminAuth, AuthRequest } from '../middleware/auth';
 import { getProvider, isConfigured, signState, verifyState, OAUTH_PLATFORMS } from '../services/socialOauth';
-import { upload } from '../middleware/upload';
+import { upload, docUpload } from '../middleware/upload';
 import { processImages } from '../middleware/imageProcess';
 import { listingWriteLimiter, bulkLimiter } from '../middleware/rateLimiter';
 import { extractPassportFromFiles } from '../services/vehiclePassportAI';
@@ -22,7 +22,7 @@ router.get('/me', adminAuth, async (req: AuthRequest, res: Response) => {
       select: {
         id: true, name: true, phone: true, email: true, emailVerified: true, type: true, role: true, verified: true,
         profileComplete: true, sellerVerified: true, sellerVerifiedAt: true, createdAt: true,
-        idVerifyStatus: true, profession: true, avatar: true,
+        idVerifyStatus: true, profession: true, avatar: true, cvFile: true,
         idCardImage: true, selfieImage: true, faceMatchScore: true, idNumber: true,
         birthDate: true, gender: true,
         idAiNameMatch: true, idAiNameScore: true, idAiFaceMatch: true, idAiFaceScore: true, idAiReason: true,
@@ -177,6 +177,30 @@ router.delete('/me/credentials/:id', adminAuth, async (req: AuthRequest, res: Re
     await prisma.professionDocument.delete({ where: { id } });
     // Faylı da sil (best-effort).
     if (doc.image) fs.promises.unlink(path.join(__dirname, '../../uploads', doc.image)).catch(() => {});
+    res.json({ success: true });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
+// CV yüklə (PDF/şəkil).
+router.post('/me/cv', adminAuth, docUpload.single('cv'), processImages, async (req: AuthRequest, res: Response) => {
+  try {
+    const file = req.file as Express.Multer.File | undefined;
+    if (!file) { res.status(400).json({ success: false, message: 'CV faylı tələb olunur' }); return; }
+    const user = await prisma.user.update({
+      where: { id: req.adminId! },
+      data: { cvFile: file.filename },
+      select: { id: true, cvFile: true },
+    });
+    res.json({ success: true, cvFile: user.cvFile });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
+// CV sil.
+router.delete('/me/cv', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const me = await prisma.user.findUnique({ where: { id: req.adminId! }, select: { cvFile: true } });
+    await prisma.user.update({ where: { id: req.adminId! }, data: { cvFile: null } });
+    if (me?.cvFile) fs.promises.unlink(path.join(__dirname, '../../uploads', me.cvFile)).catch(() => {});
     res.json({ success: true });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });

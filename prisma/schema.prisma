@@ -110,6 +110,7 @@ model User {
   profileComplete   Boolean            @default(false)
   profession        String?            // məslək (qeydiyyatda soruşulur)
   avatar            String?            // profil şəkli
+  cvFile            String?            // istifadəçinin CV-si (PDF/şəkil)
   idNumber          String?            // kimlik / FIN (köhnə — indi şəkil istənir)
   birthDate         DateTime?          // doğum tarixi (vəsiqədən AI ilə)
   gender            String?            // cinsiyyət (vəsiqədən AI ilə: "Kişi"/"Qadın")
