@@ -351,6 +351,12 @@ router.post('/register/complete-id', adminAuth, idPairUpload, processImages, asy
     const bd = bodyStr('birthDate') || ai.birthDate;
     const gender = bodyStr('gender') || ai.gender;
     const idNumber = bodyStr('idNumber') || ai.idNumber;
+    // Qeydiyyatda xəritədən seçilən konum (profildə dəyişilə bilər).
+    const toFloat = (v: any) => { const n = parseFloat(String(v)); return Number.isFinite(n) ? n : null; };
+    const city = bodyStr('city');
+    const address = bodyStr('address');
+    const latitude = req.body.latitude !== undefined ? toFloat(req.body.latitude) : null;
+    const longitude = req.body.longitude !== undefined ? toFloat(req.body.longitude) : null;
 
     const user = await prisma.user.update({
       where: { id: userId },
@@ -359,6 +365,10 @@ router.post('/register/complete-id', adminAuth, idPairUpload, processImages, asy
         profession: profession?.trim() || null,
         idCardImage: idCardFile.filename,
         selfieImage: selfieFile.filename,
+        ...(city ? { city } : {}),
+        ...(address ? { address } : {}),
+        ...(latitude != null ? { latitude } : {}),
+        ...(longitude != null ? { longitude } : {}),
         ...(bd && /^\d{4}-\d{2}-\d{2}$/.test(bd) ? { birthDate: new Date(bd) } : {}),
         ...(gender ? { gender } : {}),
         ...(idNumber ? { idNumber } : {}),
