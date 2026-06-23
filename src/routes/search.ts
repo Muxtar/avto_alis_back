@@ -155,4 +155,85 @@ router.get('/search/by-city/:city', async (req: Request, res: Response) => {
   }
 });
 
+// GET /api/map/points — Azərbaycan üzrə xəritə nöqtələri: biznes obyektləri + istifadəçilər
+// (koordinatı olanlar). İctimaidir — yalnız açıq məlumat qaytarılır (ad, konum, tip).
+router.get('/map/points', async (_req: Request, res: Response) => {
+  try {
+    const [objects, users] = await Promise.all([
+      prisma.businessObject.findMany({
+        where: {
+          isActive: true,
+          latitude: { not: null },
+          longitude: { not: null },
+          business: { status: 'APPROVED', isActive: true },
+        },
+        select: {
+          id: true, name: true, latitude: true, longitude: true, city: true,
+          address: true, activityAreas: true, businessId: true,
+          _count: { select: { listings: true } },
+        },
+        take: 2000,
+      }),
+      prisma.user.findMany({
+        where: {
+          profileComplete: true,
+          isBlocked: false,
+          latitude: { not: null },
+          longitude: { not: null },
+        },
+        select: {
+          id: true, name: true, type: true, latitude: true, longitude: true,
+          city: true, avatar: true, profession: true,
+          _count: { select: { listings: true } },
+        },
+        take: 3000,
+      }),
+    ]);
+    res.json({
+      success: true,
+      objects: objects.map((o) => ({
+        id: o.id, name: o.name, latitude: o.latitude, longitude: o.longitude,
+        city: o.city, address: o.address, activityAreas: o.activityAreas,
+        businessId: o.businessId, listingCount: o._count.listings,
+      })),
+      users: users.map((u) => ({
+        id: u.id, name: u.name, type: u.type, latitude: u.latitude, longitude: u.longitude,
+        city: u.city, avatar: u.avatar, profession: u.profession, listingCount: u._count.listings,
+      })),
+    });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+// GET /api/objects/:id — biznes obyektinin açıq səhifəsi: obyekt məlumatı + aktiv elanları.
+router.get('/objects/:id', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(String(req.params.id));
+    if (Number.isNaN(id)) { res.status(400).json({ success: false, message: 'Yanlış ID' }); return; }
+    const now = new Date();
+    const object = await prisma.businessObject.findUnique({
+      where: { id },
+      select: {
+        id: true, name: true, phone: true, address: true, city: true,
+        latitude: true, longitude: true, activityAreas: true, isActive: true,
+        business: { select: { id: true, name: true, status: true } },
+      },
+    });
+    if (!object || !object.isActive) { res.status(404).json({ success: false, message: 'Obyekt tapılmadı' }); return; }
+    const listings = await prisma.listing.findMany({
+      where: { businessObjectId: id, OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] },
+      include: {
+        user: { select: { id: true, name: true, type: true } },
+        _count: { select: { comments: true } },
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 100,
+    });
+    res.json({ success: true, object, listings });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
 export default router;
