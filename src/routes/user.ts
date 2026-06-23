@@ -23,8 +23,8 @@ router.get('/me', adminAuth, async (req: AuthRequest, res: Response) => {
         id: true, name: true, phone: true, email: true, emailVerified: true, type: true, role: true, verified: true,
         profileComplete: true, sellerVerified: true, sellerVerifiedAt: true, createdAt: true,
         idVerifyStatus: true, profession: true, avatar: true, cvFile: true, cvPublic: true,
-        idCardImage: true, idCardBackImage: true, selfieImage: true, faceMatchScore: true, idNumber: true,
-        birthDate: true, gender: true,
+        idCardImage: true, idCardBackImage: true, selfieImage: true, selfieRightImage: true, selfieLeftImage: true,
+        faceMatchScore: true, idNumber: true, birthDate: true, gender: true,
         idAiNameMatch: true, idAiNameScore: true, idAiFaceMatch: true, idAiFaceScore: true, idAiReason: true,
         city: true, address: true, latitude: true, longitude: true,
         workplaces: true, vehicles: true,
@@ -49,38 +49,45 @@ router.get('/me', adminAuth, async (req: AuthRequest, res: Response) => {
 });
 
 // Kimlik təsdiqini yenidən təqdim et (profildən). Üz uyğunluğu brauzerdə hesablanır.
-const identityUpload = upload.fields([{ name: 'idCardImage', maxCount: 1 }, { name: 'idCardBackImage', maxCount: 1 }, { name: 'selfieImage', maxCount: 1 }]);
+const identityUpload = upload.fields([
+  { name: 'idCardImage', maxCount: 1 },
+  { name: 'idCardBackImage', maxCount: 1 },
+  { name: 'selfieImage', maxCount: 1 },        // ön (qarşıdan)
+  { name: 'selfieRightImage', maxCount: 1 },   // sağ
+  { name: 'selfieLeftImage', maxCount: 1 },    // sol
+]);
 router.post('/me/identity', adminAuth, identityUpload, processImages, async (req: AuthRequest, res: Response) => {
   try {
     const files = req.files as Record<string, Express.Multer.File[]> | undefined;
     const idCardFile = files?.['idCardImage']?.[0];
-    const selfieFile = files?.['selfieImage']?.[0];
-    if (!idCardFile || !selfieFile) {
-      res.status(400).json({ success: false, message: 'Şəxsiyyət vəsiqəsi şəkli və selfie tələb olunur' }); return;
+    const selfieFile = files?.['selfieImage']?.[0];        // ön — AI üz uyğunluğu bununla aparılır
+    const selfieRight = files?.['selfieRightImage']?.[0];
+    const selfieLeft = files?.['selfieLeftImage']?.[0];
+    if (!idCardFile || !selfieFile || !selfieRight || !selfieLeft) {
+      res.status(400).json({ success: false, message: 'Şəxsiyyət vəsiqəsi və 3 üz şəkli (ön, sağ, sol) tələb olunur' }); return;
     }
     const scoreNum = req.body.faceMatchScore !== undefined ? parseFloat(String(req.body.faceMatchScore)) : NaN;
 
-    // İstifadəçinin formada yoxladığı (kimlikdən oxunan) sahələr — kimlik = mənbə.
-    const bodyStr = (k: string) => (typeof req.body[k] === 'string' && req.body[k].trim() ? req.body[k].trim() : null);
-    const idName = bodyStr('name');
-    if (idName) {
-      await prisma.user.update({ where: { id: req.adminId! }, data: { name: idName } }).catch(() => {});
-    }
-    // İstifadəçinin (yenilənmiş) ad-soyadı ilə müqayisə üçün adı götür.
+    // İstifadəçinin əl ilə girdiyi ad — yalnız AI müqayisəsi (nameMatch) üçün.
     const me = await prisma.user.findUnique({ where: { id: req.adminId! }, select: { name: true } });
-    // Claude AI ilə kimlik doğrulaması (vəsiqə adı + üz uyğunluğu).
+    // Claude AI ilə kimlik doğrulaması (vəsiqə adı + üz uyğunluğu, ön selfie ilə).
     const ai = await verifyIdentityAI(idCardFile.path, selfieFile.path, (me?.name || '').trim());
 
-    // Doğum tarixi/cins/FIN: əvvəlcə istifadəçinin yoxladığı dəyər, sonra AI.
-    const bd = bodyStr('birthDate') || ai.birthDate;
-    const gender = bodyStr('gender') || ai.gender;
-    const idNumber = bodyStr('idNumber') || ai.idNumber;
+    // KİMLİK = MƏNBƏ. AI vəsiqədən oxuyub doldurur; bunlar artıq əl ilə dəyişilməyəcək.
+    const idName = ai.ok && ai.idName ? ai.idName : null;
+    const bd = ai.birthDate;
+    const gender = ai.gender;
+    const idNumber = ai.idNumber;
 
     const user = await prisma.user.update({
       where: { id: req.adminId! },
       data: {
-        idCardImage: idCardFile.filename, selfieImage: selfieFile.filename,
+        idCardImage: idCardFile.filename,
+        selfieImage: selfieFile.filename,
+        selfieRightImage: selfieRight.filename,
+        selfieLeftImage: selfieLeft.filename,
         ...(files?.['idCardBackImage']?.[0]?.filename ? { idCardBackImage: files['idCardBackImage'][0].filename } : {}),
+        ...(idName ? { name: idName } : {}),
         ...(bd && /^\d{4}-\d{2}-\d{2}$/.test(bd) ? { birthDate: new Date(bd) } : {}),
         ...(gender ? { gender } : {}),
         ...(idNumber ? { idNumber } : {}),
@@ -95,6 +102,32 @@ router.post('/me/identity', adminAuth, identityUpload, processImages, async (req
       select: { id: true, name: true, idVerifyStatus: true, faceMatchScore: true, idCardImage: true, selfieImage: true, idAiNameMatch: true, idAiFaceMatch: true, idAiReason: true },
     });
     res.json({ success: true, user });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
+// Kimliyi qaldır — şəkilləri + AI nəticələrini + təsdiq statusunu sıfırla.
+// Bundan sonra ad/FIN/doğum tarixi/cins yenidən əl ilə dəyişdirilə bilər (profil təsdiqlənməmiş olur).
+router.delete('/me/identity', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const me = await prisma.user.findUnique({
+      where: { id: req.adminId! },
+      select: { idCardImage: true, idCardBackImage: true, selfieImage: true, selfieRightImage: true, selfieLeftImage: true },
+    });
+    await prisma.user.update({
+      where: { id: req.adminId! },
+      data: {
+        idCardImage: null, idCardBackImage: null,
+        selfieImage: null, selfieRightImage: null, selfieLeftImage: null,
+        faceMatchScore: null,
+        idAiNameMatch: null, idAiNameScore: null, idAiFaceMatch: null, idAiFaceScore: null, idAiReason: null,
+        idVerifyStatus: null,
+      },
+    });
+    // Faylları sil (best-effort).
+    for (const f of [me?.idCardImage, me?.idCardBackImage, me?.selfieImage, me?.selfieRightImage, me?.selfieLeftImage]) {
+      if (f) fs.promises.unlink(path.join(__dirname, '../../uploads', f)).catch(() => {});
+    }
+    res.json({ success: true });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
 
@@ -325,16 +358,22 @@ router.post('/me/avatar', adminAuth, upload.single('avatar'), async (req: AuthRe
 // location used to auto-fill listings and power the /locations browser.
 router.put('/me', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
-    const { name, phone, city, address, latitude, longitude, profession } = req.body;
+    const { name, phone, city, address, latitude, longitude, profession, idNumber, birthDate, gender } = req.body;
     const toFloat = (v: any) => {
       if (v === null || v === '' || v === undefined) return null;
       const n = typeof v === 'number' ? v : parseFloat(v);
       return Number.isFinite(n) ? n : null;
     };
+    // Kimlik təsdiqlənibsə (şəkil var) ad/FIN/doğum tarixi/cins kilidlidir — yalnız kimlik qaldırıldıqdan sonra dəyişilir.
+    const cur = await prisma.user.findUnique({ where: { id: req.adminId }, select: { idCardImage: true } });
+    const idLocked = !!cur?.idCardImage;
     const user = await prisma.user.update({
       where: { id: req.adminId },
       data: {
-        ...(name !== undefined && { name }),
+        ...(!idLocked && name !== undefined && { name }),
+        ...(!idLocked && idNumber !== undefined && { idNumber: (idNumber || '').trim() || null }),
+        ...(!idLocked && birthDate !== undefined && { birthDate: /^\d{4}-\d{2}-\d{2}$/.test(String(birthDate)) ? new Date(birthDate) : null }),
+        ...(!idLocked && gender !== undefined && { gender: (gender || '').trim() || null }),
         ...(phone !== undefined && { phone }),
         ...(profession !== undefined && { profession: profession?.trim() || null }),
         ...(city !== undefined && { city: city || null }),
@@ -344,7 +383,7 @@ router.put('/me', adminAuth, async (req: AuthRequest, res: Response) => {
       },
       select: {
         id: true, name: true, phone: true, email: true, type: true, role: true, verified: true, createdAt: true,
-        profession: true, avatar: true,
+        profession: true, avatar: true, idNumber: true, birthDate: true, gender: true, idVerifyStatus: true,
         city: true, address: true, latitude: true, longitude: true,
       },
     });
