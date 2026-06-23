@@ -108,7 +108,8 @@ model User {
   verified          Boolean            @default(false)
   isBlocked         Boolean            @default(false) // admin tərəfindən bloklanıb
   profileComplete   Boolean            @default(false)
-  profession        String?            // məslək (qeydiyyatda soruşulur)
+  profession        String?            // ixtisas (qeydiyyatda soruşulur)
+  bio               String?            // istifadəçinin özü haqqında qeydi
   avatar            String?            // profil şəkli
   cvFile            String?            // istifadəçinin CV-si (PDF/şəkil)
   cvPublic          Boolean            @default(false) // CV public profildə görünsünmü

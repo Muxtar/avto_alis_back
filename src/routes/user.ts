@@ -22,7 +22,7 @@ router.get('/me', adminAuth, async (req: AuthRequest, res: Response) => {
       select: {
         id: true, name: true, phone: true, email: true, emailVerified: true, type: true, role: true, verified: true,
         profileComplete: true, sellerVerified: true, sellerVerifiedAt: true, createdAt: true,
-        idVerifyStatus: true, profession: true, avatar: true, cvFile: true, cvPublic: true,
+        idVerifyStatus: true, profession: true, bio: true, avatar: true, cvFile: true, cvPublic: true,
         idCardImage: true, idCardBackImage: true, selfieImage: true, selfieRightImage: true, selfieLeftImage: true,
         faceMatchScore: true, idNumber: true, birthDate: true, gender: true,
         idAiNameMatch: true, idAiNameScore: true, idAiFaceMatch: true, idAiFaceScore: true, idAiReason: true,
@@ -358,7 +358,7 @@ router.post('/me/avatar', adminAuth, upload.single('avatar'), async (req: AuthRe
 // location used to auto-fill listings and power the /locations browser.
 router.put('/me', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
-    const { name, phone, city, address, latitude, longitude, profession, idNumber, birthDate, gender } = req.body;
+    const { name, phone, city, address, latitude, longitude, profession, bio, idNumber, birthDate, gender } = req.body;
     const toFloat = (v: any) => {
       if (v === null || v === '' || v === undefined) return null;
       const n = typeof v === 'number' ? v : parseFloat(v);
@@ -376,6 +376,7 @@ router.put('/me', adminAuth, async (req: AuthRequest, res: Response) => {
         ...(!idLocked && gender !== undefined && { gender: (gender || '').trim() || null }),
         ...(phone !== undefined && { phone }),
         ...(profession !== undefined && { profession: profession?.trim() || null }),
+        ...(bio !== undefined && { bio: (bio || '').trim() || null }),
         ...(city !== undefined && { city: city || null }),
         ...(address !== undefined && { address: address || null }),
         ...(latitude !== undefined && { latitude: toFloat(latitude) }),
@@ -383,7 +384,7 @@ router.put('/me', adminAuth, async (req: AuthRequest, res: Response) => {
       },
       select: {
         id: true, name: true, phone: true, email: true, type: true, role: true, verified: true, createdAt: true,
-        profession: true, avatar: true, idNumber: true, birthDate: true, gender: true, idVerifyStatus: true,
+        profession: true, bio: true, avatar: true, idNumber: true, birthDate: true, gender: true, idVerifyStatus: true,
         city: true, address: true, latitude: true, longitude: true,
       },
     });
