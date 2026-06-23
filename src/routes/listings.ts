@@ -169,14 +169,19 @@ router.get('/sellers/:id', async (req: Request, res: Response) => {
         id: true, name: true, phone: true, type: true, createdAt: true, workplaces: true,
         serviceBrands: true, serviceAllBrands: true, serviceCategories: true,
         sellerVerified: true, idVerifyStatus: true, avatar: true, profession: true,
+        cvFile: true, cvPublic: true,
         // Yalnız təsdiqlənmiş sosial hesablar public profildə görünür.
         socialLinks: { where: { verified: true }, select: { platform: true, url: true } },
+        // Yalnız istifadəçinin public etdiyi peşə sənədləri (YES ikonu ilə).
+        professionDocuments: { where: { isPublic: true }, select: { id: true, title: true, image: true, documentType: true } },
       },
     });
     if (!user) {
       res.status(404).json({ success: false, message: 'İstifadəçi tapılmadı' });
       return;
     }
+    // CV yalnız public edilibsə görünsün.
+    if (!user.cvPublic) (user as any).cvFile = null;
 
     // M1 fix: paginate seller's listings to avoid serving thousands at once.
     const page = parseInt((req.query.page as string) || '1');

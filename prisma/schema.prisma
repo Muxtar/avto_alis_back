@@ -111,10 +111,12 @@ model User {
   profession        String?            // məslək (qeydiyyatda soruşulur)
   avatar            String?            // profil şəkli
   cvFile            String?            // istifadəçinin CV-si (PDF/şəkil)
+  cvPublic          Boolean            @default(false) // CV public profildə görünsünmü
   idNumber          String?            // kimlik / FIN (köhnə — indi şəkil istənir)
   birthDate         DateTime?          // doğum tarixi (vəsiqədən AI ilə)
   gender            String?            // cinsiyyət (vəsiqədən AI ilə: "Kişi"/"Qadın")
-  idCardImage       String?            // şəxsiyyət vəsiqəsi şəkli (FIN əvəzinə)
+  idCardImage       String?            // şəxsiyyət vəsiqəsi ön tərəf
+  idCardBackImage   String?            // şəxsiyyət vəsiqəsi arxa tərəf (yalnız sahibi görür)
   selfieImage       String?            // selfie (üz tanıma üçün)
   faceMatchScore    Float?             // face-api.js oxşarlıq balı (0–1, brauzerdə)
   // Claude AI kimlik doğrulaması (vəsiqədəki ad + üz uyğunluğu)
@@ -145,6 +147,7 @@ model User {
   emailVerifications EmailVerification[]
   socialLinks       SocialLink[]
   professionDocuments ProfessionDocument[]
+  phones            PhoneNumber[]
   sharedCarts       SharedCart[]
   buyerReturns      ReturnRequest[]  @relation("BuyerReturns")
   sellerReturns     ReturnRequest[]  @relation("SellerReturns")
@@ -250,6 +253,23 @@ model VerificationCode {
   verified  Boolean  @default(false)
   createdAt DateTime @default(now())
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+// İstifadəçinin telefon nömrələri — biri əsas (user.phone), digərləri məlumat üçün.
+// Hər nömrə doğrulama kodu ilə təsdiqlənir.
+model PhoneNumber {
+  id            Int       @id @default(autoincrement())
+  userId        Int
+  phone         String
+  isPrimary     Boolean   @default(false) // əsas nömrə → user.phone + elanlardakı nömrə
+  verified      Boolean   @default(false)
+  code          String?   // doğrulama kodu (təsdiqdən sonra təmizlənir)
+  codeExpiresAt DateTime?
+  createdAt     DateTime  @default(now())
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, phone])
+  @@index([userId])
 }
 
 model Listing {
@@ -451,6 +471,7 @@ model ProfessionDocument {
   confidence     Float?             // 0..1
   fraudSignals   String[]           @default([])
   aiReason       String?            // AI-ın qısa izahı
+  isPublic       Boolean            @default(false) // public profildə görünsünmü (YES ikonu)
   status         VerificationStatus @default(PENDING) // PENDING / APPROVED / REJECTED (admin son sözü)
   createdAt      DateTime           @default(now())
   user           User               @relation(fields: [userId], references: [id], onDelete: Cascade)

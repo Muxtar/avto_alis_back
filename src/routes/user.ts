@@ -22,8 +22,8 @@ router.get('/me', adminAuth, async (req: AuthRequest, res: Response) => {
       select: {
         id: true, name: true, phone: true, email: true, emailVerified: true, type: true, role: true, verified: true,
         profileComplete: true, sellerVerified: true, sellerVerifiedAt: true, createdAt: true,
-        idVerifyStatus: true, profession: true, avatar: true, cvFile: true,
-        idCardImage: true, selfieImage: true, faceMatchScore: true, idNumber: true,
+        idVerifyStatus: true, profession: true, avatar: true, cvFile: true, cvPublic: true,
+        idCardImage: true, idCardBackImage: true, selfieImage: true, faceMatchScore: true, idNumber: true,
         birthDate: true, gender: true,
         idAiNameMatch: true, idAiNameScore: true, idAiFaceMatch: true, idAiFaceScore: true, idAiReason: true,
         city: true, address: true, latitude: true, longitude: true,
@@ -33,7 +33,7 @@ router.get('/me', adminAuth, async (req: AuthRequest, res: Response) => {
           select: {
             id: true, title: true, image: true, documentType: true, holderName: true,
             nameMatch: true, nameMatchScore: true, professionMatch: true, confidence: true,
-            aiReason: true, status: true, createdAt: true,
+            aiReason: true, status: true, isPublic: true, createdAt: true,
           },
           orderBy: { createdAt: 'desc' },
         },
@@ -49,7 +49,7 @@ router.get('/me', adminAuth, async (req: AuthRequest, res: Response) => {
 });
 
 // Kimlik təsdiqini yenidən təqdim et (profildən). Üz uyğunluğu brauzerdə hesablanır.
-const identityUpload = upload.fields([{ name: 'idCardImage', maxCount: 1 }, { name: 'selfieImage', maxCount: 1 }]);
+const identityUpload = upload.fields([{ name: 'idCardImage', maxCount: 1 }, { name: 'idCardBackImage', maxCount: 1 }, { name: 'selfieImage', maxCount: 1 }]);
 router.post('/me/identity', adminAuth, identityUpload, processImages, async (req: AuthRequest, res: Response) => {
   try {
     const files = req.files as Record<string, Express.Multer.File[]> | undefined;
@@ -80,6 +80,7 @@ router.post('/me/identity', adminAuth, identityUpload, processImages, async (req
       where: { id: req.adminId! },
       data: {
         idCardImage: idCardFile.filename, selfieImage: selfieFile.filename,
+        ...(files?.['idCardBackImage']?.[0]?.filename ? { idCardBackImage: files['idCardBackImage'][0].filename } : {}),
         ...(bd && /^\d{4}-\d{2}-\d{2}$/.test(bd) ? { birthDate: new Date(bd) } : {}),
         ...(gender ? { gender } : {}),
         ...(idNumber ? { idNumber } : {}),
@@ -201,6 +202,107 @@ router.delete('/me/cv', adminAuth, async (req: AuthRequest, res: Response) => {
     const me = await prisma.user.findUnique({ where: { id: req.adminId! }, select: { cvFile: true } });
     await prisma.user.update({ where: { id: req.adminId! }, data: { cvFile: null } });
     if (me?.cvFile) fs.promises.unlink(path.join(__dirname, '../../uploads', me.cvFile)).catch(() => {});
+    res.json({ success: true });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
+// CV-ni public/gizli et.
+router.put('/me/cv/public', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    await prisma.user.update({ where: { id: req.adminId! }, data: { cvPublic: req.body.public === true } });
+    res.json({ success: true });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
+// Peşə sənədini public/gizli et (YES ikonu).
+router.put('/me/credentials/:id/public', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const id = parseInt(req.params.id);
+    const doc = await prisma.professionDocument.findUnique({ where: { id }, select: { userId: true } });
+    if (!doc || doc.userId !== req.adminId) { res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return; }
+    await prisma.professionDocument.update({ where: { id }, data: { isPublic: req.body.public === true } });
+    res.json({ success: true });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
+// ===================== TELEFON NÖMRƏLƏRİ (çoxlu, biri əsas) =====================
+function normPhone(s: any): string { return String(s || '').replace(/[^\d+]/g, ''); }
+
+router.get('/me/phones', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const me = await prisma.user.findUnique({ where: { id: req.adminId! }, select: { phone: true } });
+    // Qeydiyyat nömrəsi (user.phone) həmişə əsas + təsdiqli olaraq siyahıda olsun.
+    if (me?.phone) {
+      await prisma.phoneNumber.upsert({
+        where: { userId_phone: { userId: req.adminId!, phone: me.phone } },
+        update: { isPrimary: true, verified: true },
+        create: { userId: req.adminId!, phone: me.phone, isPrimary: true, verified: true },
+      }).catch(() => {});
+      await prisma.phoneNumber.updateMany({ where: { userId: req.adminId!, NOT: { phone: me.phone } }, data: { isPrimary: false } });
+    }
+    const phones = await prisma.phoneNumber.findMany({
+      where: { userId: req.adminId! },
+      orderBy: [{ isPrimary: 'desc' }, { id: 'asc' }],
+      select: { id: true, phone: true, isPrimary: true, verified: true },
+    });
+    res.json({ success: true, phones });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
+router.post('/me/phones/send-code', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const phone = normPhone(req.body.phone);
+    if (phone.replace(/\D/g, '').length < 7) { res.status(400).json({ success: false, message: 'Düzgün nömrə yazın' }); return; }
+    const code = generateEmailCode();
+    const codeExpiresAt = new Date(Date.now() + 5 * 60 * 1000);
+    await prisma.phoneNumber.upsert({
+      where: { userId_phone: { userId: req.adminId!, phone } },
+      update: { code, codeExpiresAt },
+      create: { userId: req.adminId!, phone, code, codeExpiresAt },
+    });
+    // SMS provayderi yoxdursa kod cavabda qaytarılır (test).
+    const isDev = process.env.SMS_PROVIDER !== 'twilio';
+    res.json({ success: true, message: 'Doğrulama kodu göndərildi', ...(isDev && { code }) });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
+router.post('/me/phones/verify', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const phone = normPhone(req.body.phone);
+    const code = String(req.body.code || '');
+    const rec = await prisma.phoneNumber.findUnique({ where: { userId_phone: { userId: req.adminId!, phone } } });
+    if (!rec || rec.code !== code || !rec.codeExpiresAt || rec.codeExpiresAt < new Date()) {
+      res.status(400).json({ success: false, message: 'Kod yanlışdır və ya vaxtı keçib' }); return;
+    }
+    await prisma.phoneNumber.update({ where: { id: rec.id }, data: { verified: true, code: null, codeExpiresAt: null } });
+    res.json({ success: true });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
+// Nömrəni əsas et → user.phone + bütün elanların nömrəsi yenilənir.
+router.post('/me/phones/:id/primary', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const id = parseInt(req.params.id);
+    const rec = await prisma.phoneNumber.findUnique({ where: { id } });
+    if (!rec || rec.userId !== req.adminId) { res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return; }
+    if (!rec.verified) { res.status(400).json({ success: false, message: 'Əvvəlcə nömrəni təsdiqləyin' }); return; }
+    await prisma.$transaction([
+      prisma.phoneNumber.updateMany({ where: { userId: req.adminId! }, data: { isPrimary: false } }),
+      prisma.phoneNumber.update({ where: { id }, data: { isPrimary: true } }),
+      prisma.user.update({ where: { id: req.adminId! }, data: { phone: rec.phone } }),
+      prisma.listing.updateMany({ where: { userId: req.adminId! }, data: { phone: rec.phone } }),
+    ]);
+    res.json({ success: true, phone: rec.phone });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
+router.delete('/me/phones/:id', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const id = parseInt(req.params.id);
+    const rec = await prisma.phoneNumber.findUnique({ where: { id } });
+    if (!rec || rec.userId !== req.adminId) { res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return; }
+    if (rec.isPrimary) { res.status(400).json({ success: false, message: 'Əsas nömrəni silmək olmaz' }); return; }
+    await prisma.phoneNumber.delete({ where: { id } });
     res.json({ success: true });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
