@@ -169,6 +169,7 @@ router.get('/sellers/:id', async (req: Request, res: Response) => {
         id: true, name: true, phone: true, type: true, createdAt: true, workplaces: true,
         serviceBrands: true, serviceAllBrands: true, serviceCategories: true,
         sellerVerified: true, idVerifyStatus: true, avatar: true, profession: true, bio: true,
+        birthDate: true, gender: true, // kimlik məlumatları — FIN və vəsiqə şəkli ictimai DEYİL
         cvFile: true, cvPublic: true,
         // Yalnız təsdiqlənmiş sosial hesablar public profildə görünür.
         socialLinks: { where: { verified: true }, select: { platform: true, url: true } },
@@ -229,8 +230,14 @@ router.get('/listings/:id', async (req: Request, res: Response) => {
       where: { id },
       data: { viewCount: { increment: 1 } },
       include: {
+        // YALNIZ açıq sahələr — idCardImage/selfie/FIN/parol və s. SIZDIRILMIR.
         user: {
-          include: {
+          select: {
+            id: true, name: true, phone: true, type: true, avatar: true,
+            profession: true, bio: true, gender: true, birthDate: true,
+            idVerifyStatus: true, sellerVerified: true,
+            city: true, address: true, latitude: true, longitude: true,
+            avgRating: true, ratingCount: true, createdAt: true,
             workplaces: true,
           },
         },
