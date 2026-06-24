@@ -4,6 +4,7 @@ import { adminAuth, requireAdmin, AuthRequest } from '../middleware/auth';
 import { getOrderStatus, isPaidStatus } from '../services/kapital';
 import { refundOrder } from '../services/paymentGateway';
 import { getPaymentStatus as yigimStatus, isPaidStatus as yigimPaid } from '../services/yigimPay';
+import { settleConsultation } from './consultations';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -46,7 +47,8 @@ router.get('/payment/callback', async (req: Request, res: Response) => {
     }
     // Əvvəlki vəziyyəti bilmək üçün order-ləri item-lərlə birlikdə əvvəlcədən oxu (idempotentlik).
     const orders = await prisma.order.findMany({ where: { gatewayOrderId }, include: { items: true } });
-    if (orders.length === 0) {
+    const consultCount = await prisma.consultationSession.count({ where: { gatewayOrderId } });
+    if (orders.length === 0 && consultCount === 0) {
       return res.redirect(`${FRONTEND_URL}/payment/return?status=error`);
     }
     const wasPaid = orders.some((o) => o.paymentStatus === 'PAID');
@@ -54,6 +56,8 @@ router.get('/payment/callback', async (req: Request, res: Response) => {
     // Banka birbaşa sorğu ilə həqiqi statusu al (callback STATUS-a güvənmə).
     const { status } = await getOrderStatus(gatewayOrderId);
     const paid = isPaidStatus(status);
+    // Rəy konsultasiyası ödənişidirsə seansı da təsdiqlə.
+    if (consultCount > 0) await settleConsultation({ gatewayOrderId }, paid);
 
     await prisma.order.updateMany({
       where: { gatewayOrderId },
@@ -96,10 +100,12 @@ router.get('/payment/yigim/callback', async (req: Request, res: Response) => {
   try {
     if (!reference) return res.redirect(`${FRONTEND_URL}/payment/return?status=error`);
     const order = await prisma.order.findFirst({ where: { gatewayRef: reference } });
-    if (!order) return res.redirect(`${FRONTEND_URL}/payment/return?status=error`);
+    const consultCount = await prisma.consultationSession.count({ where: { gatewayRef: reference } });
+    if (!order && consultCount === 0) return res.redirect(`${FRONTEND_URL}/payment/return?status=error`);
     const { status } = await yigimStatus(reference);
     const paid = yigimPaid(status);
-    await settleOrders({ gatewayRef: reference }, status, paid);
+    if (order) await settleOrders({ gatewayRef: reference }, status, paid);
+    if (consultCount > 0) await settleConsultation({ gatewayRef: reference }, paid);
     return res.redirect(`${FRONTEND_URL}/payment/return?status=${paid ? 'success' : 'failed'}`);
   } catch (err: any) {
     console.error('[payment/yigim/callback]', err.message);

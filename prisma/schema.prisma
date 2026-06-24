@@ -96,86 +96,89 @@ enum ReturnReason {
 }
 
 model User {
-  id                Int                @id @default(autoincrement())
-  name              String             @default("")
-  phone             String
-  email             String?
-  emailVerified     Boolean            @default(false) // email doğrulama kodu ilə təsdiqlənib
-  telegramId        String?            @unique
-  type              UserType           @default(CAR_OWNER)
-  role              UserRole           @default(USER)
-  password          String?
-  verified          Boolean            @default(false)
-  isBlocked         Boolean            @default(false) // admin tərəfindən bloklanıb
-  profileComplete   Boolean            @default(false)
-  profession        String?            // ixtisas (qeydiyyatda soruşulur)
-  bio               String?            // istifadəçinin özü haqqında qeydi
-  avatar            String?            // profil şəkli
-  cvFile            String?            // istifadəçinin CV-si (PDF/şəkil)
-  cvPublic          Boolean            @default(false) // CV public profildə görünsünmü
-  idNumber          String?            // kimlik / FIN (köhnə — indi şəkil istənir)
-  birthDate         DateTime?          // doğum tarixi (vəsiqədən AI ilə)
-  gender            String?            // cinsiyyət (vəsiqədən AI ilə: "Kişi"/"Qadın")
-  idCardImage       String?            // şəxsiyyət vəsiqəsi ön tərəf
-  idCardBackImage   String?            // şəxsiyyət vəsiqəsi arxa tərəf (yalnız sahibi görür)
-  selfieImage       String?            // selfie — ön (qarşıdan, üz tanıma üçün)
-  selfieRightImage  String?            // selfie — sağ profil
-  selfieLeftImage   String?            // selfie — sol profil
-  faceMatchScore    Float?             // face-api.js oxşarlıq balı (0–1, brauzerdə)
+  id                   Int                   @id @default(autoincrement())
+  name                 String                @default("")
+  phone                String
+  email                String?
+  emailVerified        Boolean               @default(false) // email doğrulama kodu ilə təsdiqlənib
+  telegramId           String?               @unique
+  type                 UserType              @default(CAR_OWNER)
+  role                 UserRole              @default(USER)
+  password             String?
+  verified             Boolean               @default(false)
+  isBlocked            Boolean               @default(false) // admin tərəfindən bloklanıb
+  profileComplete      Boolean               @default(false)
+  profession           String? // ixtisas (qeydiyyatda soruşulur)
+  bio                  String? // istifadəçinin özü haqqında qeydi
+  avatar               String? // profil şəkli
+  cvFile               String? // istifadəçinin CV-si (PDF/şəkil)
+  cvPublic             Boolean               @default(false) // CV public profildə görünsünmü
+  idNumber             String? // kimlik / FIN (köhnə — indi şəkil istənir)
+  birthDate            DateTime? // doğum tarixi (vəsiqədən AI ilə)
+  gender               String? // cinsiyyət (vəsiqədən AI ilə: "Kişi"/"Qadın")
+  idCardImage          String? // şəxsiyyət vəsiqəsi ön tərəf
+  idCardBackImage      String? // şəxsiyyət vəsiqəsi arxa tərəf (yalnız sahibi görür)
+  selfieImage          String? // selfie — ön (qarşıdan, üz tanıma üçün)
+  selfieRightImage     String? // selfie — sağ profil
+  selfieLeftImage      String? // selfie — sol profil
+  faceMatchScore       Float? // face-api.js oxşarlıq balı (0–1, brauzerdə)
   // Claude AI kimlik doğrulaması (vəsiqədəki ad + üz uyğunluğu)
-  idAiNameMatch     Boolean?           // vəsiqədəki ad qeydiyyatla uyğun?
-  idAiNameScore     Float?             // 0..1
-  idAiFaceMatch     Boolean?           // vəsiqə fotosu ilə selfie eyni şəxs?
-  idAiFaceScore     Float?             // 0..1
-  idAiReason        String?            // AI-ın qısa izahı
-  idVerifyStatus    VerificationStatus? // null=təqdim olunmayıb, PENDING=admin gözləyir
-  sellerVerified    Boolean            @default(false) // ≥1 təsdiqlənmiş biznesi var
-  sellerVerifiedAt  DateTime?
-  sellerApplication SellerVerification?
-  businesses        Business[]
-  businessMemberships BusinessMember[] @relation("BusinessMemberships")
-  publicId          String?          @unique // hər kəsə verilən xüsusi ID (profildə)
-  createdAt         DateTime           @default(now())
-  vehicles          Vehicle[]
-  workplaces        Workplace[]
-  verificationCodes VerificationCode[]
-  listings          Listing[]
-  sentMessages      Message[]        @relation("SentMessages")
-  receivedMessages  Message[]        @relation("ReceivedMessages")
-  comments          Comment[]
-  cart              Cart?
-  buyerOrders       Order[]          @relation("BuyerOrders")
-  sellerOrders      Order[]          @relation("SellerOrders")
-  courierOrders     Order[]          @relation("CourierOrders")
-  emailVerifications EmailVerification[]
-  socialLinks       SocialLink[]
-  professionDocuments ProfessionDocument[]
-  phones            PhoneNumber[]
-  sharedCarts       SharedCart[]
-  buyerReturns      ReturnRequest[]  @relation("BuyerReturns")
-  sellerReturns     ReturnRequest[]  @relation("SellerReturns")
-  buyerInquiries    Inquiry[]        @relation("BuyerInquiries")
-  targetedInquiries InquiryTarget[]  @relation("TargetedInquiries")
-  sellerOffers      InquiryOffer[]   @relation("SellerOffers")
+  idAiNameMatch        Boolean? // vəsiqədəki ad qeydiyyatla uyğun?
+  idAiNameScore        Float? // 0..1
+  idAiFaceMatch        Boolean? // vəsiqə fotosu ilə selfie eyni şəxs?
+  idAiFaceScore        Float? // 0..1
+  idAiReason           String? // AI-ın qısa izahı
+  idVerifyStatus       VerificationStatus? // null=təqdim olunmayıb, PENDING=admin gözləyir
+  sellerVerified       Boolean               @default(false) // ≥1 təsdiqlənmiş biznesi var
+  sellerVerifiedAt     DateTime?
+  sellerApplication    SellerVerification?
+  businesses           Business[]
+  businessMemberships  BusinessMember[]      @relation("BusinessMemberships")
+  consultationOffer    ConsultationOffer?    @relation("UserConsultationOffer")
+  consultationsBought  ConsultationSession[] @relation("ConsultationBuyer")
+  consultationsSelling ConsultationSession[] @relation("ConsultationProfessional")
+  publicId             String?               @unique // hər kəsə verilən xüsusi ID (profildə)
+  createdAt            DateTime              @default(now())
+  vehicles             Vehicle[]
+  workplaces           Workplace[]
+  verificationCodes    VerificationCode[]
+  listings             Listing[]
+  sentMessages         Message[]             @relation("SentMessages")
+  receivedMessages     Message[]             @relation("ReceivedMessages")
+  comments             Comment[]
+  cart                 Cart?
+  buyerOrders          Order[]               @relation("BuyerOrders")
+  sellerOrders         Order[]               @relation("SellerOrders")
+  courierOrders        Order[]               @relation("CourierOrders")
+  emailVerifications   EmailVerification[]
+  socialLinks          SocialLink[]
+  professionDocuments  ProfessionDocument[]
+  phones               PhoneNumber[]
+  sharedCarts          SharedCart[]
+  buyerReturns         ReturnRequest[]       @relation("BuyerReturns")
+  sellerReturns        ReturnRequest[]       @relation("SellerReturns")
+  buyerInquiries       Inquiry[]             @relation("BuyerInquiries")
+  targetedInquiries    InquiryTarget[]       @relation("TargetedInquiries")
+  sellerOffers         InquiryOffer[]        @relation("SellerOffers")
 
   // Bolt Food benzeri ozellikler
-  loyaltyPoints     Int              @default(0)
-  isPremium         Boolean          @default(false)
-  premiumUntil      DateTime?
-  avgRating         Float?           // satici icin ortalama rating
-  ratingCount       Int              @default(0)
-  businessHours     Json?            // {monday: {open: "09:00", close: "18:00"}, ...}
-  favorites         Favorite[]
-  addresses         SavedAddress[]
-  sellerRatings     SellerRating[]   @relation("SellerRatings")
-  givenRatings      SellerRating[]   @relation("BuyerRatings")
-  notifications     Notification[]
+  loyaltyPoints Int            @default(0)
+  isPremium     Boolean        @default(false)
+  premiumUntil  DateTime?
+  avgRating     Float? // satici icin ortalama rating
+  ratingCount   Int            @default(0)
+  businessHours Json? // {monday: {open: "09:00", close: "18:00"}, ...}
+  favorites     Favorite[]
+  addresses     SavedAddress[]
+  sellerRatings SellerRating[] @relation("SellerRatings")
+  givenRatings  SellerRating[] @relation("BuyerRatings")
+  notifications Notification[]
 
   // Default location — used on listings + city-search browsing.
-  city              String?
-  address           String?
-  latitude          Float?
-  longitude         Float?
+  city      String?
+  address   String?
+  latitude  Float?
+  longitude Float?
 
   // Usta / satıcı ixtisası — hansı avtomobil markaları və hansı hissə
   // kateqoriyaları üzrə xidmət göstərir (MECHANIC / PARTS_SELLER üçün).
@@ -190,15 +193,15 @@ model User {
 }
 
 model Vehicle {
-  id            Int    @id @default(autoincrement())
-  userId        Int
-  brand         String
-  model         String
-  year          Int
+  id     Int    @id @default(autoincrement())
+  userId Int
+  brand  String
+  model  String
+  year   Int
 
   // Backwards-compatible legacy single-image field. New rows use the
   // front/back pair below; old rows keep this populated.
-  passportImage String  @default("")
+  passportImage String @default("")
 
   // Texniki pasport şəkilləri (ön və arxa hissələr)
   passportImageFront String? // ön kart şəkli
@@ -207,7 +210,7 @@ model Vehicle {
   // ===== Texniki pasportun ön hissəsi =====
   registrationNumber String? // A — Qeydiyyat nişanı (məs: 77NP518)
   registrationDate   String? // B.1 — Qeydiyyat tarixi (məs: 25.11.2024)
-  manufactureYear    Int?    // B.2 — İstehsal tarixi (il)
+  manufactureYear    Int? // B.2 — İstehsal tarixi (il)
   ownerName          String? // C.1 — Mülkiyyətçi (məs: ƏSƏDOV EMIN ASLAN OĞLU)
   ownerAddress       String? // C.2 — Sahibinin ünvanı
   ownershipType      String? // C.3 — Mülkiyyət növü (Fiziki şəxs / Hüquqi şəxs)
@@ -215,23 +218,23 @@ model Vehicle {
   cardSerial         String? // Kart üzərindəki seriya (məs: BB667834)
 
   // ===== Texniki pasportun arxa hissəsi =====
-  vehicleType     String? // D.3 — Tip (məs: MİNİK, UNIVERSAL)
-  engineNumber    String? // E.1 — Mühərrik nömrəsi
-  bodyNumber      String? // E.2 — Ban nömrəsi (VIN)
-  chassisNumber   String? // E.3 — Şassi nömrəsi
-  color           String? // E.4 — Rəngi
-  maxMass         String? // F.1 — Maksimal kütlə
-  unloadedMass    String? // F.2 — Yüksüz kütlə
-  seatCount       Int?    // F.3 — Oturacaqların sayı
-  engineCapacity  String? // G — Mühərrikin həcmi (sm³)
-  issuedBy        String? // Verilib (məs: AR DİN BDYPİ Qİİ)
-  specialMarks    String? // Xüsusi qeydlər
+  vehicleType    String? // D.3 — Tip (məs: MİNİK, UNIVERSAL)
+  engineNumber   String? // E.1 — Mühərrik nömrəsi
+  bodyNumber     String? // E.2 — Ban nömrəsi (VIN)
+  chassisNumber  String? // E.3 — Şassi nömrəsi
+  color          String? // E.4 — Rəngi
+  maxMass        String? // F.1 — Maksimal kütlə
+  unloadedMass   String? // F.2 — Yüksüz kütlə
+  seatCount      Int? // F.3 — Oturacaqların sayı
+  engineCapacity String? // G — Mühərrikin həcmi (sm³)
+  issuedBy       String? // Verilib (məs: AR DİN BDYPİ Qİİ)
+  specialMarks   String? // Xüsusi qeydlər
 
   // AI çıxarışı və metadata
-  aiExtracted    Json?     // AI-nın qaytardığı xam JSON (audit / debug üçün)
-  aiVerifiedAt   DateTime? // AI-nın oxuduğu vaxt
+  aiExtracted  Json? // AI-nın qaytardığı xam JSON (audit / debug üçün)
+  aiVerifiedAt DateTime? // AI-nın oxuduğu vaxt
 
-  user          User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
   @@index([registrationNumber])
@@ -266,7 +269,7 @@ model PhoneNumber {
   phone         String
   isPrimary     Boolean   @default(false) // əsas nömrə → user.phone + elanlardakı nömrə
   verified      Boolean   @default(false)
-  code          String?   // doğrulama kodu (təsdiqdən sonra təmizlənir)
+  code          String? // doğrulama kodu (təsdiqdən sonra təmizlənir)
   codeExpiresAt DateTime?
   createdAt     DateTime  @default(now())
   user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -276,45 +279,45 @@ model PhoneNumber {
 }
 
 model Listing {
-  id          Int         @id @default(autoincrement())
-  userId      Int
-  title       String
-  description String
-  price       Float
-  category    String
-  type        ListingType
-  images      String[]
-  location    String?
-  phone       String?
-  condition   Condition   @default(NEW)
-  country     String?
-  brand       String?
-  stock       Int         @default(1)
-  forVehicle  String?
-  unit        String?
-  unitValue   Float?
-  year        Int?
-  model       String?
-  city        String?
-  fuelType    FuelType?
-  attributes  Json?       // kateqoriyaya xüsusi sahələr (otaq sayı, sahə, ölçü, yürüş...)
-  paymentType PaymentType?
-  viewCount   Int         @default(0)
-  expiresAt   DateTime?
+  id               Int             @id @default(autoincrement())
+  userId           Int
+  title            String
+  description      String
+  price            Float
+  category         String
+  type             ListingType
+  images           String[]
+  location         String?
+  phone            String?
+  condition        Condition       @default(NEW)
+  country          String?
+  brand            String?
+  stock            Int             @default(1)
+  forVehicle       String?
+  unit             String?
+  unitValue        Float?
+  year             Int?
+  model            String?
+  city             String?
+  fuelType         FuelType?
+  attributes       Json? // kateqoriyaya xüsusi sahələr (otaq sayı, sahə, ölçü, yürüş...)
+  paymentType      PaymentType?
+  viewCount        Int             @default(0)
+  expiresAt        DateTime?
   // Biznes bağlantısı — elan bir obyektə (filiala) aiddirsə kart ödənişi mümkün olur.
   businessId       Int?
   businessObjectId Int?
-  createdAt   DateTime    @default(now())
-  updatedAt   DateTime    @updatedAt
-  user        User        @relation(fields: [userId], references: [id], onDelete: Cascade)
-  business        Business?       @relation(fields: [businessId], references: [id], onDelete: SetNull)
-  businessObject  BusinessObject? @relation(fields: [businessObjectId], references: [id], onDelete: SetNull)
-  messages    Message[]
-  comments    Comment[]
-  cartItems     CartItem[]
-  orderItems    OrderItem[]
-  inquiryOffers InquiryOffer[]
-  favorites     Favorite[]
+  createdAt        DateTime        @default(now())
+  updatedAt        DateTime        @updatedAt
+  user             User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  business         Business?       @relation(fields: [businessId], references: [id], onDelete: SetNull)
+  businessObject   BusinessObject? @relation(fields: [businessObjectId], references: [id], onDelete: SetNull)
+  messages         Message[]
+  comments         Comment[]
+  cartItems        CartItem[]
+  orderItems       OrderItem[]
+  inquiryOffers    InquiryOffer[]
+  favorites        Favorite[]
 
   @@index([userId, createdAt])
   @@index([category])
@@ -329,16 +332,18 @@ model Listing {
 }
 
 model Message {
-  id         Int      @id @default(autoincrement())
-  senderId   Int
-  receiverId Int
-  listingId  Int?
-  content    String
-  read       Boolean  @default(false)
-  createdAt  DateTime @default(now())
-  sender     User     @relation("SentMessages", fields: [senderId], references: [id], onDelete: Cascade)
-  receiver   User     @relation("ReceivedMessages", fields: [receiverId], references: [id], onDelete: Cascade)
-  listing    Listing? @relation(fields: [listingId], references: [id], onDelete: SetNull)
+  id             Int                  @id @default(autoincrement())
+  senderId       Int
+  receiverId     Int
+  listingId      Int?
+  consultationId Int? // dolu olarsa bu mesaj "Rəy" konsultasiyasına aiddir (ayrı icon)
+  content        String
+  read           Boolean              @default(false)
+  createdAt      DateTime             @default(now())
+  sender         User                 @relation("SentMessages", fields: [senderId], references: [id], onDelete: Cascade)
+  receiver       User                 @relation("ReceivedMessages", fields: [receiverId], references: [id], onDelete: Cascade)
+  listing        Listing?             @relation(fields: [listingId], references: [id], onDelete: SetNull)
+  consultation   ConsultationSession? @relation(fields: [consultationId], references: [id], onDelete: SetNull)
 }
 
 model Comment {
@@ -365,9 +370,9 @@ model Cart {
 model SharedCart {
   id        Int      @id @default(autoincrement())
   token     String   @unique
-  userId    Int      // yaradan
-  title     String?  // ixtiyari ad ("Anama hədiyyə" və s.)
-  items     Json     // [{ listingId, quantity }]
+  userId    Int // yaradan
+  title     String? // ixtiyari ad ("Anama hədiyyə" və s.)
+  items     Json // [{ listingId, quantity }]
   createdAt DateTime @default(now())
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -386,46 +391,46 @@ model CartItem {
 }
 
 model Order {
-  id             Int           @id @default(autoincrement())
-  buyerId        Int
-  sellerId       Int
-  courierId      Int?
-  status         OrderStatus   @default(PENDING)
-  total          Float
-  subtotal       Float?        // indirim oncesi
-  discountAmount Float         @default(0)
-  pointsEarned   Int           @default(0)
-  pointsUsed     Int           @default(0)
-  address        String?
-  phone          String?
-  note           String?
-  deliveryType   DeliveryType  @default(DELIVERY)
-  scheduledAt    DateTime?     // ileri tarihli siparis
-  paymentMethod  PaymentMethod @default(CASH)
-  paymentStatus  PaymentStatus @default(PENDING)
+  id                  Int             @id @default(autoincrement())
+  buyerId             Int
+  sellerId            Int
+  courierId           Int?
+  status              OrderStatus     @default(PENDING)
+  total               Float
+  subtotal            Float? // indirim oncesi
+  discountAmount      Float           @default(0)
+  pointsEarned        Int             @default(0)
+  pointsUsed          Int             @default(0)
+  address             String?
+  phone               String?
+  note                String?
+  deliveryType        DeliveryType    @default(DELIVERY)
+  scheduledAt         DateTime? // ileri tarihli siparis
+  paymentMethod       PaymentMethod   @default(CASH)
+  paymentStatus       PaymentStatus   @default(PENDING)
   // Kapital Bank ödəniş şlüzü — kart ödənişində bir checkout-dakı bütün
   // order-lər eyni gatewayOrderId-ni paylaşır (müştəri bir dəfə ödəyir).
-  gatewayOrderId Int?
-  gatewayPassword String?
-  gatewayStatus  String?
-  gatewayProvider String?      // 'kapital' | 'yigim'
-  gatewayRef     String?       // şlüz referansı (YIĞIM: reference; Kapital: order id)
-  promoCodeId    Int?
+  gatewayOrderId      Int?
+  gatewayPassword     String?
+  gatewayStatus       String?
+  gatewayProvider     String? // 'kapital' | 'yigim'
+  gatewayRef          String? // şlüz referansı (YIĞIM: reference; Kapital: order id)
+  promoCodeId         Int?
   // Canli takip icin
-  latitude       Float?
-  longitude      Float?
+  latitude            Float?
+  longitude           Float?
   estimatedDeliveryAt DateTime?
-  courierLat     Float?
-  courierLng     Float?
-  createdAt      DateTime      @default(now())
-  updatedAt      DateTime      @updatedAt
-  buyer          User          @relation("BuyerOrders", fields: [buyerId], references: [id], onDelete: Cascade)
-  seller         User          @relation("SellerOrders", fields: [sellerId], references: [id], onDelete: Cascade)
-  courier        User?         @relation("CourierOrders", fields: [courierId], references: [id], onDelete: SetNull)
-  promoCode      PromoCode?    @relation(fields: [promoCodeId], references: [id], onDelete: SetNull)
-  items          OrderItem[]
-  returnRequests ReturnRequest[]
-  sellerRating   SellerRating?
+  courierLat          Float?
+  courierLng          Float?
+  createdAt           DateTime        @default(now())
+  updatedAt           DateTime        @updatedAt
+  buyer               User            @relation("BuyerOrders", fields: [buyerId], references: [id], onDelete: Cascade)
+  seller              User            @relation("SellerOrders", fields: [sellerId], references: [id], onDelete: Cascade)
+  courier             User?           @relation("CourierOrders", fields: [courierId], references: [id], onDelete: SetNull)
+  promoCode           PromoCode?      @relation(fields: [promoCodeId], references: [id], onDelete: SetNull)
+  items               OrderItem[]
+  returnRequests      ReturnRequest[]
+  sellerRating        SellerRating?
 
   @@index([buyerId, createdAt])
   @@index([sellerId, createdAt])
@@ -450,7 +455,7 @@ model EmailVerification {
 model SocialLink {
   id        Int      @id @default(autoincrement())
   userId    Int
-  platform  String   // instagram, facebook, tiktok, youtube, linkedin, twitter, telegram, website
+  platform  String // instagram, facebook, tiktok, youtube, linkedin, twitter, telegram, website
   url       String
   verified  Boolean  @default(false)
   createdAt DateTime @default(now())
@@ -461,37 +466,37 @@ model SocialLink {
 
 // Peşə sənədləri (diplom, sertifikat, lisenziya). AI ad-soyad uyğunluğunu yoxlayır.
 model ProfessionDocument {
-  id             Int                @id @default(autoincrement())
-  userId         Int
-  title          String             // istifadəçinin verdiyi başlıq (məs. "Diplom", "Həkimlik lisenziyası")
-  image          String             // uploads/ faylının adı
-  documentType   String?            // AI: diplom / sertifikat / lisenziya
-  issuer         String?            // AI: kim verib
-  holderName     String?            // AI: sənəddəki ad-soyad
-  nameMatch      Boolean            @default(false) // ad-soyad istifadəçi ilə uyğundur?
-  nameMatchScore Float?             // 0..1
-  professionMatch Boolean?          // məsləklə uyğundur?
-  confidence     Float?             // 0..1
-  fraudSignals   String[]           @default([])
-  aiReason       String?            // AI-ın qısa izahı
-  isPublic       Boolean            @default(false) // public profildə görünsünmü (YES ikonu)
-  status         VerificationStatus @default(PENDING) // PENDING / APPROVED / REJECTED (admin son sözü)
-  createdAt      DateTime           @default(now())
-  user           User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id              Int                @id @default(autoincrement())
+  userId          Int
+  title           String // istifadəçinin verdiyi başlıq (məs. "Diplom", "Həkimlik lisenziyası")
+  image           String // uploads/ faylının adı
+  documentType    String? // AI: diplom / sertifikat / lisenziya
+  issuer          String? // AI: kim verib
+  holderName      String? // AI: sənəddəki ad-soyad
+  nameMatch       Boolean            @default(false) // ad-soyad istifadəçi ilə uyğundur?
+  nameMatchScore  Float? // 0..1
+  professionMatch Boolean? // məsləklə uyğundur?
+  confidence      Float? // 0..1
+  fraudSignals    String[]           @default([])
+  aiReason        String? // AI-ın qısa izahı
+  isPublic        Boolean            @default(false) // public profildə görünsünmü (YES ikonu)
+  status          VerificationStatus @default(PENDING) // PENDING / APPROVED / REJECTED (admin son sözü)
+  createdAt       DateTime           @default(now())
+  user            User               @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
   @@index([status])
 }
 
 model OrderItem {
-  id        Int     @id @default(autoincrement())
-  orderId   Int
-  listingId Int
-  quantity  Int
-  price     Float
-  title     String
-  order     Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  listing   Listing @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  id             Int             @id @default(autoincrement())
+  orderId        Int
+  listingId      Int
+  quantity       Int
+  price          Float
+  title          String
+  order          Order           @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  listing        Listing         @relation(fields: [listingId], references: [id], onDelete: Cascade)
   returnRequests ReturnRequest[]
 }
 
@@ -531,16 +536,16 @@ enum OfferStatus {
 }
 
 model Inquiry {
-  id            Int            @id @default(autoincrement())
+  id            Int             @id @default(autoincrement())
   buyerId       Int
   rawText       String
   aiAnalysis    Json?
-  cities        String[]       @default([])
-  status        InquiryStatus  @default(OPEN)
+  cities        String[]        @default([])
+  status        InquiryStatus   @default(OPEN)
   expiresAt     DateTime?
-  createdAt     DateTime       @default(now())
-  updatedAt     DateTime       @updatedAt
-  buyer         User           @relation("BuyerInquiries", fields: [buyerId], references: [id], onDelete: Cascade)
+  createdAt     DateTime        @default(now())
+  updatedAt     DateTime        @updatedAt
+  buyer         User            @relation("BuyerInquiries", fields: [buyerId], references: [id], onDelete: Cascade)
   offers        InquiryOffer[]
   targetSellers InquiryTarget[]
 }
@@ -588,7 +593,7 @@ model Favorite {
 model SavedAddress {
   id        Int      @id @default(autoincrement())
   userId    Int
-  label     String   // "Ev", "Is", "Anne evi"
+  label     String // "Ev", "Is", "Anne evi"
   address   String
   phone     String?
   latitude  Float?
@@ -602,7 +607,7 @@ model PromoCode {
   id             Int       @id @default(autoincrement())
   code           String    @unique
   description    String?
-  discountType   String    // "PERCENT" veya "FIXED"
+  discountType   String // "PERCENT" veya "FIXED"
   discountValue  Float
   minOrderAmount Float?
   maxDiscount    Float?
@@ -620,7 +625,7 @@ model SellerRating {
   orderId   Int      @unique
   sellerId  Int
   buyerId   Int
-  rating    Int      // 1-5
+  rating    Int // 1-5
   comment   String?
   createdAt DateTime @default(now())
   order     Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
@@ -651,7 +656,7 @@ model SellerVerification {
 model Notification {
   id        Int      @id @default(autoincrement())
   userId    Int
-  type      String   // "ORDER", "MESSAGE", "INQUIRY", "PROMO", "SYSTEM"
+  type      String // "ORDER", "MESSAGE", "INQUIRY", "PROMO", "SYSTEM"
   title     String
   body      String
   link      String?
@@ -669,13 +674,13 @@ model Notification {
 // (VÖEN + bank hesabı olmadan bank pul köçürə bilmir).
 
 enum BusinessKind {
-  LEGAL     // Hüquqi şəxs
-  PHYSICAL  // Fiziki şəxs
+  LEGAL // Hüquqi şəxs
+  PHYSICAL // Fiziki şəxs
 }
 
 enum BusinessProofType {
-  TAX_DOC            // Vergi qeydiyyatını təsdiq edən sənəd
-  POWER_OF_ATTORNEY  // Etibarnamə (+ şirkət sənədi)
+  TAX_DOC // Vergi qeydiyyatını təsdiq edən sənəd
+  POWER_OF_ATTORNEY // Etibarnamə (+ şirkət sənədi)
 }
 
 model Business {
@@ -687,7 +692,7 @@ model Business {
   voen            String
   ownerName       String
   founderName     String
-  phone           String?            // şirkət telefonu
+  phone           String? // şirkət telefonu
   status          VerificationStatus @default(PENDING)
   isActive        Boolean            @default(true) // sahibi tərəfindən aktiv/deaktiv
   rejectionReason String?
@@ -695,27 +700,27 @@ model Business {
   reviewedAt      DateTime?
 
   // KYC sənədləri (fayl adları)
-  taxDocImage          String?       // vergi qeydiyyatı sənədi (TAX_DOC)
-  companyDocImage      String?       // şirkət sənədi (POWER_OF_ATTORNEY halında)
-  powerOfAttorneyImage String?       // etibarnamə
-  bankDocImage         String?       // (köhnə) tək bank sənədi
-  bankDocImages        String[]      @default([]) // bir neçə bank hesabı sənədi (IBAN-lar AI ilə oxunur)
-  idCardImage          String?       // şəxsiyyət vəsiqəsi
-  selfieImage          String?       // üz tanıma üçün selfie (admin əllə yoxlayır)
+  taxDocImage          String? // vergi qeydiyyatı sənədi (TAX_DOC)
+  companyDocImage      String? // şirkət sənədi (POWER_OF_ATTORNEY halında)
+  powerOfAttorneyImage String? // etibarnamə
+  bankDocImage         String? // (köhnə) tək bank sənədi
+  bankDocImages        String[] @default([]) // bir neçə bank hesabı sənədi (IBAN-lar AI ilə oxunur)
+  idCardImage          String? // şəxsiyyət vəsiqəsi
+  selfieImage          String? // üz tanıma üçün selfie (admin əllə yoxlayır)
 
   // Claude AI sənəd yoxlaması (avtomatik təsdiq üçün)
-  aiAuthorized    Boolean?   // profil sahibi rəhbər/etibarnaməli olaraq təsdiqləndi?
-  aiVoenMatch     Boolean?   // sənədlərdəki VÖEN forma ilə uyğun?
-  aiConfidence    Float?     // 0..1
-  aiFraudSignals  String[]   @default([])
-  aiReason        String?    // AI-ın qısa izahı
-  autoApproved    Boolean    @default(false) // AI tərəfindən avtomatik təsdiqləndi?
+  aiAuthorized   Boolean? // profil sahibi rəhbər/etibarnaməli olaraq təsdiqləndi?
+  aiVoenMatch    Boolean? // sənədlərdəki VÖEN forma ilə uyğun?
+  aiConfidence   Float? // 0..1
+  aiFraudSignals String[] @default([])
+  aiReason       String? // AI-ın qısa izahı
+  autoApproved   Boolean  @default(false) // AI tərəfindən avtomatik təsdiqləndi?
 
-  user      User             @relation(fields: [userId], references: [id], onDelete: Cascade)
-  objects   BusinessObject[]
-  listings  Listing[]
-  banks     BankAccount[]
-  members   BusinessMember[]
+  user     User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  objects  BusinessObject[]
+  listings Listing[]
+  banks    BankAccount[]
+  members  BusinessMember[]
 
   @@index([userId])
   @@index([status])
@@ -724,11 +729,11 @@ model Business {
 model BankAccount {
   id         Int      @id @default(autoincrement())
   businessId Int
-  iban       String   // bank hesabı / IBAN
-  title      String?  // bank adı / qeyd
+  iban       String // bank hesabı / IBAN
+  title      String? // bank adı / qeyd
   isActive   Boolean  @default(true)
   isPrimary  Boolean  @default(false) // ödəniş bu hesab üzərindən gedir ("yes" seçilən)
-  docImage   String?  // bu hesabın aid olduğu bank sənədi (fayl adı)
+  docImage   String? // bu hesabın aid olduğu bank sənədi (fayl adı)
   createdAt  DateTime @default(now())
   business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
 
@@ -736,18 +741,18 @@ model BankAccount {
 }
 
 model BusinessObject {
-  id            Int       @id @default(autoincrement())
+  id            Int              @id @default(autoincrement())
   businessId    Int
-  name          String    // obyekt adı (məs. "Aptek №3")
-  phone         String?   // obyekt telefonu
-  activityAreas String[]  @default([]) // fəaliyyət sahələri (16 kateqoriya adları)
-  isActive      Boolean   @default(true) // aktiv/passiv
+  name          String // obyekt adı (məs. "Aptek №3")
+  phone         String? // obyekt telefonu
+  activityAreas String[]         @default([]) // fəaliyyət sahələri (16 kateqoriya adları)
+  isActive      Boolean          @default(true) // aktiv/passiv
   address       String
   city          String?
   latitude      Float?
   longitude     Float?
-  createdAt     DateTime  @default(now())
-  business      Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  createdAt     DateTime         @default(now())
+  business      Business         @relation(fields: [businessId], references: [id], onDelete: Cascade)
   listings      Listing[]
   managers      BusinessMember[]
 
@@ -768,4 +773,61 @@ model BusinessMember {
 
   @@unique([businessId, userId, objectId])
   @@index([userId])
+}
+
+// ── Rəy (peşəkar konsultasiyası) ──────────────────────────────────────────────
+enum ConsultationStatus {
+  REQUESTED // alıcı sorğu göndərib, ödəniş gözlənilir
+  PENDING_VOEN // peşəkarın VÖEN-i yoxdur → aktivləşə bilmir
+  PAID // ödənilib, peşəkar başlatmağı gözləyir
+  ACTIVE // sayğac işləyir
+  PAUSED // peşəkar dayandırıb
+  ENDED // vaxt bitib və ya bağlanıb
+}
+
+// Peşəkarın "Rəy" təklifi — müddət + qiymət (profilə bağlı, məhsul elanı deyil).
+model ConsultationOffer {
+  id                   Int                   @id @default(autoincrement())
+  userId               Int                   @unique
+  title                String?
+  durationMinutes      Int                   @default(30)
+  price                Float
+  active               Boolean               @default(true)
+  createdAt            DateTime              @default(now())
+  updatedAt            DateTime              @updatedAt
+  user                 User                  @relation("UserConsultationOffer", fields: [userId], references: [id], onDelete: Cascade)
+  consultationSessions ConsultationSession[]
+}
+
+// Bir konsultasiya seansı — sayğac (start/pause) və ödəniş vəziyyəti.
+model ConsultationSession {
+  id              Int                @id @default(autoincrement())
+  buyerId         Int
+  professionalId  Int
+  offerId         Int?
+  title           String?
+  price           Float
+  blockSeconds    Int @default(0) // bir ödənişin verdiyi vaxt (reaktivasiya/top-up üçün)
+  durationSeconds Int // ümumi alınan vaxt (saniyə) — top-up ilə artır
+  consumedSeconds Int                @default(0)
+  runningSince    DateTime? // ACTIVE olduqda dolu; pauza/bitmədə null
+  status          ConsultationStatus @default(REQUESTED)
+  paymentStatus   String             @default("UNPAID") // UNPAID/PAID
+  gatewayProvider String?
+  gatewayRef      String?
+  gatewayOrderId  Int?
+  rated           Boolean            @default(false)
+  ratingStars     Int?
+  ratingLike      Boolean?
+  ratingText      String?
+  createdAt       DateTime           @default(now())
+  startedAt       DateTime?
+  endedAt         DateTime?
+  buyer           User               @relation("ConsultationBuyer", fields: [buyerId], references: [id], onDelete: Cascade)
+  professional    User               @relation("ConsultationProfessional", fields: [professionalId], references: [id], onDelete: Cascade)
+  offer           ConsultationOffer? @relation(fields: [offerId], references: [id], onDelete: SetNull)
+  messages        Message[]
+
+  @@index([buyerId])
+  @@index([professionalId])
 }

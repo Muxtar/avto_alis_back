@@ -8,10 +8,25 @@ const prisma = new PrismaClient();
 // Send message
 router.post('/messages', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
-    const { receiverId, listingId, content } = req.body;
+    const { receiverId, listingId, consultationId, content } = req.body;
     if (!content?.trim()) {
       res.status(400).json({ success: false, message: 'Mesaj boş ola bilməz' });
       return;
+    }
+
+    // Rəy konsultasiyası mesajı — yalnız seans AKTİV və vaxtı varsa göndərilə bilər.
+    let consultId: number | null = null;
+    if (consultationId) {
+      consultId = parseInt(String(consultationId));
+      const s = await prisma.consultationSession.findUnique({ where: { id: consultId } });
+      if (!s || (s.buyerId !== req.adminId && s.professionalId !== req.adminId)) {
+        res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return;
+      }
+      const used = s.consumedSeconds + (s.status === 'ACTIVE' && s.runningSince ? Math.floor((Date.now() - new Date(s.runningSince).getTime()) / 1000) : 0);
+      const remaining = s.durationSeconds - used;
+      if (s.status !== 'ACTIVE' || remaining <= 0) {
+        res.status(403).json({ success: false, message: 'Konsultasiya aktiv deyil — vaxt bitib və ya başlanmayıb' }); return;
+      }
     }
 
     const message = await prisma.message.create({
@@ -19,6 +34,7 @@ router.post('/messages', adminAuth, async (req: AuthRequest, res: Response) => {
         senderId: req.adminId!,
         receiverId: parseInt(receiverId),
         listingId: listingId ? parseInt(listingId) : null,
+        consultationId: consultId,
         content: content.trim(),
       },
       include: {

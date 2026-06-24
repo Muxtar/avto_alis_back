@@ -22,6 +22,7 @@ import notificationsRoutes from './routes/notifications';
 import sellerRoutes from './routes/seller';
 import searchRoutes from './routes/search';
 import paymentRoutes from './routes/payment';
+import consultationsRoutes from './routes/consultations';
 import businessRoutes from './routes/business';
 
 const app = express();
@@ -91,6 +92,7 @@ app.use('/api', sellerRoutes);
 app.use('/api', searchRoutes);
 app.use('/api', paymentRoutes);
 app.use('/api', businessRoutes);
+app.use('/api', consultationsRoutes);
 
 app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok' });
