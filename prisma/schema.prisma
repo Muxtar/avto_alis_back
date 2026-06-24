@@ -794,6 +794,7 @@ model ConsultationOffer {
   id                   Int                   @id @default(autoincrement())
   userId               Int
   title                String?
+  description          String? // peşəkarın konsultasiya haqqında qeydi/təsviri
   durationMinutes      Int                   @default(30)
   price                Float
   active               Boolean               @default(true)

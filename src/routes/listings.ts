@@ -171,7 +171,7 @@ router.get('/sellers/:id', async (req: Request, res: Response) => {
         sellerVerified: true, idVerifyStatus: true, avatar: true, profession: true, bio: true,
         birthDate: true, gender: true, // kimlik məlumatları — FIN və vəsiqə şəkli ictimai DEYİL
         cvFile: true, cvPublic: true,
-        consultationOffers: { where: { active: true }, select: { id: true, title: true, durationMinutes: true, price: true }, orderBy: { createdAt: 'asc' } },
+        consultationOffers: { where: { active: true }, select: { id: true, title: true, description: true, durationMinutes: true, price: true }, orderBy: { createdAt: 'asc' } },
         // Yalnız təsdiqlənmiş sosial hesablar public profildə görünür.
         socialLinks: { where: { verified: true }, select: { platform: true, url: true } },
         // Yalnız istifadəçinin public etdiyi peşə sənədləri (YES ikonu ilə).

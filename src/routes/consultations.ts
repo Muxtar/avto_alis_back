@@ -49,6 +49,7 @@ async function hasApprovedBusiness(userId: number): Promise<boolean> {
 function offerFromBody(b: any) {
   return {
     title: b.title ? String(b.title).trim() : null,
+    description: b.description ? String(b.description).trim().slice(0, 1000) : null,
     durationMinutes: Math.max(1, Math.min(600, parseInt(String(b.durationMinutes)) || 30)),
     price: Math.max(0, parseFloat(String(b.price)) || 0),
     active: b.active === undefined ? true : !!b.active,
