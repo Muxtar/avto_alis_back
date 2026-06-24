@@ -66,9 +66,10 @@ router.get('/professionals', async (req: Request, res: Response) => {
       take: 60,
       orderBy: [{ idVerifyStatus: 'asc' }, { avgRating: 'desc' }, { id: 'desc' }],
       select: {
-        id: true, name: true, profession: true, avatar: true, city: true,
+        id: true, name: true, profession: true, avatar: true, city: true, bio: true,
         publicId: true, idVerifyStatus: true, avgRating: true, ratingCount: true,
         _count: { select: { listings: true } },
+        consultationOffers: { where: { active: true }, select: { price: true, durationMinutes: true }, orderBy: { price: 'asc' } },
       },
     });
     res.json({ success: true, professionals });
