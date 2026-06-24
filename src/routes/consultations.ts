@@ -106,6 +106,8 @@ router.post('/consultations/request', adminAuth, async (req: AuthRequest, res: R
     if (!offer || !offer.active) { res.status(400).json({ success: false, message: 'Bu təklif hazırda mövcud deyil' }); return; }
     const professionalId = offer.userId;
     if (professionalId === req.adminId) { res.status(400).json({ success: false, message: 'Özünüzə sorğu göndərə bilməzsiniz' }); return; }
+    const pro = await prisma.user.findUnique({ where: { id: professionalId }, select: { consultationSuspended: true } });
+    if (pro?.consultationSuspended) { res.status(400).json({ success: false, message: 'Bu peşəkar hazırda konsultasiya qəbul etmir' }); return; }
 
     const voen = await hasApprovedBusiness(professionalId);
     const block = offer.durationMinutes * 60;
@@ -198,7 +200,7 @@ router.post('/consultations/:id/pay', adminAuth, async (req: AuthRequest, res: R
     });
     await prisma.consultationSession.update({
       where: { id: s.id },
-      data: { gatewayProvider: pay.provider, gatewayRef: pay.ref, gatewayOrderId: pay.gatewayOrderId },
+      data: { gatewayProvider: pay.provider, gatewayRef: pay.ref, gatewayOrderId: pay.gatewayOrderId, gatewayPassword: pay.password },
     });
     res.json({ success: true, redirectUrl: pay.redirectUrl });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }

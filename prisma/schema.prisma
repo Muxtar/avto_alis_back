@@ -96,70 +96,74 @@ enum ReturnReason {
 }
 
 model User {
-  id                   Int                   @id @default(autoincrement())
-  name                 String                @default("")
-  phone                String
-  email                String?
-  emailVerified        Boolean               @default(false) // email doğrulama kodu ilə təsdiqlənib
-  telegramId           String?               @unique
-  type                 UserType              @default(CAR_OWNER)
-  role                 UserRole              @default(USER)
-  password             String?
-  verified             Boolean               @default(false)
-  isBlocked            Boolean               @default(false) // admin tərəfindən bloklanıb
-  profileComplete      Boolean               @default(false)
-  profession           String? // ixtisas (qeydiyyatda soruşulur)
-  bio                  String? // istifadəçinin özü haqqında qeydi
-  avatar               String? // profil şəkli
-  cvFile               String? // istifadəçinin CV-si (PDF/şəkil)
-  cvPublic             Boolean               @default(false) // CV public profildə görünsünmü
-  idNumber             String? // kimlik / FIN (köhnə — indi şəkil istənir)
-  birthDate            DateTime? // doğum tarixi (vəsiqədən AI ilə)
-  gender               String? // cinsiyyət (vəsiqədən AI ilə: "Kişi"/"Qadın")
-  idCardImage          String? // şəxsiyyət vəsiqəsi ön tərəf
-  idCardBackImage      String? // şəxsiyyət vəsiqəsi arxa tərəf (yalnız sahibi görür)
-  selfieImage          String? // selfie — ön (qarşıdan, üz tanıma üçün)
-  selfieRightImage     String? // selfie — sağ profil
-  selfieLeftImage      String? // selfie — sol profil
-  faceMatchScore       Float? // face-api.js oxşarlıq balı (0–1, brauzerdə)
+  id                    Int                   @id @default(autoincrement())
+  name                  String                @default("")
+  phone                 String
+  email                 String?
+  emailVerified         Boolean               @default(false) // email doğrulama kodu ilə təsdiqlənib
+  telegramId            String?               @unique
+  type                  UserType              @default(CAR_OWNER)
+  role                  UserRole              @default(USER)
+  password              String?
+  verified              Boolean               @default(false)
+  isBlocked             Boolean               @default(false) // admin tərəfindən bloklanıb
+  profileComplete       Boolean               @default(false)
+  profession            String? // ixtisas (qeydiyyatda soruşulur)
+  bio                   String? // istifadəçinin özü haqqında qeydi
+  avatar                String? // profil şəkli
+  cvFile                String? // istifadəçinin CV-si (PDF/şəkil)
+  cvPublic              Boolean               @default(false) // CV public profildə görünsünmü
+  idNumber              String? // kimlik / FIN (köhnə — indi şəkil istənir)
+  birthDate             DateTime? // doğum tarixi (vəsiqədən AI ilə)
+  gender                String? // cinsiyyət (vəsiqədən AI ilə: "Kişi"/"Qadın")
+  idCardImage           String? // şəxsiyyət vəsiqəsi ön tərəf
+  idCardBackImage       String? // şəxsiyyət vəsiqəsi arxa tərəf (yalnız sahibi görür)
+  selfieImage           String? // selfie — ön (qarşıdan, üz tanıma üçün)
+  selfieRightImage      String? // selfie — sağ profil
+  selfieLeftImage       String? // selfie — sol profil
+  faceMatchScore        Float? // face-api.js oxşarlıq balı (0–1, brauzerdə)
   // Claude AI kimlik doğrulaması (vəsiqədəki ad + üz uyğunluğu)
-  idAiNameMatch        Boolean? // vəsiqədəki ad qeydiyyatla uyğun?
-  idAiNameScore        Float? // 0..1
-  idAiFaceMatch        Boolean? // vəsiqə fotosu ilə selfie eyni şəxs?
-  idAiFaceScore        Float? // 0..1
-  idAiReason           String? // AI-ın qısa izahı
-  idVerifyStatus       VerificationStatus? // null=təqdim olunmayıb, PENDING=admin gözləyir
-  sellerVerified       Boolean               @default(false) // ≥1 təsdiqlənmiş biznesi var
-  sellerVerifiedAt     DateTime?
-  sellerApplication    SellerVerification?
-  businesses           Business[]
-  businessMemberships  BusinessMember[]      @relation("BusinessMemberships")
-  consultationOffers   ConsultationOffer[]   @relation("UserConsultationOffer")
-  consultationsBought  ConsultationSession[] @relation("ConsultationBuyer")
-  consultationsSelling ConsultationSession[] @relation("ConsultationProfessional")
-  publicId             String?               @unique // hər kəsə verilən xüsusi ID (profildə)
-  createdAt            DateTime              @default(now())
-  vehicles             Vehicle[]
-  workplaces           Workplace[]
-  verificationCodes    VerificationCode[]
-  listings             Listing[]
-  sentMessages         Message[]             @relation("SentMessages")
-  receivedMessages     Message[]             @relation("ReceivedMessages")
-  comments             Comment[]
-  cart                 Cart?
-  buyerOrders          Order[]               @relation("BuyerOrders")
-  sellerOrders         Order[]               @relation("SellerOrders")
-  courierOrders        Order[]               @relation("CourierOrders")
-  emailVerifications   EmailVerification[]
-  socialLinks          SocialLink[]
-  professionDocuments  ProfessionDocument[]
-  phones               PhoneNumber[]
-  sharedCarts          SharedCart[]
-  buyerReturns         ReturnRequest[]       @relation("BuyerReturns")
-  sellerReturns        ReturnRequest[]       @relation("SellerReturns")
-  buyerInquiries       Inquiry[]             @relation("BuyerInquiries")
-  targetedInquiries    InquiryTarget[]       @relation("TargetedInquiries")
-  sellerOffers         InquiryOffer[]        @relation("SellerOffers")
+  idAiNameMatch         Boolean? // vəsiqədəki ad qeydiyyatla uyğun?
+  idAiNameScore         Float? // 0..1
+  idAiFaceMatch         Boolean? // vəsiqə fotosu ilə selfie eyni şəxs?
+  idAiFaceScore         Float? // 0..1
+  idAiReason            String? // AI-ın qısa izahı
+  idVerifyStatus        VerificationStatus? // null=təqdim olunmayıb, PENDING=admin gözləyir
+  sellerVerified        Boolean               @default(false) // ≥1 təsdiqlənmiş biznesi var
+  sellerVerifiedAt      DateTime?
+  sellerApplication     SellerVerification?
+  businesses            Business[]
+  businessMemberships   BusinessMember[]      @relation("BusinessMemberships")
+  consultationOffers    ConsultationOffer[]   @relation("UserConsultationOffer")
+  consultationsBought   ConsultationSession[] @relation("ConsultationBuyer")
+  consultationsSelling  ConsultationSession[] @relation("ConsultationProfessional")
+  consultationSuspended Boolean               @default(false) // admin Rəy təkliflərini dayandırıb
+  complaintFlags        Int                   @default(0) // təsdiqlənmiş şikayət sayı
+  complaintsMade        Complaint[]           @relation("ComplaintsMade")
+  complaintsAgainst     Complaint[]           @relation("ComplaintsAgainst")
+  publicId              String?               @unique // hər kəsə verilən xüsusi ID (profildə)
+  createdAt             DateTime              @default(now())
+  vehicles              Vehicle[]
+  workplaces            Workplace[]
+  verificationCodes     VerificationCode[]
+  listings              Listing[]
+  sentMessages          Message[]             @relation("SentMessages")
+  receivedMessages      Message[]             @relation("ReceivedMessages")
+  comments              Comment[]
+  cart                  Cart?
+  buyerOrders           Order[]               @relation("BuyerOrders")
+  sellerOrders          Order[]               @relation("SellerOrders")
+  courierOrders         Order[]               @relation("CourierOrders")
+  emailVerifications    EmailVerification[]
+  socialLinks           SocialLink[]
+  professionDocuments   ProfessionDocument[]
+  phones                PhoneNumber[]
+  sharedCarts           SharedCart[]
+  buyerReturns          ReturnRequest[]       @relation("BuyerReturns")
+  sellerReturns         ReturnRequest[]       @relation("SellerReturns")
+  buyerInquiries        Inquiry[]             @relation("BuyerInquiries")
+  targetedInquiries     InquiryTarget[]       @relation("TargetedInquiries")
+  sellerOffers          InquiryOffer[]        @relation("SellerOffers")
 
   // Bolt Food benzeri ozellikler
   loyaltyPoints Int            @default(0)
@@ -809,7 +813,7 @@ model ConsultationSession {
   offerId         Int?
   title           String?
   price           Float
-  blockSeconds    Int @default(0) // bir ödənişin verdiyi vaxt (reaktivasiya/top-up üçün)
+  blockSeconds    Int                @default(0) // bir ödənişin verdiyi vaxt (reaktivasiya/top-up üçün)
   durationSeconds Int // ümumi alınan vaxt (saniyə) — top-up ilə artır
   consumedSeconds Int                @default(0)
   runningSince    DateTime? // ACTIVE olduqda dolu; pauza/bitmədə null
@@ -818,7 +822,9 @@ model ConsultationSession {
   gatewayProvider String?
   gatewayRef      String?
   gatewayOrderId  Int?
+  gatewayPassword String?
   rated           Boolean            @default(false)
+  complaints      Complaint[]
   ratingStars     Int?
   ratingLike      Boolean?
   ratingText      String?
@@ -832,4 +838,34 @@ model ConsultationSession {
 
   @@index([buyerId])
   @@index([professionalId])
+}
+
+// ── Şikayət (profil / Rəy konsultasiyası) ─────────────────────────────────────
+enum ComplaintStatus {
+  OPEN
+  REVIEWING
+  RESOLVED
+  REJECTED
+}
+
+model Complaint {
+  id             Int                  @id @default(autoincrement())
+  complainantId  Int
+  targetUserId   Int
+  consultationId Int? // dolu olarsa konkret seansa bağlıdır
+  category       String // TIME_WASTED / FRAUD / RUDE / FAKE_INFO / OTHER
+  description    String
+  status         ComplaintStatus      @default(OPEN)
+  resolution     String? // REFUNDED / WARNED / SUSPENDED / NO_ACTION / REJECTED
+  adminNote      String?
+  resolvedById   Int?
+  createdAt      DateTime             @default(now())
+  resolvedAt     DateTime?
+  complainant    User                 @relation("ComplaintsMade", fields: [complainantId], references: [id], onDelete: Cascade)
+  target         User                 @relation("ComplaintsAgainst", fields: [targetUserId], references: [id], onDelete: Cascade)
+  consultation   ConsultationSession? @relation(fields: [consultationId], references: [id], onDelete: SetNull)
+
+  @@index([status])
+  @@index([targetUserId])
+  @@index([consultationId])
 }
