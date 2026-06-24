@@ -45,33 +45,47 @@ async function hasApprovedBusiness(userId: number): Promise<boolean> {
   return !!b;
 }
 
-// ── Peşəkarın "Rəy" təklifi ───────────────────────────────────────────────────
-router.get('/me/consultation-offer', adminAuth, async (req: AuthRequest, res: Response) => {
+// ── Peşəkarın "Rəy" təklifləri (çoxlu) ────────────────────────────────────────
+function offerFromBody(b: any) {
+  return {
+    title: b.title ? String(b.title).trim() : null,
+    durationMinutes: Math.max(1, Math.min(600, parseInt(String(b.durationMinutes)) || 30)),
+    price: Math.max(0, parseFloat(String(b.price)) || 0),
+    active: b.active === undefined ? true : !!b.active,
+  };
+}
+
+router.get('/me/consultation-offers', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
-    const offer = await prisma.consultationOffer.findUnique({ where: { userId: req.adminId! } });
+    const offers = await prisma.consultationOffer.findMany({ where: { userId: req.adminId! }, orderBy: { createdAt: 'asc' } });
     const voen = await hasApprovedBusiness(req.adminId!);
-    res.json({ success: true, offer, hasVoen: voen });
+    res.json({ success: true, offers, hasVoen: voen });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
 
-router.put('/me/consultation-offer', adminAuth, async (req: AuthRequest, res: Response) => {
+router.post('/me/consultation-offers', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
-    const title = req.body.title ? String(req.body.title).trim() : null;
-    const durationMinutes = Math.max(1, Math.min(600, parseInt(String(req.body.durationMinutes)) || 30));
-    const price = Math.max(0, parseFloat(String(req.body.price)) || 0);
-    const active = req.body.active === undefined ? true : !!req.body.active;
-    const offer = await prisma.consultationOffer.upsert({
-      where: { userId: req.adminId! },
-      create: { userId: req.adminId!, title, durationMinutes, price, active },
-      update: { title, durationMinutes, price, active },
-    });
+    const offer = await prisma.consultationOffer.create({ data: { userId: req.adminId!, ...offerFromBody(req.body) } });
     res.json({ success: true, offer });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
 
-router.delete('/me/consultation-offer', adminAuth, async (req: AuthRequest, res: Response) => {
+router.put('/me/consultation-offers/:id', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
-    await prisma.consultationOffer.deleteMany({ where: { userId: req.adminId! } });
+    const id = parseInt(String(req.params.id));
+    const own = await prisma.consultationOffer.findUnique({ where: { id }, select: { userId: true } });
+    if (!own || own.userId !== req.adminId) { res.status(404).json({ success: false, message: 'Tapılmadı' }); return; }
+    const offer = await prisma.consultationOffer.update({ where: { id }, data: offerFromBody(req.body) });
+    res.json({ success: true, offer });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
+router.delete('/me/consultation-offers/:id', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const id = parseInt(String(req.params.id));
+    const own = await prisma.consultationOffer.findUnique({ where: { id }, select: { userId: true } });
+    if (!own || own.userId !== req.adminId) { res.status(404).json({ success: false, message: 'Tapılmadı' }); return; }
+    await prisma.consultationOffer.delete({ where: { id } });
     res.json({ success: true });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
@@ -79,12 +93,19 @@ router.delete('/me/consultation-offer', adminAuth, async (req: AuthRequest, res:
 // ── Sorğu (alıcı) ─────────────────────────────────────────────────────────────
 router.post('/consultations/request', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
-    const professionalId = parseInt(String(req.body.professionalId));
-    if (Number.isNaN(professionalId)) { res.status(400).json({ success: false, message: 'Yanlış peşəkar' }); return; }
+    // offerId ilə konkret paket seçilir (professionalId ondan götürülür).
+    const offerId = req.body.offerId !== undefined ? parseInt(String(req.body.offerId)) : NaN;
+    let offer = null;
+    if (!Number.isNaN(offerId)) {
+      offer = await prisma.consultationOffer.findUnique({ where: { id: offerId } });
+    } else if (req.body.professionalId !== undefined) {
+      // Geriyə uyğunluq: professionalId verilərsə onun ilk aktiv təklifini götür.
+      const pid = parseInt(String(req.body.professionalId));
+      offer = await prisma.consultationOffer.findFirst({ where: { userId: pid, active: true }, orderBy: { createdAt: 'asc' } });
+    }
+    if (!offer || !offer.active) { res.status(400).json({ success: false, message: 'Bu təklif hazırda mövcud deyil' }); return; }
+    const professionalId = offer.userId;
     if (professionalId === req.adminId) { res.status(400).json({ success: false, message: 'Özünüzə sorğu göndərə bilməzsiniz' }); return; }
-
-    const offer = await prisma.consultationOffer.findUnique({ where: { userId: professionalId } });
-    if (!offer || !offer.active) { res.status(400).json({ success: false, message: 'Bu peşəkar hazırda Rəy konsultasiyası qəbul etmir' }); return; }
 
     const voen = await hasApprovedBusiness(professionalId);
     const block = offer.durationMinutes * 60;

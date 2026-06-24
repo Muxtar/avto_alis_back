@@ -134,7 +134,7 @@ model User {
   sellerApplication    SellerVerification?
   businesses           Business[]
   businessMemberships  BusinessMember[]      @relation("BusinessMemberships")
-  consultationOffer    ConsultationOffer?    @relation("UserConsultationOffer")
+  consultationOffers   ConsultationOffer[]   @relation("UserConsultationOffer")
   consultationsBought  ConsultationSession[] @relation("ConsultationBuyer")
   consultationsSelling ConsultationSession[] @relation("ConsultationProfessional")
   publicId             String?               @unique // hər kəsə verilən xüsusi ID (profildə)
@@ -788,7 +788,7 @@ enum ConsultationStatus {
 // Peşəkarın "Rəy" təklifi — müddət + qiymət (profilə bağlı, məhsul elanı deyil).
 model ConsultationOffer {
   id                   Int                   @id @default(autoincrement())
-  userId               Int                   @unique
+  userId               Int
   title                String?
   durationMinutes      Int                   @default(30)
   price                Float
@@ -797,6 +797,8 @@ model ConsultationOffer {
   updatedAt            DateTime              @updatedAt
   user                 User                  @relation("UserConsultationOffer", fields: [userId], references: [id], onDelete: Cascade)
   consultationSessions ConsultationSession[]
+
+  @@index([userId])
 }
 
 // Bir konsultasiya seansı — sayğac (start/pause) və ödəniş vəziyyəti.
