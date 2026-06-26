@@ -306,6 +306,8 @@ model Listing {
   fuelType         FuelType?
   attributes       Json? // kateqoriyaya xüsusi sahələr (otaq sayı, sahə, ölçü, yürüş...)
   paymentType      PaymentType?
+  barter           Boolean         @default(false) // dəyiş-düş (barter) qəbul olunur
+  forRent          Boolean         @default(false) // satış yox, icarə/kirayə
   viewCount        Int             @default(0)
   expiresAt        DateTime?
   // Biznes bağlantısı — elan bir obyektə (filiala) aiddirsə kart ödənişi mümkün olur.
