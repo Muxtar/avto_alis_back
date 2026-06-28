@@ -118,9 +118,10 @@ async function createVerificationCode(userId: number) {
 // Phone-only registration/login (unified). Creates user if new, returns userId + verification code
 router.post('/register/phone', registerLimiter, async (req: Request, res: Response) => {
   try {
-    const { phone } = req.body;
-    const phoneErr = validatePhone(phone);
+    const phoneErr = validatePhone(req.body.phone);
     if (phoneErr) { res.status(400).json({ success: false, message: phoneErr }); return; }
+    // Kanonik format: boşluq/tire/mötərizə təmizlənir (giriş uyğunluğu üçün).
+    const phone = String(req.body.phone).replace(/[\s\-()]/g, '');
 
     let user = await prisma.user.findFirst({ where: { phone, type: { not: UserType.COURIER } } });
     if (!user) {
