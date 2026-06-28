@@ -154,6 +154,8 @@ model User {
   buyerOrders           Order[]               @relation("BuyerOrders")
   sellerOrders          Order[]               @relation("SellerOrders")
   courierOrders         Order[]               @relation("CourierOrders")
+  referralOrders        Order[]               @relation("ReferralOrders")
+  referralCarts         ReferralCart[]        @relation("ReferralCarts")
   emailVerifications    EmailVerification[]
   socialLinks           SocialLink[]
   professionDocuments   ProfessionDocument[]
@@ -422,6 +424,10 @@ model Order {
   gatewayProvider     String? // 'kapital' | 'yigim'
   gatewayRef          String? // şlüz referansı (YIĞIM: reference; Kapital: order id)
   promoCodeId         Int?
+  // Referal (komissiyalı) satış
+  referrerId          Int? // sifarişi yönləndirən peşəkar
+  referralPercent     Float? // tətbiq olunan komissiya faizi
+  referralAmount      Float? // hesablanmış komissiya məbləği
   // Canli takip icin
   latitude            Float?
   longitude           Float?
@@ -433,6 +439,7 @@ model Order {
   buyer               User            @relation("BuyerOrders", fields: [buyerId], references: [id], onDelete: Cascade)
   seller              User            @relation("SellerOrders", fields: [sellerId], references: [id], onDelete: Cascade)
   courier             User?           @relation("CourierOrders", fields: [courierId], references: [id], onDelete: SetNull)
+  referrer            User?           @relation("ReferralOrders", fields: [referrerId], references: [id], onDelete: SetNull)
   promoCode           PromoCode?      @relation(fields: [promoCodeId], references: [id], onDelete: SetNull)
   items               OrderItem[]
   returnRequests      ReturnRequest[]
@@ -747,22 +754,51 @@ model BankAccount {
 }
 
 model BusinessObject {
-  id            Int              @id @default(autoincrement())
-  businessId    Int
-  name          String // obyekt adı (məs. "Aptek №3")
-  phone         String? // obyekt telefonu
-  activityAreas String[]         @default([]) // fəaliyyət sahələri (16 kateqoriya adları)
-  isActive      Boolean          @default(true) // aktiv/passiv
-  address       String
-  city          String?
-  latitude      Float?
-  longitude     Float?
-  createdAt     DateTime         @default(now())
-  business      Business         @relation(fields: [businessId], references: [id], onDelete: Cascade)
-  listings      Listing[]
-  managers      BusinessMember[]
+  id              Int              @id @default(autoincrement())
+  businessId      Int
+  name            String // obyekt adı (məs. "Aptek №3")
+  phone           String? // obyekt telefonu
+  activityAreas   String[]         @default([]) // fəaliyyət sahələri (16 kateqoriya adları)
+  isActive        Boolean          @default(true) // aktiv/passiv
+  address         String
+  city            String?
+  latitude        Float?
+  longitude       Float?
+  createdAt       DateTime         @default(now())
+  referralEnabled Boolean          @default(false) // referal (komissiyalı) satışa icazə
+  business        Business         @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  listings        Listing[]
+  managers        BusinessMember[]
+  referralRules   ReferralRule[]
 
   @@index([businessId])
+}
+
+// Referal qaydası: mağaza (obyekt) hansı ixtisasa hansı faizlə komissiya verir + sənəd tələbi.
+model ReferralRule {
+  id                Int            @id @default(autoincrement())
+  objectId          Int
+  profession        String // İxtisas adı (məs. "Həkim")
+  commissionPercent Float // komissiya faizi (0..100)
+  requiredDoc       String         @default("NONE") // NONE | DIPLOMA | CV | ANY
+  object            BusinessObject @relation(fields: [objectId], references: [id], onDelete: Cascade)
+
+  @@index([objectId])
+}
+
+// Peşəkarın yaratdığı referal səbət (link) — alıcıya göndərilir.
+model ReferralCart {
+  id         Int      @id @default(autoincrement())
+  token      String   @unique
+  referrerId Int
+  objectId   Int
+  businessId Int
+  percent    Float // bu referala tətbiq olunan komissiya faizi
+  items      Json // [{listingId, quantity}]
+  createdAt  DateTime @default(now())
+  referrer   User     @relation("ReferralCarts", fields: [referrerId], references: [id], onDelete: Cascade)
+
+  @@index([referrerId])
 }
 
 // Səlahiyyət vermə — sahibi başqa istifadəçiyə bütün biznesin və ya

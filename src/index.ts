@@ -23,6 +23,7 @@ import sellerRoutes from './routes/seller';
 import searchRoutes from './routes/search';
 import paymentRoutes from './routes/payment';
 import consultationsRoutes from './routes/consultations';
+import referralRoutes from './routes/referral';
 import complaintsRoutes from './routes/complaints';
 import businessRoutes from './routes/business';
 
@@ -94,6 +95,7 @@ app.use('/api', searchRoutes);
 app.use('/api', paymentRoutes);
 app.use('/api', businessRoutes);
 app.use('/api', consultationsRoutes);
+app.use('/api', referralRoutes);
 app.use('/api', complaintsRoutes);
 
 app.get('/api/health', (_req, res) => {

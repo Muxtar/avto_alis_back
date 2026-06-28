@@ -218,6 +218,8 @@ router.get('/objects/:id', async (req: Request, res: Response) => {
       select: {
         id: true, name: true, phone: true, address: true, city: true,
         latitude: true, longitude: true, activityAreas: true, isActive: true,
+        referralEnabled: true,
+        referralRules: { select: { profession: true, commissionPercent: true, requiredDoc: true } },
         business: { select: { id: true, name: true, status: true } },
       },
     });
