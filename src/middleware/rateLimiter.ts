@@ -61,3 +61,18 @@ export const inquiryLimiter = rateLimit(20, 60 * 60 * 1000);
 
 // Image search — OpenAI vision API qoruması: 15 istek / saat
 export const imageSearchLimiter = rateLimit(15, 60 * 60 * 1000);
+
+// Mesaj göndərmə — spam/flood qoruması: 40 istek / dəqiqə
+export const messageLimiter = rateLimit(40, 60 * 1000);
+
+// Konsultasiya əməliyyatları (request/pay) — 15 istek / 10 dəqiqə
+export const consultationLimiter = rateLimit(15, 10 * 60 * 1000);
+
+// Referal səbət/checkout — 30 istek / saat
+export const referralLimiter = rateLimit(30, 60 * 60 * 1000);
+
+// Şikayət yaratma — sui-istifadə qoruması: 5 istek / saat
+export const complaintLimiter = rateLimit(5, 60 * 60 * 1000);
+
+// OTP/kod göndərmə (telefon/email) — brute/SMS-flood qoruması: 5 istek / 5 dəqiqə
+export const otpLimiter = rateLimit(5, 5 * 60 * 1000);

@@ -494,7 +494,7 @@ router.post('/cart/checkout', requireType(BUYER_TYPES), async (req: AuthRequest,
               if (promoCodeRecord) {
                 await tx.promoCode.update({ where: { id: promoCodeRecord.id }, data: { usageCount: { decrement: 1 } } }).catch(() => {});
               }
-              await tx.order.updateMany({ where: { id: { in: orders.map((o) => o.id) } }, data: { status: 'CANCELLED', paymentStatus: 'FAILED' } });
+              await tx.order.updateMany({ where: { id: { in: orders.map((o) => o.id) } }, data: { status: 'CANCELLED', paymentStatus: 'FAILED', referralVoided: true } });
             });
           } catch (rbErr: any) {
             console.error('[checkout] rollback failed:', rbErr.message);
@@ -655,6 +655,14 @@ router.put('/orders/:id/status', adminAuth, async (req: AuthRequest, res: Respon
       where: { id },
       data: { status: next as any },
     });
+
+    // Sifariş ləğv edildikdə referal komissiyasını ləğv et (ləğv olunan sifariş üçün komissiya ödənilmir).
+    if (next === 'CANCELLED' && order.referrerId && !order.referralVoided) {
+      await prisma.order.update({ where: { id }, data: { referralVoided: true } });
+      await prisma.notification.create({
+        data: { userId: order.referrerId, type: 'REFERRAL', title: 'Referal komissiyası ləğv edildi', body: `Sifariş #${order.id} ləğv edildiyi üçün komissiya ləğv olundu.`, link: '/referral-earnings' },
+      }).catch(() => {});
+    }
 
     // Aliciya bildirim
     const statusLabels: Record<string, string> = {

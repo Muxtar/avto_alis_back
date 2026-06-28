@@ -1,12 +1,13 @@
 import { Router, Response } from 'express';
 import { PrismaClient } from '@prisma/client';
 import { adminAuth, AuthRequest } from '../middleware/auth';
+import { messageLimiter } from '../middleware/rateLimiter';
 
 const router = Router();
 const prisma = new PrismaClient();
 
 // Send message
-router.post('/messages', adminAuth, async (req: AuthRequest, res: Response) => {
+router.post('/messages', messageLimiter, adminAuth, async (req: AuthRequest, res: Response) => {
   try {
     const { receiverId, listingId, consultationId, content } = req.body;
     if (!content?.trim()) {

@@ -429,6 +429,7 @@ model Order {
   referralPercent     Float? // tətbiq olunan komissiya faizi
   referralAmount      Float? // hesablanmış komissiya məbləği
   referralVoided      Boolean         @default(false) // qaytarma/refund-da komissiya ləğv edilib
+  stockRestored       Boolean         @default(false) // ödəniş uğursuz olduqda stok yalnız bir dəfə geri qaytarılır (idempotentlik)
   // Canli takip icin
   latitude            Float?
   longitude           Float?
@@ -863,6 +864,7 @@ model ConsultationSession {
   gatewayRef      String?
   gatewayOrderId  Int?
   gatewayPassword String?
+  settledRefs     String[]           @default([]) // top-up idempotentliyi: tətbiq olunmuş ödəniş referansları
   rated           Boolean            @default(false)
   complaints      Complaint[]
   ratingStars     Int?

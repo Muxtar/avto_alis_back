@@ -45,11 +45,17 @@ export const docUpload = multer({
   storage,
   limits: { fileSize: 15 * 1024 * 1024 }, // 15 MB (PDF-lər üçün)
   fileFilter: (_req, file, cb) => {
-    const allowedExt = /\.(jpe?g|png|webp|heic|heif|pdf)$/i;
-    const allowedMime = /^(image\/(jpeg|jpg|png|webp|heic|heif)|application\/pdf)$/i;
-    const ext = allowedExt.test(file.originalname.toLowerCase());
-    const mime = allowedMime.test(file.mimetype) || file.mimetype === 'application/octet-stream';
-    if (ext && mime) cb(null, true);
+    const name = file.originalname.toLowerCase();
+    const isImgExt = /\.(jpe?g|png|webp|heic|heif)$/i.test(name);
+    const isPdfExt = /\.pdf$/i.test(name);
+    const imgMime = /^image\/(jpeg|jpg|png|webp|heic|heif)$/i.test(file.mimetype);
+    const pdfMime = file.mimetype === 'application/pdf';
+    // octet-stream yalnız şəkil uzantıları üçün etibarlıdır (bəzi mobil klientlər belə göndərir);
+    // PDF üçün mütləq real application/pdf mime tələb olunur — disguise qarşısını alır.
+    const ok =
+      (isImgExt && (imgMime || file.mimetype === 'application/octet-stream')) ||
+      (isPdfExt && pdfMime);
+    if (ok) cb(null, true);
     else cb(new Error('Yalnız şəkil və ya PDF yüklənə bilər'));
   },
 });

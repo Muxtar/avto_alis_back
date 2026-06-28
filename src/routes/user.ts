@@ -4,7 +4,7 @@ import { adminAuth, AuthRequest } from '../middleware/auth';
 import { getProvider, isConfigured, signState, verifyState, OAUTH_PLATFORMS } from '../services/socialOauth';
 import { upload, docUpload } from '../middleware/upload';
 import { processImages } from '../middleware/imageProcess';
-import { listingWriteLimiter, bulkLimiter } from '../middleware/rateLimiter';
+import { listingWriteLimiter, bulkLimiter, otpLimiter } from '../middleware/rateLimiter';
 import { extractPassportFromFiles } from '../services/vehiclePassportAI';
 import { analyzeCredential, verifyIdentityAI, extractIdName } from '../services/credentialAI';
 import { sendVerificationCode } from '../services/mailer';
@@ -282,7 +282,7 @@ router.get('/me/phones', adminAuth, async (req: AuthRequest, res: Response) => {
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
 
-router.post('/me/phones/send-code', adminAuth, async (req: AuthRequest, res: Response) => {
+router.post('/me/phones/send-code', otpLimiter, adminAuth, async (req: AuthRequest, res: Response) => {
   try {
     const phone = normPhone(req.body.phone);
     if (phone.replace(/\D/g, '').length < 7) { res.status(400).json({ success: false, message: 'Düzgün nömrə yazın' }); return; }
@@ -294,7 +294,7 @@ router.post('/me/phones/send-code', adminAuth, async (req: AuthRequest, res: Res
       create: { userId: req.adminId!, phone, code, codeExpiresAt },
     });
     // SMS provayderi yoxdursa kod cavabda qaytarılır (test).
-    const isDev = process.env.SMS_PROVIDER !== 'twilio';
+    const isDev = process.env.NODE_ENV !== 'production' || process.env.SHOW_DEV_CODE === 'true';
     res.json({ success: true, message: 'Doğrulama kodu göndərildi', ...(isDev && { code }) });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
@@ -702,7 +702,7 @@ function generateEmailCode(): string {
 }
 
 // Send email verification code
-router.post('/me/email/send-code', adminAuth, async (req: AuthRequest, res: Response) => {
+router.post('/me/email/send-code', otpLimiter, adminAuth, async (req: AuthRequest, res: Response) => {
   try {
     const { email } = req.body;
     if (!email) {
@@ -728,7 +728,8 @@ router.post('/me/email/send-code', adminAuth, async (req: AuthRequest, res: Resp
       success: true,
       message: sent ? 'Doğrulama kodu emailinizə göndərildi' : 'Doğrulama kodu yaradıldı',
       emailSent: sent,
-      ...(!sent && { code }), // SMTP yoxdursa kodu göstər (test üçün)
+      // SMTP yoxdursa kodu yalnız dev/opt-in rejimində göstər (production-da sızdırma).
+      ...(!sent && (process.env.NODE_ENV !== 'production' || process.env.SHOW_DEV_CODE === 'true') && { code }),
     });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });

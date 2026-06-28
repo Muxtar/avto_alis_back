@@ -1,6 +1,7 @@
 import { Router, Response } from 'express';
 import { PrismaClient } from '@prisma/client';
 import { adminAuth, requireAdmin, AuthRequest } from '../middleware/auth';
+import { complaintLimiter } from '../middleware/rateLimiter';
 import { refundOrder } from '../services/paymentGateway';
 
 const router = Router();
@@ -10,7 +11,7 @@ const CATEGORIES = ['TIME_WASTED', 'FRAUD', 'RUDE', 'FAKE_INFO', 'OTHER'];
 const COMPLAINT_WINDOW_DAYS = 7;
 
 // ── İstifadəçi: şikayət göndər ────────────────────────────────────────────────
-router.post('/complaints', adminAuth, async (req: AuthRequest, res: Response) => {
+router.post('/complaints', complaintLimiter, adminAuth, async (req: AuthRequest, res: Response) => {
   try {
     const category = String(req.body.category || '').trim();
     const description = String(req.body.description || '').trim();

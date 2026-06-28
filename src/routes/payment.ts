@@ -19,6 +19,14 @@ async function settleOrders(where: { gatewayProvider?: string; gatewayRef?: stri
   await prisma.order.updateMany({ where, data: { gatewayStatus: status || null, paymentStatus: paid ? 'PAID' : 'FAILED' } });
   if (paid) {
     await prisma.order.updateMany({ where: { ...where, status: 'PENDING' }, data: { status: 'CONFIRMED' } });
+    // FAILED→PAID keçidində əvvəl geri qaytarılmış stoku yenidən tut (over-increment-in qarşısını alır).
+    for (const o of orders) {
+      if (!o.stockRestored) continue;
+      for (const it of o.items) {
+        try { await prisma.listing.update({ where: { id: it.listingId }, data: { stock: { decrement: it.quantity } } }); } catch { /* silinmiş */ }
+      }
+      await prisma.order.update({ where: { id: o.id }, data: { stockRestored: false } });
+    }
     if (!wasPaid) {
       const byBuyer = new Map<number, number>();
       for (const o of orders) if (o.pointsEarned > 0) byBuyer.set(o.buyerId, (byBuyer.get(o.buyerId) || 0) + o.pointsEarned);
@@ -28,10 +36,12 @@ async function settleOrders(where: { gatewayProvider?: string; gatewayRef?: stri
     }
   } else {
     for (const o of orders) {
-      if (o.paymentStatus === 'FAILED') continue;
+      // Stoku yalnız bir dəfə geri qaytar: artıq FAILED idisə və ya stockRestored qoyulubsa keç.
+      if (o.paymentStatus === 'FAILED' || o.stockRestored) continue;
       for (const it of o.items) {
         try { await prisma.listing.update({ where: { id: it.listingId }, data: { stock: { increment: it.quantity } } }); } catch { /* silinmiş */ }
       }
+      await prisma.order.update({ where: { id: o.id }, data: { stockRestored: true } });
     }
   }
 }
@@ -67,6 +77,14 @@ router.get('/payment/callback', async (req: Request, res: Response) => {
     if (paid) {
       // Yalnız hələ PENDING olanları təsdiqlə — satıcı/biznes artıq CANCELLED edibsə dirçəltmə.
       await prisma.order.updateMany({ where: { gatewayOrderId, status: 'PENDING' }, data: { status: 'CONFIRMED' } });
+      // FAILED→PAID keçidində əvvəl geri qaytarılmış stoku yenidən tut (over-increment-in qarşısını alır).
+      for (const o of orders) {
+        if (!o.stockRestored) continue;
+        for (const it of o.items) {
+          try { await prisma.listing.update({ where: { id: it.listingId }, data: { stock: { decrement: it.quantity } } }); } catch { /* listing silinmiş ola bilər */ }
+        }
+        await prisma.order.update({ where: { id: o.id }, data: { stockRestored: false } });
+      }
       // Loyalty xalını yalnız indi (ödəniş təsdiqində) və bir dəfə hesabla (idempotent).
       if (!wasPaid) {
         const byBuyer = new Map<number, number>();
@@ -76,12 +94,13 @@ router.get('/payment/callback', async (req: Request, res: Response) => {
         }
       }
     } else {
-      // Ödəniş uğursuz — stoku geri qaytar (yalnız bir dəfə: əvvəl FAILED deyilsə).
+      // Ödəniş uğursuz — stoku geri qaytar (yalnız bir dəfə: əvvəl FAILED deyilsə və ya stockRestored qoyulmayıbsa).
       for (const o of orders) {
-        if (o.paymentStatus === 'FAILED') continue;
+        if (o.paymentStatus === 'FAILED' || o.stockRestored) continue;
         for (const it of o.items) {
           try { await prisma.listing.update({ where: { id: it.listingId }, data: { stock: { increment: it.quantity } } }); } catch { /* listing silinmiş ola bilər */ }
         }
+        await prisma.order.update({ where: { id: o.id }, data: { stockRestored: true } });
       }
     }
 

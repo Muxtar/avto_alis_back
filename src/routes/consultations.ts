@@ -2,6 +2,7 @@ import { Router, Response } from 'express';
 import { PrismaClient, ConsultationSession } from '@prisma/client';
 import { adminAuth, AuthRequest } from '../middleware/auth';
 import { createPayment as createGatewayPayment } from '../services/paymentGateway';
+import { consultationLimiter } from '../middleware/rateLimiter';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -92,7 +93,7 @@ router.delete('/me/consultation-offers/:id', adminAuth, async (req: AuthRequest,
 });
 
 // ── Sorğu (alıcı) ─────────────────────────────────────────────────────────────
-router.post('/consultations/request', adminAuth, async (req: AuthRequest, res: Response) => {
+router.post('/consultations/request', consultationLimiter, adminAuth, async (req: AuthRequest, res: Response) => {
   try {
     // offerId ilə konkret paket seçilir (professionalId ondan götürülür).
     const offerId = req.body.offerId !== undefined ? parseInt(String(req.body.offerId)) : NaN;
@@ -184,7 +185,7 @@ router.get('/consultations/:id/messages', adminAuth, async (req: AuthRequest, re
 });
 
 // Ödəniş başlat (alıcı) — seansı aktiv etmək üçün.
-router.post('/consultations/:id/pay', adminAuth, async (req: AuthRequest, res: Response) => {
+router.post('/consultations/:id/pay', consultationLimiter, adminAuth, async (req: AuthRequest, res: Response) => {
   try {
     const id = parseInt(String(req.params.id));
     const s = await prisma.consultationSession.findUnique({ where: { id } });
@@ -285,10 +286,18 @@ export async function settleConsultation(where: { gatewayOrderId?: number | null
   if (where.gatewayOrderId != null) w.gatewayOrderId = where.gatewayOrderId;
   if (where.gatewayRef) w.gatewayRef = where.gatewayRef;
   if (Object.keys(w).length === 0) return;
+  // Bu ödənişin unikal referansı — callback təkrarlarına qarşı idempotentlik açarı.
+  const ref = where.gatewayRef ? `r:${where.gatewayRef}` : `k:${where.gatewayOrderId}`;
   const sessions = await prisma.consultationSession.findMany({ where: w });
   for (const s of sessions) {
     if (!paid) { await prisma.consultationSession.update({ where: { id: s.id }, data: { paymentStatus: 'FAILED' } }); continue; }
-    if (s.paymentStatus === 'PAID' && s.status !== 'ENDED') continue; // idempotent
+    // Bu referans artıq tətbiq olunubsa — heç nə etmə (top-up ikiqat blok əlavə etməsin).
+    if (s.settledRefs.includes(ref)) continue;
+    if (s.paymentStatus === 'PAID' && s.status !== 'ENDED') {
+      // İlkin ödənişin təkrar callback-i — yalnız referansı qeyd et, blok əlavə etmə.
+      await prisma.consultationSession.update({ where: { id: s.id }, data: { settledRefs: { push: ref } } });
+      continue;
+    }
     // ENDED idisə top-up: yeni blok əlavə et və PAID-ə qaytar (reaktivasiya).
     const addBlock = s.status === 'ENDED' ? s.blockSeconds : 0;
     await prisma.consultationSession.update({
@@ -298,6 +307,7 @@ export async function settleConsultation(where: { gatewayOrderId?: number | null
         status: 'PAID',
         durationSeconds: s.durationSeconds + addBlock,
         endedAt: null,
+        settledRefs: { push: ref },
       },
     });
   }

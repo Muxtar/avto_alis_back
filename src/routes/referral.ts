@@ -2,6 +2,7 @@ import { Router, Response } from 'express';
 import { PrismaClient } from '@prisma/client';
 import crypto from 'crypto';
 import { adminAuth, AuthRequest } from '../middleware/auth';
+import { referralLimiter } from '../middleware/rateLimiter';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -122,7 +123,7 @@ router.get('/referral/stores', adminAuth, async (req: AuthRequest, res: Response
 });
 
 // Peşəkar: referal səbət (link) yarat.
-router.post('/referral/cart', adminAuth, async (req: AuthRequest, res: Response) => {
+router.post('/referral/cart', referralLimiter, adminAuth, async (req: AuthRequest, res: Response) => {
   try {
     const objectId = parseInt(String(req.body.objectId));
     const rawItems = Array.isArray(req.body.items) ? req.body.items : [];
@@ -180,7 +181,7 @@ router.get('/referral/:token', async (req, res: Response) => {
 });
 
 // Alıcı: referal səbətdən sifariş ver (MVP: nağd).
-router.post('/referral/:token/checkout', adminAuth, async (req: AuthRequest, res: Response) => {
+router.post('/referral/:token/checkout', referralLimiter, adminAuth, async (req: AuthRequest, res: Response) => {
   try {
     const cart = await prisma.referralCart.findUnique({ where: { token: String(req.params.token) } });
     if (!cart) { res.status(404).json({ success: false, message: 'Link tapılmadı' }); return; }

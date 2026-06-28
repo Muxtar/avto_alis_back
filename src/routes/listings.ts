@@ -362,7 +362,7 @@ router.post('/listings', adminAuth, upload.array('images', 5), processImages, as
         year: year ? parseInt(year) : null,
         expiresAt,
       },
-      include: { user: true },
+      include: { user: { select: { id: true, name: true, avatar: true, verified: true, type: true } } },
     });
 
     res.status(201).json({ success: true, listing });
