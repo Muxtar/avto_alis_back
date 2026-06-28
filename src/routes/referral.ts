@@ -83,6 +83,44 @@ router.get('/objects/:id/referral-eligibility', adminAuth, async (req: AuthReque
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
 
+// Kəşf: peşəkarın ixtisasına uyğun referal mağazalar.
+router.get('/referral/stores', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const me = await prisma.user.findUnique({
+      where: { id: req.adminId! },
+      select: { profession: true, cvFile: true, professionDocuments: { where: { status: 'APPROVED' }, select: { id: true } } },
+    });
+    if (!me?.profession) { res.json({ success: true, profession: null, stores: [] }); return; }
+    const hasDoc = me.professionDocuments.length > 0;
+    const hasCv = !!me.cvFile;
+    const rules = await prisma.referralRule.findMany({
+      where: {
+        profession: { equals: me.profession, mode: 'insensitive' },
+        object: { referralEnabled: true, isActive: true },
+      },
+      include: {
+        object: {
+          select: {
+            id: true, name: true, city: true, address: true,
+            business: { select: { name: true, status: true } },
+            _count: { select: { listings: true } },
+          },
+        },
+      },
+      orderBy: { commissionPercent: 'desc' },
+    });
+    const stores = rules.map((r) => {
+      const eligible = r.requiredDoc === 'NONE' || (r.requiredDoc === 'DIPLOMA' ? hasDoc : r.requiredDoc === 'CV' ? hasCv : (hasDoc || hasCv));
+      return {
+        objectId: r.object.id, name: r.object.name, city: r.object.city, address: r.object.address,
+        businessName: r.object.business.name, listingCount: r.object._count.listings,
+        commissionPercent: r.commissionPercent, requiredDoc: r.requiredDoc, eligible,
+      };
+    });
+    res.json({ success: true, profession: me.profession, stores });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
 // Peşəkar: referal səbət (link) yarat.
 router.post('/referral/cart', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
