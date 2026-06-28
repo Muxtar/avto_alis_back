@@ -428,6 +428,7 @@ model Order {
   referrerId          Int? // sifarişi yönləndirən peşəkar
   referralPercent     Float? // tətbiq olunan komissiya faizi
   referralAmount      Float? // hesablanmış komissiya məbləği
+  referralVoided      Boolean         @default(false) // qaytarma/refund-da komissiya ləğv edilib
   // Canli takip icin
   latitude            Float?
   longitude           Float?

@@ -551,6 +551,7 @@ router.get('/orders/selling', adminAuth, async (req: AuthRequest, res: Response)
       include: {
         items: true,
         buyer: { select: { id: true, name: true, phone: true } },
+        referrer: { select: { id: true, name: true, profession: true } },
         returnRequests: {
           include: {
             orderItem: true,
@@ -922,6 +923,14 @@ router.put('/returns/:id/refund', adminAuth, async (req: AuthRequest, res: Respo
 
       if (isCardPaid) {
         await tx.order.update({ where: { id: ord.id }, data: { paymentStatus: 'REFUNDED', gatewayStatus: 'Refunded' } });
+      }
+
+      // Referal komissiyasını ləğv et (qaytarılmış mal üçün komissiya ödənilmir).
+      if (ord.referrerId && !ord.referralVoided) {
+        await tx.order.update({ where: { id: ord.id }, data: { referralVoided: true } });
+        await tx.notification.create({
+          data: { userId: ord.referrerId, type: 'REFERRAL', title: 'Referal komissiyası ləğv edildi', body: `Sifariş #${ord.id} qaytarıldığı üçün komissiya ləğv olundu.`, link: '/referral-earnings' },
+        }).catch(() => {});
       }
 
       return await tx.returnRequest.update({ where: { id: ret.id }, data: { status: 'REFUNDED' } });

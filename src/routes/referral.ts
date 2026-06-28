@@ -231,12 +231,12 @@ router.get('/me/referral-earnings', adminAuth, async (req: AuthRequest, res: Res
       where: { referrerId: req.adminId! },
       orderBy: { createdAt: 'desc' },
       select: {
-        id: true, total: true, referralPercent: true, referralAmount: true, status: true, createdAt: true,
+        id: true, total: true, referralPercent: true, referralAmount: true, referralVoided: true, status: true, createdAt: true,
         seller: { select: { id: true, name: true } },
       },
     });
-    const confirmed = orders.filter((o) => o.status === 'DELIVERED').reduce((s, o) => s + (o.referralAmount || 0), 0);
-    const pending = orders.filter((o) => o.status !== 'DELIVERED' && o.status !== 'CANCELLED').reduce((s, o) => s + (o.referralAmount || 0), 0);
+    const confirmed = orders.filter((o) => o.status === 'DELIVERED' && !o.referralVoided).reduce((s, o) => s + (o.referralAmount || 0), 0);
+    const pending = orders.filter((o) => o.status !== 'DELIVERED' && o.status !== 'CANCELLED' && !o.referralVoided).reduce((s, o) => s + (o.referralAmount || 0), 0);
     res.json({ success: true, orders, confirmedTotal: +confirmed.toFixed(2), pendingTotal: +pending.toFixed(2) });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
