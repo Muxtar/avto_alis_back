@@ -416,7 +416,9 @@ router.get('/me/listings', adminAuth, async (req: AuthRequest, res: Response) =>
 // location from their profile so listings always carry where they're from.
 router.post('/me/listings', listingWriteLimiter, adminAuth, upload.array('images', 5), processImages, async (req: AuthRequest, res: Response) => {
   try {
-    const { title, description, price, category, type, location, phone, condition, country, brand, stock, forVehicle, unit, unitValue, year, model, city, fuelType, paymentType, businessObjectId, attributes, listingMode, barter, forRent } = req.body;
+    const { title, description, price, category, type, location, phone, condition, country, brand, stock, forVehicle, unit, unitValue, year, model, city, fuelType, paymentType, businessObjectId, attributes, listingMode, barter, forRent, bookable, bookingType, maxGuests, openTime, closeTime } = req.body;
+    const isBookable = bookable === true || bookable === 'true';
+    const validBookingType = bookingType === 'RESERVATION' || bookingType === 'STAY' ? bookingType : null;
     const parsedAttrs = (() => { try { const o = attributes ? JSON.parse(attributes) : null; return o && typeof o === 'object' && Object.keys(o).length ? o : undefined; } catch { return undefined; } })();
 
     if (!title || !description || !price || !category || !type) {
@@ -479,6 +481,11 @@ router.post('/me/listings', listingWriteLimiter, adminAuth, upload.array('images
         paymentType: paymentType || null,
         barter: barter === true || barter === 'true',
         forRent: forRent === true || forRent === 'true',
+        bookable: isBookable,
+        bookingType: isBookable ? validBookingType : null,
+        maxGuests: isBookable && maxGuests ? parseInt(String(maxGuests)) : null,
+        openTime: isBookable && openTime ? String(openTime).slice(0, 10) : null,
+        closeTime: isBookable && closeTime ? String(closeTime).slice(0, 10) : null,
         attributes: parsedAttrs ?? undefined,
         businessId: bizId,
         businessObjectId: bizObjId,
@@ -502,7 +509,7 @@ router.put('/me/listings/:id', adminAuth, upload.array('images', 5), processImag
     if (!existing || existing.userId !== req.adminId) {
       res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return;
     }
-    const { title, description, price, category, type, location, phone, condition, country, brand, stock, forVehicle, unit, unitValue, year, model, city, fuelType, paymentType, existingImages, attributes, barter, forRent } = req.body;
+    const { title, description, price, category, type, location, phone, condition, country, brand, stock, forVehicle, unit, unitValue, year, model, city, fuelType, paymentType, existingImages, attributes, barter, forRent, bookable, bookingType, maxGuests, openTime, closeTime } = req.body;
     const parsedAttrs = attributes !== undefined ? (() => { try { const o = JSON.parse(attributes); return o && typeof o === 'object' ? o : {}; } catch { return {}; } })() : undefined;
 
     let nextImages: string[] | undefined;
@@ -549,6 +556,17 @@ router.put('/me/listings/:id', adminAuth, upload.array('images', 5), processImag
         ...(paymentType !== undefined && { paymentType: paymentType || null }),
         ...(barter !== undefined && { barter: barter === true || barter === 'true' }),
         ...(forRent !== undefined && { forRent: forRent === true || forRent === 'true' }),
+        ...(bookable !== undefined && (() => {
+          const on = bookable === true || bookable === 'true';
+          const bt = bookingType === 'RESERVATION' || bookingType === 'STAY' ? bookingType : null;
+          return {
+            bookable: on,
+            bookingType: on ? bt : null,
+            maxGuests: on && maxGuests ? parseInt(String(maxGuests)) : null,
+            openTime: on && openTime ? String(openTime).slice(0, 10) : null,
+            closeTime: on && closeTime ? String(closeTime).slice(0, 10) : null,
+          };
+        })()),
         ...(parsedAttrs !== undefined && { attributes: parsedAttrs }),
         ...(nextImages !== undefined && { images: nextImages }),
       },

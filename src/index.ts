@@ -26,6 +26,7 @@ import consultationsRoutes from './routes/consultations';
 import referralRoutes from './routes/referral';
 import complaintsRoutes from './routes/complaints';
 import businessRoutes from './routes/business';
+import bookingsRoutes from './routes/bookings';
 
 const app = express();
 const PORT = process.env.PORT || 5001;
@@ -97,6 +98,7 @@ app.use('/api', businessRoutes);
 app.use('/api', consultationsRoutes);
 app.use('/api', referralRoutes);
 app.use('/api', complaintsRoutes);
+app.use('/api', bookingsRoutes);
 
 app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok' });

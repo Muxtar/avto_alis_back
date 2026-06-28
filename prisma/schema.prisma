@@ -30,6 +30,19 @@ enum ListingType {
   SERVICE
 }
 
+enum BookingType {
+  RESERVATION // restoran/masa/məkan — tarix + saat + nəfər
+  STAY // otel/bağ evi/günlük kirayə — giriş-çıxış tarixi
+}
+
+enum BookingStatus {
+  PENDING // sahibin təsdiqini gözləyir
+  CONFIRMED // sahib təsdiqlədi
+  REJECTED // sahib rədd etdi
+  CANCELLED // qonaq ləğv etdi
+  COMPLETED // baş tutdu / keçmişdə qaldı
+}
+
 enum Condition {
   NEW
   USED
@@ -178,6 +191,8 @@ model User {
   addresses     SavedAddress[]
   sellerRatings SellerRating[] @relation("SellerRatings")
   givenRatings  SellerRating[] @relation("BuyerRatings")
+  guestBookings Booking[]      @relation("GuestBookings")
+  hostBookings  Booking[]      @relation("HostBookings")
   notifications Notification[]
 
   // Default location — used on listings + city-search browsing.
@@ -310,6 +325,12 @@ model Listing {
   paymentType      PaymentType?
   barter           Boolean         @default(false) // dəyiş-düş (barter) qəbul olunur
   forRent          Boolean         @default(false) // satış yox, icarə/kirayə
+  // Bron / rezervasiya — restoran, otel, bağ evi, məkan və s. bron edilə bilər
+  bookable         Boolean         @default(false)
+  bookingType      BookingType? // RESERVATION (tarix+saat) | STAY (giriş-çıxış)
+  maxGuests        Int? // maksimum qonaq / nəfər sayı
+  openTime         String? // rezervasiya üçün açılış saatı "10:00"
+  closeTime        String? // rezervasiya üçün bağlanış saatı "23:00"
   viewCount        Int             @default(0)
   expiresAt        DateTime?
   // Biznes bağlantısı — elan bir obyektə (filiala) aiddirsə kart ödənişi mümkün olur.
@@ -326,6 +347,7 @@ model Listing {
   orderItems       OrderItem[]
   inquiryOffers    InquiryOffer[]
   favorites        Favorite[]
+  bookings         Booking[]
 
   @@index([userId, createdAt])
   @@index([category])
@@ -910,4 +932,35 @@ model Complaint {
   @@index([status])
   @@index([targetUserId])
   @@index([consultationId])
+}
+
+// Bron / rezervasiya — qonaq elanı (restoran/otel/məkan) bron edir, sahib təsdiqləyir.
+model Booking {
+  id           Int           @id @default(autoincrement())
+  listingId    Int
+  guestId      Int // bron edən
+  hostId       Int // elan sahibi
+  type         BookingType
+  date         DateTime? // REZERVASİYA: gün
+  time         String? // REZERVASİYA: saat "19:30"
+  checkIn      DateTime? // GECƏLƏMƏ: giriş
+  checkOut     DateTime? // GECƏLƏMƏ: çıxış
+  nights       Int? // GECƏLƏMƏ: gecə sayı
+  guests       Int           @default(1) // qonaq / nəfər sayı
+  rooms        Int? // GECƏLƏMƏ: otaq sayı
+  totalPrice   Float? // təxmini cəm (məlumat üçün)
+  note         String?
+  contactName  String?
+  contactPhone String
+  status       BookingStatus @default(PENDING)
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  listing      Listing       @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  guest        User          @relation("GuestBookings", fields: [guestId], references: [id], onDelete: Cascade)
+  host         User          @relation("HostBookings", fields: [hostId], references: [id], onDelete: Cascade)
+
+  @@index([guestId, createdAt])
+  @@index([hostId, createdAt])
+  @@index([listingId])
+  @@index([status])
 }
