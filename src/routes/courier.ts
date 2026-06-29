@@ -66,6 +66,14 @@ router.put('/courier/orders/:id/status', adminAuth, async (req: AuthRequest, res
       res.status(400).json({ success: false, message: 'Kuryer yalnız SHIPPED və ya DELIVERED statusu təyin edə bilər' });
       return;
     }
+    // DELIVERED üçün təhvil kodu tələb olunur (alıcının kodu) — səhv/təkrar təhvilin qarşısını alır.
+    if (status === 'DELIVERED' && order.pickupCode) {
+      const provided = String(req.body?.code || '').trim().toUpperCase();
+      if (provided !== order.pickupCode.toUpperCase()) {
+        res.status(400).json({ success: false, message: 'Təhvil kodu yanlışdır. Alıcıdan kodu soruşun.' });
+        return;
+      }
+    }
     const updated = await prisma.order.update({
       where: { id: parseInt(req.params.id) },
       data: { status },

@@ -77,6 +77,13 @@ enum DeliveryType {
   PICKUP
 }
 
+// Çatdırılma kim tərəfindən olunur (satıcı seçir, VÖEN elanlarda):
+// COURIER = kuryer (Yango) ilə; SELF = satıcı özü çatdırır.
+enum DeliveryMethod {
+  COURIER
+  SELF
+}
+
 enum PaymentMethod {
   CASH
   CARD
@@ -327,6 +334,8 @@ model Listing {
   forRent          Boolean         @default(false) // satış yox, icarə/kirayə
   // Bron / rezervasiya — restoran, otel, bağ evi, məkan və s. bron edilə bilər
   bookable         Boolean         @default(false)
+  // VÖEN elanda çatdırılma metodu: kuryer (Yango) yoxsa satıcı özü
+  deliveryMethod   DeliveryMethod  @default(COURIER)
   bookingType      BookingType? // RESERVATION (tarix+saat) | STAY (giriş-çıxış)
   maxGuests        Int? // maksimum qonaq / nəfər sayı
   openTime         String? // rezervasiya üçün açılış saatı "10:00"
@@ -435,6 +444,11 @@ model Order {
   phone               String?
   note                String?
   deliveryType        DeliveryType    @default(DELIVERY)
+  // Çatdırılma metodu (DELIVERY olduqda): kuryer (Yango) və ya satıcı özü.
+  deliveryMethod      DeliveryMethod? @default(COURIER)
+  // Təhvil kodu — alıcı ilə satıcı/kuryer arasında məhsulun düzgün təhvili üçün
+  // unikal kod. Yalnız bu kod təsdiqlənəndə DELIVERED olur (səhv təhvilin qarşısını alır).
+  pickupCode          String?
   scheduledAt         DateTime? // ileri tarihli siparis
   paymentMethod       PaymentMethod   @default(CASH)
   paymentStatus       PaymentStatus   @default(PENDING)

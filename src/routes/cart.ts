@@ -10,6 +10,14 @@ const BUYER_TYPES: UserType[] = [UserType.CAR_OWNER, UserType.MECHANIC, UserType
 const router = Router();
 const prisma = new PrismaClient();
 
+// Təhvil kodu — qarışmaması üçün oxşar simvollar (0/O, 1/I) çıxarılıb. Məs. "TX-7F3K".
+function genPickupCode(): string {
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let s = '';
+  for (let i = 0; i < 6; i++) s += alphabet[Math.floor(Math.random() * alphabet.length)];
+  return `TX-${s}`;
+}
+
 // Get my cart
 router.get('/cart', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
@@ -370,6 +378,10 @@ router.post('/cart/checkout', requireType(BUYER_TYPES), async (req: AuthRequest,
             phone: phone || null,
             note: note || null,
             deliveryType,
+            // Çatdırılma metodu satıcının elan tənzimləməsindən gəlir (qarışıqdırsa kuryer default).
+            deliveryMethod: (items[0]?.listing as any)?.deliveryMethod || 'COURIER',
+            // Hər sifariş üçün unikal təhvil kodu.
+            pickupCode: genPickupCode(),
             scheduledAt: scheduledAt ? new Date(scheduledAt) : null,
             paymentMethod,
             // CARD → bank təsdiqləyənə qədər PENDING; WALLET → PAID; CASH → PENDING (çatdırılanda).
@@ -650,6 +662,15 @@ router.put('/orders/:id/status', adminAuth, async (req: AuthRequest, res: Respon
     if (order.paymentMethod === 'CARD' && order.paymentStatus !== 'PAID' && (next === 'SHIPPED' || next === 'DELIVERED')) {
       res.status(400).json({ success: false, message: 'Ödəniş təsdiqlənməyib — sifarişi göndərmək olmaz' });
       return;
+    }
+    // DELIVERED üçün təhvil kodu tələb olunur — alıcının verdiyi kod uyğun gəlməlidir
+    // (səhv adama / təkrar təhvilin qarşısını alır).
+    if (next === 'DELIVERED' && order.pickupCode) {
+      const provided = String(req.body?.code || '').trim().toUpperCase();
+      if (provided !== order.pickupCode.toUpperCase()) {
+        res.status(400).json({ success: false, message: 'Təhvil kodu yanlışdır. Alıcıdan kodu soruşun.' });
+        return;
+      }
     }
     const updated = await prisma.order.update({
       where: { id },
