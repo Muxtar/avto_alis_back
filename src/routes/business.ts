@@ -405,7 +405,7 @@ router.put('/me/objects/:id', adminAuth, async (req: AuthRequest, res: Response)
   try {
     const id = parseInt(req.params.id);
     if (!(await ownsObject(id, req.adminId!))) { res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return; }
-    const { name, phone, address, city, activityAreas } = req.body;
+    const { name, phone, address, city, latitude, longitude, activityAreas } = req.body;
     const updated = await prisma.businessObject.update({
       where: { id },
       data: {
@@ -413,6 +413,8 @@ router.put('/me/objects/:id', adminAuth, async (req: AuthRequest, res: Response)
         ...(phone !== undefined && { phone: phone?.trim() || null }),
         ...(address !== undefined && { address: String(address).trim() }),
         ...(city !== undefined && { city: city?.trim() || null }),
+        ...(latitude !== undefined && { latitude: latitude != null ? parseFloat(latitude) : null }),
+        ...(longitude !== undefined && { longitude: longitude != null ? parseFloat(longitude) : null }),
         ...(activityAreas !== undefined && { activityAreas: Array.isArray(activityAreas) ? activityAreas.filter((x: any) => typeof x === 'string') : [] }),
       },
     });

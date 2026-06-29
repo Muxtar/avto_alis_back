@@ -242,6 +242,14 @@ router.get('/listings/:id', async (req: Request, res: Response) => {
             workplaces: true,
           },
         },
+        // VÖEN (obyektə bağlı) elanlarda obyekt məlumatı göstərilir (şəxsin yox).
+        businessObject: {
+          select: {
+            id: true, name: true, phone: true, address: true, city: true,
+            latitude: true, longitude: true,
+            business: { select: { id: true, name: true } },
+          },
+        },
         comments: {
           include: { user: { select: { id: true, name: true, type: true } } },
           orderBy: { createdAt: 'desc' },
