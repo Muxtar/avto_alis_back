@@ -2,6 +2,8 @@ import { Router, Response } from 'express';
 import { PrismaClient, UserType } from '@prisma/client';
 import { adminAuth, requireType, AuthRequest } from '../middleware/auth';
 import { createPayment as createGatewayPayment, refundOrder as gatewayRefundOrder } from '../services/paymentGateway';
+import { checkPrice as yangoCheckPrice, isYangoConfigured } from '../services/yangoDelivery';
+import { dispatchOrderToYango } from './yango';
 
 const PUBLIC_BACKEND_URL = process.env.PUBLIC_BACKEND_URL || `http://localhost:${process.env.PORT || 5001}`;
 
@@ -224,12 +226,16 @@ router.post('/cart/checkout', requireType(BUYER_TYPES), async (req: AuthRequest,
     const {
       address, phone, note,
       deliveryType = 'DELIVERY',
+      deliveryMethod = 'COURIER', // alıcının seçimi: COURIER (Yango) | SELF (satıcı özü)
       scheduledAt,
       paymentMethod = 'CASH',
       promoCode,
       usePoints = 0,
       latitude, longitude,
     } = req.body;
+    const buyerLat = latitude != null && latitude !== '' ? parseFloat(latitude) : null;
+    const buyerLng = longitude != null && longitude !== '' ? parseFloat(longitude) : null;
+    const dMethod: 'COURIER' | 'SELF' = deliveryMethod === 'SELF' ? 'SELF' : 'COURIER';
 
     const cart = await prisma.cart.findUnique({
       where: { userId: req.adminId! },
@@ -265,6 +271,35 @@ router.post('/cart/checkout', requireType(BUYER_TYPES), async (req: AuthRequest,
       if (okBiz.length !== bizIds.length) {
         res.status(400).json({ success: false, message: 'Bu məhsulların biznesi hazırda aktiv deyil — kartla ödəniş mümkün deyil.' });
         return;
+      }
+    }
+
+    // ── Çatdırılma seçiminin yoxlanması + Yango haqqının hesablanması (satıcı üzrə) ──
+    const feeBySeller = new Map<number, number>();
+    if (deliveryType === 'DELIVERY') {
+      if (dMethod === 'SELF') {
+        // Satıcı özü çatdırılma — bütün elanlar buna icazə verməlidir.
+        const notAllowed = cart.items.find((i) => !(i.listing as any).allowSelfDelivery);
+        if (notAllowed) { res.status(400).json({ success: false, message: `"${notAllowed.listing.title}" üçün satıcı özü çatdırılma təklif etmir` }); return; }
+      } else {
+        // Yango (kuryer) — alıcının koordinatı tələb olunur; haqqı check-price ilə hesablanır.
+        if (buyerLat == null || buyerLng == null) { res.status(400).json({ success: false, message: 'Yango çatdırılması üçün xəritədən konum seçin' }); return; }
+        if (isYangoConfigured()) {
+          const objIds = Array.from(new Set(cart.items.map((i) => (i.listing as any).businessObjectId).filter((x): x is number => !!x)));
+          const objs = objIds.length ? await prisma.businessObject.findMany({ where: { id: { in: objIds } }, select: { id: true, latitude: true, longitude: true } }) : [];
+          const objMap = new Map(objs.map((o) => [o.id, o]));
+          const grp = new Map<number, typeof cart.items>();
+          for (const it of cart.items) { const a = grp.get(it.listing.userId) || []; a.push(it); grp.set(it.listing.userId, a); }
+          for (const [sellerId, items] of grp.entries()) {
+            const withObj = items.find((i) => (i.listing as any).businessObjectId && objMap.get((i.listing as any).businessObjectId)?.latitude != null);
+            const obj = withObj ? objMap.get((withObj.listing as any).businessObjectId) : null;
+            if (obj && obj.latitude != null && obj.longitude != null) {
+              const weight = items.reduce((s, i) => s + i.quantity, 0);
+              const q = await yangoCheckPrice({ source: [obj.longitude, obj.latitude], destination: [buyerLng, buyerLat], weightKg: weight });
+              if (q.ok && q.data?.price) feeBySeller.set(sellerId, parseFloat(String(q.data.price)) || 0);
+            }
+          }
+        }
       }
     }
 
@@ -346,7 +381,9 @@ router.post('/cart/checkout', requireType(BUYER_TYPES), async (req: AuthRequest,
         pointsRemaining -= pointsAppliedRaw;
 
         const actualDiscount = promoApplied + pointsAppliedRaw * 0.01;
-        const total = Math.max(0, sellerSubtotal - actualDiscount);
+        // Yango çatdırılma haqqı (yalnız kuryer+çatdırılma seçimində) cəmə əlavə olunur.
+        const sellerDeliveryFee = deliveryType === 'DELIVERY' && dMethod === 'COURIER' ? (feeBySeller.get(sellerId) || 0) : 0;
+        const total = Math.max(0, sellerSubtotal - actualDiscount) + sellerDeliveryFee;
 
         // C8 fix: Never mint loyalty points on portions of an order paid with points.
         // Only the cash-paid portion qualifies for new points.
@@ -378,8 +415,9 @@ router.post('/cart/checkout', requireType(BUYER_TYPES), async (req: AuthRequest,
             phone: phone || null,
             note: note || null,
             deliveryType,
-            // Çatdırılma metodu satıcının elan tənzimləməsindən gəlir (qarışıqdırsa kuryer default).
-            deliveryMethod: (items[0]?.listing as any)?.deliveryMethod || 'COURIER',
+            // Çatdırılma metodu alıcının seçimidir (COURIER=Yango | SELF=satıcı özü).
+            deliveryMethod: deliveryType === 'PICKUP' ? null : dMethod,
+            deliveryFee: sellerDeliveryFee,
             // Hər sifariş üçün unikal təhvil kodu.
             pickupCode: genPickupCode(),
             scheduledAt: scheduledAt ? new Date(scheduledAt) : null,
@@ -676,6 +714,11 @@ router.put('/orders/:id/status', adminAuth, async (req: AuthRequest, res: Respon
       where: { id },
       data: { status: next as any },
     });
+
+    // Satıcı təsdiqləyəndə Yango sifarişini avtomatik kuryerə göndər (best-effort).
+    if (next === 'CONFIRMED' && order.deliveryType !== 'PICKUP' && order.deliveryMethod === 'COURIER' && !order.yangoClaimId && isYangoConfigured()) {
+      dispatchOrderToYango(order.id).catch(() => {});
+    }
 
     // Sifariş ləğv edildikdə referal komissiyasını ləğv et (ləğv olunan sifariş üçün komissiya ödənilmir).
     if (next === 'CANCELLED' && order.referrerId && !order.referralVoided) {

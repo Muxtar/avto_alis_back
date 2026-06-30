@@ -127,6 +127,11 @@ export async function getClaimInfo(claimId: string) {
   return yreq('/claims/info', { query: { claim_id: claimId } });
 }
 
+// Ləğv şərtləri — pulsuz mümkündürmü?
+export async function getCancelInfo(claimId: string) {
+  return yreq('/claims/cancel-info', { query: { claim_id: claimId } });
+}
+
 // Claim-i ləğv et (cancel_state: 'free' | 'paid').
 export async function cancelClaim(claimId: string, version: number, cancelState: 'free' | 'paid' = 'free') {
   return yreq('/claims/cancel', { query: { claim_id: claimId }, body: { version, cancel_state: cancelState } });

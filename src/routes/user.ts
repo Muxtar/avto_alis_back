@@ -418,7 +418,7 @@ router.post('/me/listings', listingWriteLimiter, adminAuth, upload.array('images
   try {
     const { title, description, price, category, type, location, phone, condition, country, brand, stock, forVehicle, unit, unitValue, year, model, city, fuelType, paymentType, businessObjectId, attributes, listingMode, barter, forRent, bookable, bookingType, maxGuests, openTime, closeTime, deliveryMethod } = req.body;
     const isBookable = bookable === true || bookable === 'true';
-    const validDeliveryMethod = deliveryMethod === 'SELF' ? 'SELF' : 'COURIER';
+    const selfDeliveryOn = deliveryMethod === 'SELF' || req.body.allowSelfDelivery === true || req.body.allowSelfDelivery === 'true';
     const validBookingType = bookingType === 'RESERVATION' || bookingType === 'STAY' ? bookingType : null;
     const parsedAttrs = (() => { try { const o = attributes ? JSON.parse(attributes) : null; return o && typeof o === 'object' && Object.keys(o).length ? o : undefined; } catch { return undefined; } })();
 
@@ -483,7 +483,7 @@ router.post('/me/listings', listingWriteLimiter, adminAuth, upload.array('images
         barter: barter === true || barter === 'true',
         forRent: forRent === true || forRent === 'true',
         bookable: isBookable,
-        deliveryMethod: validDeliveryMethod,
+        allowSelfDelivery: selfDeliveryOn,
         bookingType: isBookable ? validBookingType : null,
         maxGuests: isBookable && maxGuests ? parseInt(String(maxGuests)) : null,
         openTime: isBookable && openTime ? String(openTime).slice(0, 10) : null,
@@ -558,7 +558,7 @@ router.put('/me/listings/:id', adminAuth, upload.array('images', 5), processImag
         ...(paymentType !== undefined && { paymentType: paymentType || null }),
         ...(barter !== undefined && { barter: barter === true || barter === 'true' }),
         ...(forRent !== undefined && { forRent: forRent === true || forRent === 'true' }),
-        ...(deliveryMethod !== undefined && { deliveryMethod: deliveryMethod === 'SELF' ? 'SELF' : 'COURIER' }),
+        ...((req.body.allowSelfDelivery !== undefined || deliveryMethod !== undefined) && { allowSelfDelivery: req.body.allowSelfDelivery === true || req.body.allowSelfDelivery === 'true' || deliveryMethod === 'SELF' }),
         ...(bookable !== undefined && (() => {
           const on = bookable === true || bookable === 'true';
           const bt = bookingType === 'RESERVATION' || bookingType === 'STAY' ? bookingType : null;

@@ -1,7 +1,10 @@
-import { Router, Response } from 'express';
+import { Router, Request, Response } from 'express';
 import { PrismaClient } from '@prisma/client';
 import { adminAuth, AuthRequest } from '../middleware/auth';
-import { isYangoConfigured, createClaim, acceptClaim, getClaimInfo, cancelClaim, mapYangoStatus, type Geo } from '../services/yangoDelivery';
+import {
+  isYangoConfigured, checkPrice, createClaim, acceptClaim, getClaimInfo,
+  getCancelInfo, cancelClaim, mapYangoStatus, type Geo,
+} from '../services/yangoDelivery';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -23,60 +26,77 @@ async function syncOrderStatus(orderId: number, current: string, yangoStatus: st
   }
 }
 
-// ── Satıcı: sifarişi Yango ilə göndər (claim yarat + təsdiqlə) ─────────────────
+// ── Ortaq: sifarişi Yango-ya göndər (claim yarat + təsdiqlə). Həm route, həm
+//    avtomatik dispatch (satıcı təsdiqləyəndə) bunu çağırır. ──────────────────
+export async function dispatchOrderToYango(orderId: number): Promise<{ ok: boolean; message?: string; claimId?: string; status?: string }> {
+  if (!isYangoConfigured()) return { ok: false, message: 'Yango qoşulmayıb (YANGO_TOKEN yoxdur)' };
+  const order = await prisma.order.findUnique({ where: { id: orderId }, include: orderInclude });
+  if (!order) return { ok: false, message: 'Sifariş tapılmadı' };
+  if (order.yangoClaimId) return { ok: true, claimId: order.yangoClaimId, status: order.yangoStatus || undefined };
+  if (order.deliveryType === 'PICKUP') return { ok: false, message: 'Götürmə sifarişi üçün kuryer lazım deyil' };
+  if (order.deliveryMethod !== 'COURIER') return { ok: false, message: 'Bu sifariş Yango ilə deyil' };
+
+  const obj = order.items.map((i) => i.listing?.businessObject).find((o) => o && o.latitude != null && o.longitude != null);
+  const srcLat = obj?.latitude ?? order.seller.latitude;
+  const srcLng = obj?.longitude ?? order.seller.longitude;
+  const srcAddr = obj?.address || order.seller.address || '';
+  const srcName = obj?.name || order.seller.name || 'Satıcı';
+  const srcPhone = obj?.phone || order.seller.phone || '';
+  if (srcLat == null || srcLng == null) return { ok: false, message: 'Obyektin/satıcının koordinatı yoxdur' };
+  if (order.latitude == null || order.longitude == null) return { ok: false, message: 'Alıcı ünvanının koordinatı yoxdur' };
+  const dstPhone = order.phone || order.buyer.phone || '';
+  if (!srcPhone || !dstPhone) return { ok: false, message: 'Göndərən və ya alıcı telefonu yoxdur' };
+
+  const claim = await createClaim({
+    requestId: `order-${order.id}`,
+    source: { fullname: srcAddr, coordinates: [srcLng, srcLat] as Geo, contact: { name: srcName, phone: srcPhone } },
+    destination: { fullname: order.address || 'Çatdırılma ünvanı', coordinates: [order.longitude, order.latitude] as Geo, contact: { name: order.buyer.name || 'Alıcı', phone: dstPhone } },
+    items: order.items.map((i) => ({ title: i.title, quantity: i.quantity, costValue: i.price.toFixed(2), costCurrency: 'AZN', weightKg: 1 })),
+    emergencyContact: { name: srcName, phone: srcPhone },
+    comment: `tradixai sifariş #${order.id}`,
+  });
+  if (!claim.ok || !claim.data?.id) return { ok: false, message: claim.error || 'Yango claim yaradıla bilmədi' };
+
+  const claimId = claim.data.id as string;
+  const version = (claim.data.version as number) ?? 1;
+  await acceptClaim(claimId, version);
+  const info = await getClaimInfo(claimId);
+  const status = info.data?.status || claim.data.status || 'new';
+  const price = info.data?.pricing?.offer?.price ? parseFloat(info.data.pricing.offer.price) : (order.deliveryFee || null);
+  const currency = info.data?.pricing?.currency || order.yangoCurrency || 'AZN';
+
+  await prisma.order.update({
+    where: { id: order.id },
+    data: { yangoClaimId: claimId, yangoStatus: status, yangoVersion: (info.data?.version as number) ?? version, yangoPrice: price, yangoCurrency: currency },
+  });
+  return { ok: true, claimId, status };
+}
+
+// ── Qiymət təxmini (checkout-da göstərmək üçün) ───────────────────────────────
+router.post('/yango/quote', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    if (!isYangoConfigured()) { res.json({ success: true, available: false, fee: 0 }); return; }
+    const businessObjectId = req.body.businessObjectId ? parseInt(String(req.body.businessObjectId)) : null;
+    const lat = req.body.latitude != null ? parseFloat(String(req.body.latitude)) : null;
+    const lng = req.body.longitude != null ? parseFloat(String(req.body.longitude)) : null;
+    if (lat == null || lng == null || !businessObjectId) { res.status(400).json({ success: false, message: 'Obyekt və konum tələb olunur' }); return; }
+    const obj = await prisma.businessObject.findUnique({ where: { id: businessObjectId }, select: { latitude: true, longitude: true } });
+    if (!obj?.latitude || !obj?.longitude) { res.json({ success: true, available: false, fee: 0, message: 'Obyektin koordinatı yoxdur' }); return; }
+    const q = await checkPrice({ source: [obj.longitude, obj.latitude], destination: [lng, lat], weightKg: req.body.weight ? parseFloat(String(req.body.weight)) : 1 });
+    if (!q.ok || !q.data?.price) { res.json({ success: true, available: false, fee: 0, message: q.error }); return; }
+    res.json({ success: true, available: true, fee: parseFloat(String(q.data.price)), currency: q.data.currency_rules?.code || 'AZN', eta: q.data.eta });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
+// ── Satıcı: sifarişi Yango ilə göndər ─────────────────────────────────────────
 router.post('/orders/:id/yango/dispatch', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
-    if (!isYangoConfigured()) { res.status(400).json({ success: false, message: 'Yango qoşulmayıb (YANGO_TOKEN yoxdur)' }); return; }
     const id = parseInt(String(req.params.id));
-    const order = await prisma.order.findUnique({ where: { id }, include: orderInclude });
+    const order = await prisma.order.findUnique({ where: { id }, select: { sellerId: true } });
     if (!order || order.sellerId !== req.adminId) { res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return; }
-    if (order.deliveryType === 'PICKUP') { res.status(400).json({ success: false, message: 'Götürmə sifarişi üçün kuryer lazım deyil' }); return; }
-    if (order.yangoClaimId) { res.status(400).json({ success: false, message: 'Bu sifariş artıq Yango-ya göndərilib' }); return; }
-
-    // Mənbə (götürülmə) — biznes obyekti, yoxdursa satıcının ünvanı.
-    const obj = order.items.map((i) => i.listing?.businessObject).find((o) => o && o.latitude != null && o.longitude != null);
-    const srcLat = obj?.latitude ?? order.seller.latitude;
-    const srcLng = obj?.longitude ?? order.seller.longitude;
-    const srcAddr = obj?.address || order.seller.address || '';
-    const srcName = obj?.name || order.seller.name || 'Satıcı';
-    const srcPhone = obj?.phone || order.seller.phone || '';
-    if (srcLat == null || srcLng == null) { res.status(400).json({ success: false, message: 'Obyektin/satıcının koordinatı yoxdur — obyekt ünvanını xəritədən seçin' }); return; }
-
-    // Təyinat (çatdırılma) — alıcının ünvanı + koordinatı.
-    if (order.latitude == null || order.longitude == null) { res.status(400).json({ success: false, message: 'Alıcı ünvanının koordinatı yoxdur — çatdırılma mümkün deyil' }); return; }
-    const dstPhone = order.phone || order.buyer.phone || '';
-    if (!srcPhone || !dstPhone) { res.status(400).json({ success: false, message: 'Göndərən və ya alıcı telefonu yoxdur' }); return; }
-
-    const claim = await createClaim({
-      requestId: `order-${order.id}`,
-      source: { fullname: srcAddr, coordinates: [srcLng, srcLat] as Geo, contact: { name: srcName, phone: srcPhone } },
-      destination: { fullname: order.address || 'Çatdırılma ünvanı', coordinates: [order.longitude, order.latitude] as Geo, contact: { name: order.buyer.name || 'Alıcı', phone: dstPhone } },
-      items: order.items.map((i) => ({ title: i.title, quantity: i.quantity, costValue: i.price.toFixed(2), costCurrency: 'AZN', weightKg: 1 })),
-      emergencyContact: { name: srcName, phone: srcPhone },
-      comment: `tradixai sifariş #${order.id}`,
-    });
-    if (!claim.ok || !claim.data?.id) { res.status(502).json({ success: false, message: claim.error || 'Yango claim yaradıla bilmədi' }); return; }
-
-    const claimId = claim.data.id as string;
-    const version = (claim.data.version as number) ?? 1;
-    // Təsdiqlə (kuryer axtarışı başlasın).
-    const accept = await acceptClaim(claimId, version);
-    const info = await getClaimInfo(claimId);
-    const status = info.data?.status || claim.data.status || 'new';
-    const price = info.data?.pricing?.offer?.price ? parseFloat(info.data.pricing.offer.price) : null;
-    const currency = info.data?.pricing?.currency || null;
-
-    const updated = await prisma.order.update({
-      where: { id: order.id },
-      data: {
-        yangoClaimId: claimId,
-        yangoStatus: status,
-        yangoVersion: (info.data?.version as number) ?? version,
-        yangoPrice: price,
-        yangoCurrency: currency,
-      },
-    });
-    res.json({ success: true, claimId, status, accepted: accept.ok, price, currency, order: updated });
+    const r = await dispatchOrderToYango(id);
+    if (!r.ok) { res.status(502).json({ success: false, message: r.message }); return; }
+    res.json({ success: true, claimId: r.claimId, status: r.status });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
 
@@ -91,24 +111,15 @@ router.get('/orders/:id/yango/status', adminAuth, async (req: AuthRequest, res: 
     const info = await getClaimInfo(order.yangoClaimId);
     if (!info.ok || !info.data) { res.status(502).json({ success: false, message: info.error || 'Yango status alına bilmədi' }); return; }
     const status = info.data.status as string;
-    const performer = info.data.performer_info || null;
     const version = (info.data.version as number) ?? undefined;
-
     await prisma.order.update({ where: { id: order.id }, data: { yangoStatus: status, ...(version != null ? { yangoVersion: version } : {}) } }).catch(() => {});
     await syncOrderStatus(order.id, order.status, status);
 
-    res.json({
-      success: true,
-      dispatched: true,
-      status,
-      performer, // courier_name, car_model, car_number, transport_type...
-      routePoints: info.data.route_points || [],
-      pricing: info.data.pricing || null,
-    });
+    res.json({ success: true, dispatched: true, status, performer: info.data.performer_info || null, routePoints: info.data.route_points || [], pricing: info.data.pricing || null });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
 
-// ── Satıcı: Yango çatdırılmasını ləğv et ──────────────────────────────────────
+// ── Satıcı: Yango çatdırılmasını ləğv et (əvvəlcə cancel-info ilə pulsuzmu yoxla) ──
 router.post('/orders/:id/yango/cancel', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
     const id = parseInt(String(req.params.id));
@@ -116,15 +127,37 @@ router.post('/orders/:id/yango/cancel', adminAuth, async (req: AuthRequest, res:
     if (!order || order.sellerId !== req.adminId) { res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return; }
     if (!order.yangoClaimId) { res.status(400).json({ success: false, message: 'Bu sifariş Yango-ya göndərilməyib' }); return; }
 
-    // Cari versiyanı al.
     const info = await getClaimInfo(order.yangoClaimId);
     const version = (info.data?.version as number) ?? order.yangoVersion ?? 1;
-    const cancel = await cancelClaim(order.yangoClaimId, version, 'free');
+    // Pulsuz ləğv mümkündürmü?
+    const ci = await getCancelInfo(order.yangoClaimId);
+    const cancelState: 'free' | 'paid' = ci.data?.cancel_state === 'paid' ? 'paid' : 'free';
+    const cancel = await cancelClaim(order.yangoClaimId, version, cancelState);
     if (!cancel.ok) { res.status(502).json({ success: false, message: cancel.error || 'Yango ləğvi alınmadı' }); return; }
-
     await prisma.order.update({ where: { id: order.id }, data: { yangoStatus: cancel.data?.status || 'cancelled' } }).catch(() => {});
-    res.json({ success: true, status: cancel.data?.status || 'cancelled' });
+    res.json({ success: true, status: cancel.data?.status || 'cancelled', cancelState });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
+// ── Yango webhook (status push). Yango kabinetində bu URL qeyd olunur. ─────────
+// Auth yoxdur (Yango bizim JWT göndərmir) — claim_id üzrə uyğunlaşdırırıq.
+router.post('/yango/callback', async (req: Request, res: Response) => {
+  try {
+    const body = req.body || {};
+    const claimId = body.claim_id || body.id || body.order_id;
+    const status = body.status || body.claim_status;
+    if (claimId && status) {
+      const order = await prisma.order.findFirst({ where: { yangoClaimId: String(claimId) }, select: { id: true, status: true } });
+      if (order) {
+        await prisma.order.update({ where: { id: order.id }, data: { yangoStatus: String(status) } }).catch(() => {});
+        await syncOrderStatus(order.id, order.status, String(status));
+      }
+    }
+    // Yango 200 gözləyir.
+    res.json({ success: true });
+  } catch {
+    res.json({ success: true });
+  }
 });
 
 export default router;
