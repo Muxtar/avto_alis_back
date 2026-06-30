@@ -449,6 +449,12 @@ model Order {
   // Təhvil kodu — alıcı ilə satıcı/kuryer arasında məhsulun düzgün təhvili üçün
   // unikal kod. Yalnız bu kod təsdiqlənəndə DELIVERED olur (səhv təhvilin qarşısını alır).
   pickupCode          String?
+  // Yango (Yandex Delivery) inteqrasiyası
+  yangoClaimId        String? // Yango claim id
+  yangoStatus         String? // Yango status (new/accepted/performer_found/pickuped/delivered/cancelled...)
+  yangoVersion        Int? // accept/cancel üçün lazım olan versiya
+  yangoPrice          Float? // Yango çatdırılma qiyməti
+  yangoCurrency       String?
   scheduledAt         DateTime? // ileri tarihli siparis
   paymentMethod       PaymentMethod   @default(CASH)
   paymentStatus       PaymentStatus   @default(PENDING)

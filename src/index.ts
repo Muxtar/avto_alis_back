@@ -27,6 +27,7 @@ import referralRoutes from './routes/referral';
 import complaintsRoutes from './routes/complaints';
 import businessRoutes from './routes/business';
 import bookingsRoutes from './routes/bookings';
+import yangoRoutes from './routes/yango';
 
 const app = express();
 const PORT = process.env.PORT || 5001;
@@ -99,6 +100,7 @@ app.use('/api', consultationsRoutes);
 app.use('/api', referralRoutes);
 app.use('/api', complaintsRoutes);
 app.use('/api', bookingsRoutes);
+app.use('/api', yangoRoutes);
 
 app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok' });
