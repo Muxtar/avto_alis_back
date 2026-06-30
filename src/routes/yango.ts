@@ -3,7 +3,7 @@ import { PrismaClient } from '@prisma/client';
 import { adminAuth, AuthRequest } from '../middleware/auth';
 import {
   isYangoConfigured, checkPrice, createClaim, acceptClaim, getClaimInfo,
-  getCancelInfo, cancelClaim, mapYangoStatus, type Geo,
+  getPerformerPosition, getCancelInfo, cancelClaim, mapYangoStatus, type Geo,
 } from '../services/yangoDelivery';
 
 const router = Router();
@@ -112,10 +112,27 @@ router.get('/orders/:id/yango/status', adminAuth, async (req: AuthRequest, res: 
     if (!info.ok || !info.data) { res.status(502).json({ success: false, message: info.error || 'Yango status alına bilmədi' }); return; }
     const status = info.data.status as string;
     const version = (info.data.version as number) ?? undefined;
-    await prisma.order.update({ where: { id: order.id }, data: { yangoStatus: status, ...(version != null ? { yangoVersion: version } : {}) } }).catch(() => {});
+
+    // Kuryer aktiv mərhələdədirsə — canlı GPS mövqeyini al və sifarişdə saxla (xəritə üçün).
+    let courierPosition: any = null;
+    if (['accepted', 'performer_found', 'performer_draft', 'pickup_arrived', 'pickuped', 'delivery_arrived'].includes(status)) {
+      const pos = await getPerformerPosition(order.yangoClaimId);
+      if (pos.ok && pos.data?.position && pos.data.position.lat != null && pos.data.position.lon != null) {
+        courierPosition = pos.data.position;
+      }
+    }
+
+    await prisma.order.update({
+      where: { id: order.id },
+      data: {
+        yangoStatus: status,
+        ...(version != null ? { yangoVersion: version } : {}),
+        ...(courierPosition ? { courierLat: courierPosition.lat, courierLng: courierPosition.lon } : {}),
+      },
+    }).catch(() => {});
     await syncOrderStatus(order.id, order.status, status);
 
-    res.json({ success: true, dispatched: true, status, performer: info.data.performer_info || null, routePoints: info.data.route_points || [], pricing: info.data.pricing || null });
+    res.json({ success: true, dispatched: true, status, performer: info.data.performer_info || null, courierPosition, routePoints: info.data.route_points || [], pricing: info.data.pricing || null });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
 

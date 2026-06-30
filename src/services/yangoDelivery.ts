@@ -33,20 +33,21 @@ export interface YangoItem {
 
 async function yreq<T = any>(
   endpoint: string,
-  opts: { query?: Record<string, string>; body?: any } = {}
+  opts: { method?: 'POST' | 'GET'; query?: Record<string, string>; body?: any } = {}
 ): Promise<{ ok: boolean; status: number; data: T | null; error?: string }> {
   if (!TOKEN) return { ok: false, status: 0, data: null, error: 'YANGO_TOKEN qurulmayıb' };
+  const method = opts.method || 'POST';
   const qs = opts.query ? '?' + new URLSearchParams(opts.query).toString() : '';
   const url = `${BASE}${PATH}${endpoint}${qs}`;
   try {
     const res = await fetch(url, {
-      method: 'POST',
+      method,
       headers: {
         Authorization: `Bearer ${TOKEN}`,
         'Content-Type': 'application/json',
         'Accept-Language': LANG,
       },
-      body: JSON.stringify(opts.body ?? {}),
+      body: method === 'GET' ? undefined : JSON.stringify(opts.body ?? {}),
     });
     const text = await res.text();
     let data: any = null;
@@ -125,6 +126,11 @@ export async function acceptClaim(claimId: string, version: number) {
 // Claim statusu + kuryer/marşrut məlumatı.
 export async function getClaimInfo(claimId: string) {
   return yreq('/claims/info', { query: { claim_id: claimId } });
+}
+
+// Kuryerin canlı GPS mövqeyi (lat/lon/timestamp/speed/direction).
+export async function getPerformerPosition(claimId: string) {
+  return yreq('/claims/performer-position', { method: 'GET', query: { claim_id: claimId } });
 }
 
 // Ləğv şərtləri — pulsuz mümkündürmü?
