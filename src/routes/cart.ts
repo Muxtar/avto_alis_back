@@ -2,7 +2,7 @@ import { Router, Response } from 'express';
 import { PrismaClient, UserType } from '@prisma/client';
 import { adminAuth, requireType, AuthRequest } from '../middleware/auth';
 import { createPayment as createGatewayPayment, refundOrder as gatewayRefundOrder } from '../services/paymentGateway';
-import { checkPrice as yangoCheckPrice, isYangoConfigured } from '../services/yangoDelivery';
+import { checkPrice as yangoCheckPrice, isYangoConfigured, YANGO_MAX_WEIGHT_KG } from '../services/yangoDelivery';
 import { dispatchOrderToYango } from './yango';
 
 const PUBLIC_BACKEND_URL = process.env.PUBLIC_BACKEND_URL || `http://localhost:${process.env.PORT || 5001}`;
@@ -284,18 +284,26 @@ router.post('/cart/checkout', requireType(BUYER_TYPES), async (req: AuthRequest,
       } else {
         // Yango (kuryer) — alıcının koordinatı tələb olunur; haqqı check-price ilə hesablanır.
         if (buyerLat == null || buyerLng == null) { res.status(400).json({ success: false, message: 'Yango çatdırılması üçün xəritədən konum seçin' }); return; }
+        const grp = new Map<number, typeof cart.items>();
+        for (const it of cart.items) { const a = grp.get(it.listing.userId) || []; a.push(it); grp.set(it.listing.userId, a); }
+        // Yük limiti (50 kq) — hər satıcı (bir claim) üzrə çəki yoxlanır.
+        for (const [, items] of grp.entries()) {
+          const w = items.reduce((s, i) => s + i.quantity * ((i.listing as any).weightKg || 0), 0);
+          if (w > YANGO_MAX_WEIGHT_KG) {
+            res.status(400).json({ success: false, message: `Sifariş çəkisi ${w} kq-dır — Yango limiti ${YANGO_MAX_WEIGHT_KG} kq. Kuryer mümkün deyil; "mağazadan götürmə" və ya "satıcı özü çatdırır" seçin.` });
+            return;
+          }
+        }
         if (isYangoConfigured()) {
           const objIds = Array.from(new Set(cart.items.map((i) => (i.listing as any).businessObjectId).filter((x): x is number => !!x)));
           const objs = objIds.length ? await prisma.businessObject.findMany({ where: { id: { in: objIds } }, select: { id: true, latitude: true, longitude: true } }) : [];
           const objMap = new Map(objs.map((o) => [o.id, o]));
-          const grp = new Map<number, typeof cart.items>();
-          for (const it of cart.items) { const a = grp.get(it.listing.userId) || []; a.push(it); grp.set(it.listing.userId, a); }
           for (const [sellerId, items] of grp.entries()) {
             const withObj = items.find((i) => (i.listing as any).businessObjectId && objMap.get((i.listing as any).businessObjectId)?.latitude != null);
             const obj = withObj ? objMap.get((withObj.listing as any).businessObjectId) : null;
             if (obj && obj.latitude != null && obj.longitude != null) {
-              const weight = items.reduce((s, i) => s + i.quantity, 0);
-              const q = await yangoCheckPrice({ source: [obj.longitude, obj.latitude], destination: [buyerLng, buyerLat], weightKg: weight });
+              const weightKg = items.reduce((s, i) => s + i.quantity * ((i.listing as any).weightKg || 1), 0);
+              const q = await yangoCheckPrice({ source: [obj.longitude, obj.latitude], destination: [buyerLng, buyerLat], weightKg });
               if (q.ok && q.data?.price) feeBySeller.set(sellerId, parseFloat(String(q.data.price)) || 0);
             }
           }

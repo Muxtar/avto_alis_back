@@ -3,7 +3,7 @@ import { PrismaClient } from '@prisma/client';
 import { adminAuth, AuthRequest } from '../middleware/auth';
 import {
   isYangoConfigured, checkPrice, createClaim, acceptClaim, getClaimInfo,
-  getPerformerPosition, getCancelInfo, cancelClaim, mapYangoStatus, type Geo,
+  getPerformerPosition, getCancelInfo, cancelClaim, mapYangoStatus, YANGO_MAX_WEIGHT_KG, type Geo,
 } from '../services/yangoDelivery';
 
 const router = Router();
@@ -47,11 +47,15 @@ export async function dispatchOrderToYango(orderId: number): Promise<{ ok: boole
   const dstPhone = order.phone || order.buyer.phone || '';
   if (!srcPhone || !dstPhone) return { ok: false, message: 'Göndərən və ya alıcı telefonu yoxdur' };
 
+  // Yük limiti — 50 kq-dan ağır sifariş Yango ilə göndərilə bilməz.
+  const totalWeight = order.items.reduce((s, i) => s + i.quantity * ((i.listing as any)?.weightKg || 0), 0);
+  if (totalWeight > YANGO_MAX_WEIGHT_KG) return { ok: false, message: `Sifariş çəkisi ${totalWeight} kq — Yango limiti ${YANGO_MAX_WEIGHT_KG} kq` };
+
   const claim = await createClaim({
     requestId: `order-${order.id}`,
     source: { fullname: srcAddr, coordinates: [srcLng, srcLat] as Geo, contact: { name: srcName, phone: srcPhone } },
     destination: { fullname: order.address || 'Çatdırılma ünvanı', coordinates: [order.longitude, order.latitude] as Geo, contact: { name: order.buyer.name || 'Alıcı', phone: dstPhone } },
-    items: order.items.map((i) => ({ title: i.title, quantity: i.quantity, costValue: i.price.toFixed(2), costCurrency: 'AZN', weightKg: 1 })),
+    items: order.items.map((i) => ({ title: i.title, quantity: i.quantity, costValue: i.price.toFixed(2), costCurrency: 'AZN', weightKg: (i.listing as any)?.weightKg || 1 })),
     emergencyContact: { name: srcName, phone: srcPhone },
     comment: `tradixai sifariş #${order.id}`,
   });

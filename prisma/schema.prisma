@@ -337,6 +337,8 @@ model Listing {
   // Satıcı VÖEN elanda "məhsulu özüm də çatdıra bilərəm" seçimini aktiv edə bilər.
   // Yango (kuryer) və mağazadan götürmə həmişə mümkündür; bunu satıcı açır.
   allowSelfDelivery Boolean        @default(false)
+  // Məhsulun çəkisi (kq, bir ədəd). Yango yük limiti (50 kq) yoxlanışı üçün.
+  weightKg         Float?
   bookingType      BookingType? // RESERVATION (tarix+saat) | STAY (giriş-çıxış)
   maxGuests        Int? // maksimum qonaq / nəfər sayı
   openTime         String? // rezervasiya üçün açılış saatı "10:00"

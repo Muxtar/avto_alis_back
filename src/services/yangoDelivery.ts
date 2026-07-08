@@ -11,6 +11,9 @@ export function isYangoConfigured(): boolean {
   return !!TOKEN;
 }
 
+// Yango yük limiti (kq). Bundan ağır sifarişlər kuryerlə göndərilə bilməz.
+export const YANGO_MAX_WEIGHT_KG = Number(process.env.YANGO_MAX_WEIGHT_KG || 50);
+
 // [longitude, latitude] — Yango koordinatları belə gözləyir.
 export type Geo = [number, number];
 
