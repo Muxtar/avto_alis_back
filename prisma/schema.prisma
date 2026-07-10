@@ -149,6 +149,9 @@ model User {
   idAiFaceScore         Float? // 0..1
   idAiReason            String? // AI-ın qısa izahı
   idVerifyStatus        VerificationStatus? // null=təqdim olunmayıb, PENDING=admin gözləyir
+  // Veriff (peşəkar KYC) inteqrasiyası — konfiqurasiya olunanda istifadə edilir
+  veriffSessionId       String? // son Veriff sessiyası
+  veriffStatus          String? // Veriff-in xam statusu (approved/declined/resubmission_requested...)
   sellerVerified        Boolean               @default(false) // ≥1 təsdiqlənmiş biznesi var
   sellerVerifiedAt      DateTime?
   sellerApplication     SellerVerification?

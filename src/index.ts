@@ -28,6 +28,7 @@ import complaintsRoutes from './routes/complaints';
 import businessRoutes from './routes/business';
 import bookingsRoutes from './routes/bookings';
 import yangoRoutes from './routes/yango';
+import veriffRoutes from './routes/veriff';
 
 const app = express();
 const PORT = process.env.PORT || 5001;
@@ -72,7 +73,8 @@ app.options('*', cors(corsOptions));
 // Security headers (X-Frame-Options, X-Content-Type-Options, Strict-Transport-Security, etc.)
 // crossOriginResourcePolicy disabled because we serve uploads to the frontend on a different origin.
 app.use(helmet({ crossOriginResourcePolicy: false }));
-app.use(express.json({ limit: '1mb' }));
+// rawBody — webhook HMAC imza yoxlamaları üçün (Veriff və s.).
+app.use(express.json({ limit: '1mb', verify: (req: any, _res, buf) => { req.rawBody = buf; } }));
 
 const uploadsDir = path.join(__dirname, '../uploads');
 fs.mkdirSync(uploadsDir, { recursive: true });
@@ -101,6 +103,7 @@ app.use('/api', referralRoutes);
 app.use('/api', complaintsRoutes);
 app.use('/api', bookingsRoutes);
 app.use('/api', yangoRoutes);
+app.use('/api', veriffRoutes);
 
 app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok' });
