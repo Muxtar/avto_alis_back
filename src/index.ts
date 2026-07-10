@@ -29,6 +29,7 @@ import businessRoutes from './routes/business';
 import bookingsRoutes from './routes/bookings';
 import yangoRoutes from './routes/yango';
 import veriffRoutes from './routes/veriff';
+import contactsRoutes from './routes/contacts';
 
 const app = express();
 const PORT = process.env.PORT || 5001;
@@ -104,6 +105,7 @@ app.use('/api', complaintsRoutes);
 app.use('/api', bookingsRoutes);
 app.use('/api', yangoRoutes);
 app.use('/api', veriffRoutes);
+app.use('/api', contactsRoutes);
 
 app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok' });

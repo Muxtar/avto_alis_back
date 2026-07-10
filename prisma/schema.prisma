@@ -203,6 +203,7 @@ model User {
   givenRatings  SellerRating[] @relation("BuyerRatings")
   guestBookings Booking[]      @relation("GuestBookings")
   hostBookings  Booking[]      @relation("HostBookings")
+  contacts      Contact[]      @relation("OwnContacts")
   notifications Notification[]
 
   // Default location — used on listings + city-search browsing.
@@ -1006,4 +1007,20 @@ model Booking {
   @@index([hostId, createdAt])
   @@index([listingId])
   @@index([status])
+}
+
+// Şəxsi kontakt kitabçası — istifadəçi istədiyi nömrəni əlavə edir
+// (gələcəkdə telefon kontaktlarından sinxron olunacaq — bulk endpoint hazırdır).
+// Nömrə platformada qeydiyyatlıdırsa, siyahıda profil linki göstərilir.
+model Contact {
+  id          Int      @id @default(autoincrement())
+  ownerId     Int
+  name        String
+  phone       String // istifadəçinin yazdığı format
+  phoneDigits String // yalnız rəqəmlər — qeydiyyatlı istifadəçi ilə uyğunlaşdırma üçün
+  createdAt   DateTime @default(now())
+  owner       User     @relation("OwnContacts", fields: [ownerId], references: [id], onDelete: Cascade)
+
+  @@unique([ownerId, phoneDigits])
+  @@index([ownerId])
 }
