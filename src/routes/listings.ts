@@ -176,6 +176,11 @@ router.get('/sellers/:id', async (req: Request, res: Response) => {
         socialLinks: { where: { verified: true }, select: { platform: true, url: true } },
         // Yalnız istifadəçinin public etdiyi peşə sənədləri (YES ikonu ilə).
         professionDocuments: { where: { isPublic: true }, select: { id: true, title: true, image: true, documentType: true } },
+        // Rəsmi işçilik — yalnız təsdiqlənmiş (ACTIVE) üzvlüklər public görünür.
+        businessMemberships: {
+          where: { status: 'ACTIVE' },
+          select: { id: true, business: { select: { id: true, name: true } }, object: { select: { id: true, name: true } } },
+        },
       },
     });
     if (!user) {

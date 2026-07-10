@@ -261,6 +261,27 @@ router.put('/me/credentials/:id/public', adminAuth, async (req: AuthRequest, res
 // ===================== TELEFON NÖMRƏLƏRİ (çoxlu, biri əsas) =====================
 function normPhone(s: any): string { return String(s || '').replace(/[^\d+]/g, ''); }
 
+// Obyektdə satış icazəsi: biznes sahibi VƏ YA satış (canSell) səlahiyyətli ACTIVE işçi.
+// Uğurda { bizId, bizObjId }, xətada { error, code } qaytarır.
+async function resolveObjectForSelling(businessObjectId: any, userId: number): Promise<{ bizId?: number; bizObjId?: number; error?: string; code?: number }> {
+  const obj = await prisma.businessObject.findUnique({
+    where: { id: parseInt(String(businessObjectId)) },
+    include: { business: true },
+  });
+  if (!obj) return { error: 'Seçilmiş obyekt tapılmadı', code: 403 };
+  let allowed = obj.business.userId === userId;
+  if (!allowed) {
+    const mem = await prisma.businessMember.findFirst({
+      where: { businessId: obj.businessId, userId, status: 'ACTIVE', canSell: true, OR: [{ objectId: null }, { objectId: obj.id }] },
+      select: { id: true },
+    });
+    allowed = !!mem;
+  }
+  if (!allowed) return { error: 'Bu obyektdə satış səlahiyyətiniz yoxdur', code: 403 };
+  if (obj.business.status !== 'APPROVED') return { error: 'Biznes hələ təsdiqlənməyib', code: 400 };
+  return { bizId: obj.businessId, bizObjId: obj.id };
+}
+
 router.get('/me/phones', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
     const me = await prisma.user.findUnique({ where: { id: req.adminId! }, select: { phone: true } });
@@ -434,18 +455,10 @@ router.post('/me/listings', listingWriteLimiter, adminAuth, upload.array('images
     let bizId: number | null = null;
     let bizObjId: number | null = null;
     if (businessObjectId) {
-      const obj = await prisma.businessObject.findUnique({
-        where: { id: parseInt(String(businessObjectId)) },
-        include: { business: true },
-      });
-      if (!obj || obj.business.userId !== req.adminId) {
-        res.status(403).json({ success: false, message: 'Seçilmiş obyekt sizə aid deyil' }); return;
-      }
-      if (obj.business.status !== 'APPROVED') {
-        res.status(400).json({ success: false, message: 'Biznes hələ təsdiqlənməyib' }); return;
-      }
-      bizId = obj.businessId;
-      bizObjId = obj.id;
+      const r = await resolveObjectForSelling(businessObjectId, req.adminId!);
+      if (r.error) { res.status(r.code || 403).json({ success: false, message: r.error }); return; }
+      bizId = r.bizId!;
+      bizObjId = r.bizObjId!;
     }
 
     // VÖEN-li elan MÜTLƏQ təsdiqlənmiş biznes obyektinə bağlı olmalıdır (kartla satış).
@@ -602,18 +615,10 @@ router.post('/me/listings/bulk', bulkLimiter, adminAuth, async (req: AuthRequest
     let bizId: number | null = null;
     let bizObjId: number | null = null;
     if (businessObjectId) {
-      const obj = await prisma.businessObject.findUnique({
-        where: { id: parseInt(String(businessObjectId)) },
-        include: { business: true },
-      });
-      if (!obj || obj.business.userId !== req.adminId) {
-        res.status(403).json({ success: false, message: 'Seçilmiş obyekt sizə aid deyil' }); return;
-      }
-      if (obj.business.status !== 'APPROVED') {
-        res.status(400).json({ success: false, message: 'Biznes hələ təsdiqlənməyib' }); return;
-      }
-      bizId = obj.businessId;
-      bizObjId = obj.id;
+      const r = await resolveObjectForSelling(businessObjectId, req.adminId!);
+      if (r.error) { res.status(r.code || 403).json({ success: false, message: r.error }); return; }
+      bizId = r.bizId!;
+      bizObjId = r.bizObjId!;
     }
     // VÖEN-li toplu yükləmədə obyekt mütləqdir.
     if (listingMode === 'voen' && !bizObjId) {

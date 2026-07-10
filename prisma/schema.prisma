@@ -450,6 +450,8 @@ model Order {
   // Çatdırılma metodu (DELIVERY olduqda): kuryer (Yango) və ya satıcı özü — alıcı seçir.
   deliveryMethod      DeliveryMethod? @default(COURIER)
   deliveryFee         Float           @default(0) // Yango çatdırılma haqqı (alıcı ödəyir)
+  // Biznes adına alış — canBuy səlahiyyətli işçi obyekt üçün alış edir.
+  buyerObjectId       Int?
   // Təhvil kodu — alıcı ilə satıcı/kuryer arasında məhsulun düzgün təhvili üçün
   // unikal kod. Yalnız bu kod təsdiqlənəndə DELIVERED olur (səhv təhvilin qarşısını alır).
   pickupCode          String?
@@ -488,6 +490,7 @@ model Order {
   seller              User            @relation("SellerOrders", fields: [sellerId], references: [id], onDelete: Cascade)
   courier             User?           @relation("CourierOrders", fields: [courierId], references: [id], onDelete: SetNull)
   referrer            User?           @relation("ReferralOrders", fields: [referrerId], references: [id], onDelete: SetNull)
+  buyerObject         BusinessObject? @relation("ObjectPurchases", fields: [buyerObjectId], references: [id], onDelete: SetNull)
   promoCode           PromoCode?      @relation(fields: [promoCodeId], references: [id], onDelete: SetNull)
   items               OrderItem[]
   returnRequests      ReturnRequest[]
@@ -818,6 +821,7 @@ model BusinessObject {
   listings        Listing[]
   managers        BusinessMember[]
   referralRules   ReferralRule[]
+  purchases       Order[]          @relation("ObjectPurchases") // bu obyekt adına edilən alışlar
 
   @@index([businessId])
 }
@@ -851,11 +855,22 @@ model ReferralCart {
 
 // Səlahiyyət vermə — sahibi başqa istifadəçiyə bütün biznesin və ya
 // konkret obyektin idarəsini verə bilər (objectId null = bütün biznes).
+// İşçilik statusu — iki tərəfli sorğu/qəbul axını.
+enum MemberStatus {
+  PENDING_BUSINESS // istifadəçi "mən sizin işçinizəm" sorğusu göndərib — biznes sahibi təsdiqləməlidir
+  PENDING_USER // biznes dəvət göndərib — istifadəçi təsdiqləməlidir
+  ACTIVE // rəsmi işçi
+}
+
 model BusinessMember {
   id         Int             @id @default(autoincrement())
   businessId Int
   userId     Int
   objectId   Int?
+  status     MemberStatus    @default(ACTIVE) // köhnə sətirlər aktiv qalır
+  // Sahibin işçiyə verdiyi səlahiyyətlər:
+  canSell    Boolean         @default(true) // obyektin məhsullarını satmaq (elan + sifariş idarəsi)
+  canBuy     Boolean         @default(false) // biznes adına məhsul almaq
   createdAt  DateTime        @default(now())
   business   Business        @relation(fields: [businessId], references: [id], onDelete: Cascade)
   user       User            @relation("BusinessMemberships", fields: [userId], references: [id], onDelete: Cascade)
@@ -863,6 +878,7 @@ model BusinessMember {
 
   @@unique([businessId, userId, objectId])
   @@index([userId])
+  @@index([businessId, status])
 }
 
 // ── Rəy (peşəkar konsultasiyası) ──────────────────────────────────────────────

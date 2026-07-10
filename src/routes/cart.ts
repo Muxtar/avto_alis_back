@@ -237,6 +237,24 @@ router.post('/cart/checkout', requireType(BUYER_TYPES), async (req: AuthRequest,
     const buyerLng = longitude != null && longitude !== '' ? parseFloat(longitude) : null;
     const dMethod: 'COURIER' | 'SELF' = deliveryMethod === 'SELF' ? 'SELF' : 'COURIER';
 
+    // Biznes adına alış — yalnız canBuy səlahiyyətli ACTIVE işçi (və ya sahib) obyekt seçə bilər.
+    let buyerObjectId: number | null = null;
+    if (req.body.buyerObjectId) {
+      const objId = parseInt(String(req.body.buyerObjectId));
+      const obj = await prisma.businessObject.findUnique({ where: { id: objId }, include: { business: { select: { userId: true } } } });
+      if (!obj) { res.status(400).json({ success: false, message: 'Seçilmiş obyekt tapılmadı' }); return; }
+      let allowed = obj.business.userId === req.adminId;
+      if (!allowed) {
+        const mem = await prisma.businessMember.findFirst({
+          where: { businessId: obj.businessId, userId: req.adminId!, status: 'ACTIVE', canBuy: true, OR: [{ objectId: null }, { objectId: objId }] },
+          select: { id: true },
+        });
+        allowed = !!mem;
+      }
+      if (!allowed) { res.status(403).json({ success: false, message: 'Bu obyekt adına alış səlahiyyətiniz yoxdur' }); return; }
+      buyerObjectId = objId;
+    }
+
     const cart = await prisma.cart.findUnique({
       where: { userId: req.adminId! },
       include: { items: { include: { listing: true } } },
@@ -426,6 +444,7 @@ router.post('/cart/checkout', requireType(BUYER_TYPES), async (req: AuthRequest,
             // Çatdırılma metodu alıcının seçimidir (COURIER=Yango | SELF=satıcı özü).
             deliveryMethod: deliveryType === 'PICKUP' ? null : dMethod,
             deliveryFee: sellerDeliveryFee,
+            buyerObjectId, // biznes adına alış (canBuy işçi)
             // Hər sifariş üçün unikal təhvil kodu.
             pickupCode: genPickupCode(),
             scheduledAt: scheduledAt ? new Date(scheduledAt) : null,
@@ -589,6 +608,7 @@ router.get('/orders/buying', adminAuth, async (req: AuthRequest, res: Response) 
           },
         },
         courier: { select: { id: true, name: true, phone: true } },
+        buyerObject: { select: { id: true, name: true } },
         returnRequests: { include: { orderItem: true } },
       },
       orderBy: { createdAt: 'desc' },
@@ -609,6 +629,7 @@ router.get('/orders/selling', adminAuth, async (req: AuthRequest, res: Response)
       include: {
         items: true,
         buyer: { select: { id: true, name: true, phone: true } },
+        buyerObject: { select: { id: true, name: true } },
         referrer: { select: { id: true, name: true, profession: true } },
         returnRequests: {
           include: {

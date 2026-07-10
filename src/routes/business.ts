@@ -465,18 +465,166 @@ router.post('/me/businesses/:id/members', adminAuth, async (req: AuthRequest, re
       if (!o || o.businessId !== businessId) { res.status(400).json({ success: false, message: 'Obyekt bu biznesə aid deyil' }); return; }
       objId = parseInt(String(objectId));
     }
+    // Eyni biznesdə mövcud üzvlük/sorğu varsa təkrar yaratma.
+    const existing = await prisma.businessMember.findFirst({ where: { businessId, userId: target.id } });
+    if (existing) { res.status(400).json({ success: false, message: 'Bu istifadəçi ilə artıq üzvlük/sorğu mövcuddur' }); return; }
+
+    const biz = await prisma.business.findUnique({ where: { id: businessId }, select: { name: true } });
+    // Dəvət — istifadəçi qəbul edənə qədər PENDING_USER statusunda qalır.
     const member = await prisma.businessMember.create({
-      data: { businessId, userId: target.id, objectId: objId },
+      data: {
+        businessId, userId: target.id, objectId: objId,
+        status: 'PENDING_USER',
+        canSell: req.body.canSell === undefined ? true : !!req.body.canSell,
+        canBuy: !!req.body.canBuy,
+      },
       include: { user: { select: { id: true, name: true, publicId: true } }, object: { select: { id: true, name: true } } },
     });
     await prisma.notification.create({
-      data: { userId: target.id, type: 'SYSTEM', title: 'Biznes idarəetməsi', body: 'Sizə bir biznes/obyektin idarəsi verildi.', link: '/business/managed' },
+      data: { userId: target.id, type: 'SYSTEM', title: 'İşçi dəvəti', body: `«${biz?.name || 'Biznes'}» sizi işçi kimi əlavə etmək istəyir. Profilinizdən qəbul edin.`, link: '/profile' },
     }).catch(() => {});
     res.status(201).json({ success: true, member });
   } catch (error: any) {
     if (error?.code === 'P2002') { res.status(400).json({ success: false, message: 'Bu istifadəçi artıq əlavə edilib' }); return; }
     res.status(400).json({ success: false, message: error.message });
   }
+});
+
+// ==================== İŞÇİLİK (sorğu/qəbul axını) ====================
+
+// Biznes axtarışı — ad və ya VÖEN ilə (işçi öz şirkətini tapmaq üçün).
+router.get('/businesses/search', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const q = String(req.query.q || '').trim();
+    if (q.length < 2) { res.json({ success: true, businesses: [] }); return; }
+    const businesses = await prisma.business.findMany({
+      where: {
+        status: 'APPROVED', isActive: true,
+        OR: [
+          { name: { contains: q, mode: 'insensitive' } },
+          { voen: { contains: q } },
+        ],
+      },
+      select: { id: true, name: true, voen: true, userId: true, _count: { select: { objects: true } } },
+      take: 10,
+    });
+    res.json({ success: true, businesses });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
+// İstifadəçi → biznesə "mən sizin işçinizəm" sorğusu göndərir.
+router.post('/businesses/:id/join-request', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const businessId = parseInt(req.params.id);
+    const biz = await prisma.business.findUnique({ where: { id: businessId }, select: { userId: true, name: true, status: true, isActive: true } });
+    if (!biz || biz.status !== 'APPROVED' || !biz.isActive) { res.status(404).json({ success: false, message: 'Biznes tapılmadı və ya aktiv deyil' }); return; }
+    if (biz.userId === req.adminId) { res.status(400).json({ success: false, message: 'Öz biznesinizə sorğu göndərə bilməzsiniz' }); return; }
+    const existing = await prisma.businessMember.findFirst({ where: { businessId, userId: req.adminId! } });
+    if (existing) {
+      const msg = existing.status === 'ACTIVE' ? 'Artıq bu biznesin işçisisiniz' : 'Bu biznesə artıq sorğu/dəvət mövcuddur';
+      res.status(400).json({ success: false, message: msg }); return;
+    }
+    // İşçi sorğusu — sahib qəbul edənə qədər səlahiyyətsiz.
+    const member = await prisma.businessMember.create({
+      data: { businessId, userId: req.adminId!, status: 'PENDING_BUSINESS', canSell: false, canBuy: false },
+    });
+    const me = await prisma.user.findUnique({ where: { id: req.adminId! }, select: { name: true } });
+    await prisma.notification.create({
+      data: { userId: biz.userId, type: 'SYSTEM', title: 'Yeni işçi sorğusu', body: `${me?.name || 'Bir istifadəçi'} «${biz.name}» biznesinin işçisi olduğunu bildirir. Biznes səhifəsindən təsdiqləyin.`, link: '/business' },
+    }).catch(() => {});
+    res.status(201).json({ success: true, member });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
+// Sahib: işçi sorğusunu qəbul/rədd et və ya səlahiyyətləri dəyiş.
+router.put('/me/businesses/:id/members/:memberId', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const businessId = parseInt(req.params.id);
+    if (!(await ownsBiz(businessId, req.adminId!))) { res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return; }
+    const memberId = parseInt(req.params.memberId);
+    const m = await prisma.businessMember.findUnique({ where: { id: memberId }, include: { business: { select: { name: true } } } });
+    if (!m || m.businessId !== businessId) { res.status(404).json({ success: false, message: 'Üzv tapılmadı' }); return; }
+
+    const action = String(req.body.action || '');
+    if (action === 'reject') {
+      await prisma.businessMember.delete({ where: { id: memberId } });
+      res.json({ success: true, removed: true }); return;
+    }
+
+    const data: any = {};
+    if (action === 'accept') {
+      if (m.status !== 'PENDING_BUSINESS') { res.status(400).json({ success: false, message: 'Bu sorğu təsdiq gözləmir' }); return; }
+      data.status = 'ACTIVE';
+      await prisma.notification.create({
+        data: { userId: m.userId, type: 'SYSTEM', title: 'İşçi sorğusu qəbul edildi', body: `«${m.business.name}» sizi rəsmi işçi kimi təsdiqlədi.`, link: '/profile' },
+      }).catch(() => {});
+    }
+    // Səlahiyyət dəyişiklikləri (yalnız sahib):
+    if (req.body.canSell !== undefined) data.canSell = !!req.body.canSell;
+    if (req.body.canBuy !== undefined) data.canBuy = !!req.body.canBuy;
+    if (req.body.objectId !== undefined) {
+      if (req.body.objectId === null || req.body.objectId === '') data.objectId = null;
+      else {
+        const o = await prisma.businessObject.findUnique({ where: { id: parseInt(String(req.body.objectId)) }, select: { businessId: true } });
+        if (!o || o.businessId !== businessId) { res.status(400).json({ success: false, message: 'Obyekt bu biznesə aid deyil' }); return; }
+        data.objectId = parseInt(String(req.body.objectId));
+      }
+    }
+    if (Object.keys(data).length === 0) { res.status(400).json({ success: false, message: 'Dəyişiklik yoxdur' }); return; }
+
+    const updated = await prisma.businessMember.update({
+      where: { id: memberId }, data,
+      include: { user: { select: { id: true, name: true, publicId: true } }, object: { select: { id: true, name: true } } },
+    });
+    res.json({ success: true, member: updated });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
+// İstifadəçi: mənim işçiliklərim (bütün statuslar).
+router.get('/me/employment', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const memberships = await prisma.businessMember.findMany({
+      where: { userId: req.adminId! },
+      include: {
+        // objects — "bütün biznes" üzvlüyündə alış üçün obyekt seçiminə lazımdır.
+        business: { select: { id: true, name: true, voen: true, objects: { select: { id: true, name: true }, where: { isActive: true } } } },
+        object: { select: { id: true, name: true } },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+    res.json({ success: true, memberships });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
+// İstifadəçi: dəvətə cavab ver (accept/reject) və ya işdən ayrıl (leave).
+router.put('/me/employment/:id', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const id = parseInt(req.params.id);
+    const m = await prisma.businessMember.findUnique({ where: { id }, include: { business: { select: { userId: true, name: true } } } });
+    if (!m || m.userId !== req.adminId) { res.status(404).json({ success: false, message: 'Tapılmadı' }); return; }
+    const action = String(req.body.action || '');
+
+    if (action === 'accept') {
+      if (m.status !== 'PENDING_USER') { res.status(400).json({ success: false, message: 'Bu dəvət təsdiq gözləmir' }); return; }
+      const updated = await prisma.businessMember.update({ where: { id }, data: { status: 'ACTIVE' } });
+      const me = await prisma.user.findUnique({ where: { id: req.adminId! }, select: { name: true } });
+      await prisma.notification.create({
+        data: { userId: m.business.userId, type: 'SYSTEM', title: 'İşçi dəvəti qəbul edildi', body: `${me?.name || 'İstifadəçi'} «${m.business.name}» işçi dəvətini qəbul etdi.`, link: '/business' },
+      }).catch(() => {});
+      res.json({ success: true, member: updated }); return;
+    }
+    if (action === 'reject' || action === 'leave') {
+      await prisma.businessMember.delete({ where: { id } });
+      if (action === 'leave' && m.status === 'ACTIVE') {
+        const me = await prisma.user.findUnique({ where: { id: req.adminId! }, select: { name: true } });
+        await prisma.notification.create({
+          data: { userId: m.business.userId, type: 'SYSTEM', title: 'İşçi ayrıldı', body: `${me?.name || 'İstifadəçi'} «${m.business.name}» biznesindən ayrıldı.`, link: '/business' },
+        }).catch(() => {});
+      }
+      res.json({ success: true, removed: true }); return;
+    }
+    res.status(400).json({ success: false, message: 'Yanlış əməliyyat' });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
 
 router.delete('/me/members/:id', adminAuth, async (req: AuthRequest, res: Response) => {
@@ -495,7 +643,7 @@ router.delete('/me/members/:id', adminAuth, async (req: AuthRequest, res: Respon
 router.get('/me/managed', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
     const memberships = await prisma.businessMember.findMany({
-      where: { userId: req.adminId },
+      where: { userId: req.adminId, status: 'ACTIVE' },
       include: {
         business: { select: { id: true, name: true, isActive: true, status: true } },
         object: { select: { id: true, name: true } },
@@ -520,7 +668,7 @@ router.get('/me/businesses/:id/orders', adminAuth, async (req: AuthRequest, res:
     let allowed = biz.userId === req.adminId;
     if (!allowed) {
       const mem = await prisma.businessMember.findFirst({
-        where: { businessId, userId: req.adminId, OR: [{ objectId: null }, ...(objectId ? [{ objectId }] : [])] },
+        where: { businessId, userId: req.adminId, status: 'ACTIVE', canSell: true, OR: [{ objectId: null }, ...(objectId ? [{ objectId }] : [])] },
       });
       allowed = !!mem;
     }
@@ -590,7 +738,7 @@ router.put('/me/business-orders/:orderId/status', adminAuth, async (req: AuthReq
     let allowed = owns > 0;
     if (!allowed) {
       const mem = await prisma.businessMember.count({
-        where: { userId: req.adminId, businessId: { in: bizIds }, OR: [{ objectId: null }, { objectId: { in: objIds } }] },
+        where: { userId: req.adminId, businessId: { in: bizIds }, status: 'ACTIVE', canSell: true, OR: [{ objectId: null }, { objectId: { in: objIds } }] },
       });
       allowed = mem > 0;
     }
