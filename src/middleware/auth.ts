@@ -30,6 +30,17 @@ export function generateToken(userId: number): string {
   return jwt.sign({ userId }, SIGNING_KEY, { expiresIn: '24h' });
 }
 
+// Token-i yoxla və userId qaytar (socket.io kimi HTTP-dən kənar auth üçün).
+export function verifyTokenUserId(token: string | undefined): number | null {
+  if (!token) return null;
+  try {
+    const decoded = jwt.verify(token, SIGNING_KEY) as { userId: number };
+    return decoded.userId || null;
+  } catch {
+    return null;
+  }
+}
+
 // General auth - any logged in user
 export function adminAuth(req: AuthRequest, res: Response, next: NextFunction) {
   const token = req.headers.authorization?.replace('Bearer ', '');

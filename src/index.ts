@@ -1,8 +1,10 @@
 import express, { Request, Response, NextFunction } from 'express';
+import http from 'http';
 import cors from 'cors';
 import helmet from 'helmet';
 import path from 'path';
 import fs from 'fs';
+import { initCallSignaling } from './services/callSignaling';
 import { PrismaClient } from '@prisma/client';
 import sharp from 'sharp';
 import authRoutes from './routes/auth';
@@ -210,7 +212,11 @@ async function backfillOptimizeImages() {
   }
 }
 
-app.listen(PORT, () => {
+// HTTP server — socket.io (səsli/görüntülü zəng siqnalları) eyni portda işləyir.
+const server = http.createServer(app);
+initCallSignaling(server, allowedOrigins);
+
+server.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
   console.log(`CORS origins: ${allowedOrigins.join(', ')}`);
   backfillListingExpiresAt();
