@@ -23,12 +23,18 @@ router.get('/listings', async (req: Request, res: Response) => {
       ],
     };
     if (search) {
+      const s = search as string;
+      // Ümumi axtarış: məhsul/xidmət (başlıq, təsvir, marka, model),
+      // satıcının adı-soyadı, şirkət adı və biznes obyekti adı.
       (where.AND as Prisma.ListingWhereInput[]).push({
         OR: [
-          { title: { contains: search as string, mode: 'insensitive' } },
-          { description: { contains: search as string, mode: 'insensitive' } },
-          { brand: { contains: search as string, mode: 'insensitive' } },
-          { model: { contains: search as string, mode: 'insensitive' } },
+          { title: { contains: s, mode: 'insensitive' } },
+          { description: { contains: s, mode: 'insensitive' } },
+          { brand: { contains: s, mode: 'insensitive' } },
+          { model: { contains: s, mode: 'insensitive' } },
+          { user: { name: { contains: s, mode: 'insensitive' } } },
+          { business: { name: { contains: s, mode: 'insensitive' } } },
+          { businessObject: { name: { contains: s, mode: 'insensitive' } } },
         ],
       });
     }
@@ -72,16 +78,18 @@ router.get('/listings', async (req: Request, res: Response) => {
       if (maxYear !== undefined && !Number.isNaN(maxYear)) where.year.lte = maxYear;
     }
 
-    const sortMap: Record<string, Prisma.ListingOrderByWithRelationInput> = {
-      price_asc: { price: 'asc' },
-      price_desc: { price: 'desc' },
-      date_asc: { createdAt: 'asc' },
-      date_desc: { createdAt: 'desc' },
-      popular: { viewCount: 'desc' },
-      year_asc: { year: 'asc' },
-      year_desc: { year: 'desc' },
+    // id ilə tie-break — eyni createdAt/price/year olan elanlarda ən son
+    // əlavə olunan (ən böyük id) həmişə birinci; stabil pagination.
+    const sortMap: Record<string, Prisma.ListingOrderByWithRelationInput[]> = {
+      price_asc: [{ price: 'asc' }, { id: 'desc' }],
+      price_desc: [{ price: 'desc' }, { id: 'desc' }],
+      date_asc: [{ createdAt: 'asc' }, { id: 'asc' }],
+      date_desc: [{ createdAt: 'desc' }, { id: 'desc' }],
+      popular: [{ viewCount: 'desc' }, { id: 'desc' }],
+      year_asc: [{ year: 'asc' }, { id: 'desc' }],
+      year_desc: [{ year: 'desc' }, { id: 'desc' }],
     };
-    const orderBy = sortMap[sort as string] || { createdAt: 'desc' };
+    const orderBy = sortMap[sort as string] || [{ createdAt: 'desc' }, { id: 'desc' }];
 
     const [listings, total] = await Promise.all([
       prisma.listing.findMany({
