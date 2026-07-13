@@ -17,7 +17,6 @@
     "@prisma/client": "^6.5.0",
     "@types/nodemailer": "^8.0.1",
     "bcryptjs": "^3.0.3",
-    "cloudinary": "^2.10.0",
     "cors": "^2.8.5",
     "express": "^4.21.0",
     "helmet": "^8.1.0",

@@ -4,8 +4,6 @@ import { adminAuth, AuthRequest } from '../middleware/auth';
 import { getProvider, isConfigured, signState, verifyState, OAUTH_PLATFORMS } from '../services/socialOauth';
 import { upload, docUpload } from '../middleware/upload';
 import { processImages } from '../middleware/imageProcess';
-import { cloudinaryUpload } from '../middleware/cloudinaryUpload';
-import { deleteFromCloudinary } from '../services/cloudinaryStore';
 import { listingWriteLimiter, bulkLimiter, otpLimiter } from '../middleware/rateLimiter';
 import { extractPassportFromFiles } from '../services/vehiclePassportAI';
 import { analyzeCredential, verifyIdentityAI, extractIdName } from '../services/credentialAI';
@@ -364,7 +362,7 @@ router.delete('/me/phones/:id', adminAuth, async (req: AuthRequest, res: Respons
 });
 
 // Profil şəkli yüklə.
-router.post('/me/avatar', adminAuth, upload.single('avatar'), processImages, cloudinaryUpload, async (req: AuthRequest, res: Response) => {
+router.post('/me/avatar', adminAuth, upload.single('avatar'), processImages, async (req: AuthRequest, res: Response) => {
   try {
     const file = req.file as Express.Multer.File | undefined;
     if (!file) { res.status(400).json({ success: false, message: 'Şəkil tələb olunur' }); return; }
@@ -437,7 +435,7 @@ router.get('/me/listings', adminAuth, async (req: AuthRequest, res: Response) =>
 // Create my listing — any logged-in user can post (PRODUCT or SERVICE).
 // If `city`/`location` aren't provided, falls back to the user's default
 // location from their profile so listings always carry where they're from.
-router.post('/me/listings', listingWriteLimiter, adminAuth, upload.array('images', 5), processImages, cloudinaryUpload, async (req: AuthRequest, res: Response) => {
+router.post('/me/listings', listingWriteLimiter, adminAuth, upload.array('images', 5), processImages, async (req: AuthRequest, res: Response) => {
   try {
     const { title, description, price, category, type, location, phone, condition, country, brand, stock, forVehicle, unit, unitValue, year, model, city, fuelType, paymentType, businessObjectId, attributes, listingMode, barter, forRent, bookable, bookingType, maxGuests, openTime, closeTime, deliveryMethod } = req.body;
     const isBookable = bookable === true || bookable === 'true';
@@ -522,7 +520,7 @@ router.post('/me/listings', listingWriteLimiter, adminAuth, upload.array('images
 // Pass `existingImages` as a JSON-stringified array of filenames to keep;
 // any image previously stored but not in the array is deleted from disk.
 // New uploads via `images` field are appended (total cap = 5).
-router.put('/me/listings/:id', adminAuth, upload.array('images', 5), processImages, cloudinaryUpload, async (req: AuthRequest, res: Response) => {
+router.put('/me/listings/:id', adminAuth, upload.array('images', 5), processImages, async (req: AuthRequest, res: Response) => {
   try {
     const existing = await prisma.listing.findUnique({ where: { id: parseInt(req.params.id) } });
     if (!existing || existing.userId !== req.adminId) {
@@ -545,12 +543,9 @@ router.put('/me/listings/:id', adminAuth, upload.array('images', 5), processImag
           kept = existing.images;
         }
       }
-      // Çıxarılan şəkilləri təmizlə (Cloudinary URL → bulud, yerli → disk).
+      // Çıxarılan şəkilləri diskdən sil.
       const removed = existing.images.filter((img) => !kept.includes(img));
-      for (const img of removed) {
-        if (/^https?:\/\//.test(img)) { deleteFromCloudinary(img); continue; }
-        fs.unlink(path.join(__dirname, '../../uploads', img), () => {});
-      }
+      for (const img of removed) fs.unlink(path.join(__dirname, '../../uploads', img), () => {});
       nextImages = [...kept, ...newFiles.map((f) => f.filename)].slice(0, 5);
     }
 
@@ -711,13 +706,8 @@ router.delete('/me/listings/:id', adminAuth, async (req: AuthRequest, res: Respo
       res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return;
     }
 
-    // Şəkilləri təmizlə — Cloudinary URL-lərini buluddan, yerliləri diskdən.
-    if (existing.images && existing.images.length > 0) {
-      for (const img of existing.images) {
-        if (/^https?:\/\//.test(img)) { deleteFromCloudinary(img); continue; }
-        fs.unlink(path.join(__dirname, '../../uploads', img), () => {});
-      }
-    }
+    // Elan şəkillərini diskdən sil.
+    if (existing.images) for (const img of existing.images) fs.unlink(path.join(__dirname, "../../uploads", img), () => {});
 
     await prisma.listing.delete({ where: { id: existing.id } });
     res.json({ success: true });
