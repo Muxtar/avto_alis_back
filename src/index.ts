@@ -79,7 +79,9 @@ app.use(helmet({ crossOriginResourcePolicy: false }));
 // rawBody — webhook HMAC imza yoxlamaları üçün (Veriff və s.).
 app.use(express.json({ limit: '1mb', verify: (req: any, _res, buf) => { req.rawBody = buf; } }));
 
-const uploadsDir = path.join(__dirname, '../uploads');
+// UPLOADS_DIR env qoyulubsa (Railway persistent Volume) oradan servis edilir —
+// yüklənən şəkillər deploy-lar arasında qalıcı olur (upload.ts ilə eyni path).
+const uploadsDir = process.env.UPLOADS_DIR || path.join(__dirname, '../uploads');
 fs.mkdirSync(uploadsDir, { recursive: true });
 app.use('/uploads', express.static(uploadsDir));
 

@@ -2,7 +2,9 @@ import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
 
-const UPLOADS_DIR = path.join(__dirname, '../../uploads');
+// UPLOADS_DIR env qoyulubsa (Railway persistent Volume, məs. /data/uploads)
+// oradan istifadə edilir — şəkillər deploy-lar arasında SİLİNMİR.
+const UPLOADS_DIR = process.env.UPLOADS_DIR || path.join(__dirname, '../../uploads');
 
 // Railway / fresh deploylarda uploads/ klasörü olmaya bilər — startup'da yaradırıq
 try {
