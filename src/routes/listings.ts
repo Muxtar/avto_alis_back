@@ -326,6 +326,26 @@ router.post('/listings/:id/comments', adminAuth, async (req: AuthRequest, res: R
   }
 });
 
+// Şərhi redaktə et — yalnız sahibi.
+router.put('/comments/:id', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const comment = await prisma.comment.findUnique({ where: { id: parseInt(req.params.id) } });
+    if (!comment) { res.status(404).json({ success: false, message: 'Şərh tapılmadı' }); return; }
+    if (comment.userId !== req.adminId) { res.status(403).json({ success: false, message: 'Yalnız öz şərhinizi dəyişə bilərsiniz' }); return; }
+    const trimmed = typeof req.body.content === 'string' ? req.body.content.trim() : '';
+    if (!trimmed) { res.status(400).json({ success: false, message: 'Şərh mətni tələb olunur' }); return; }
+    if (trimmed.length > 1000) { res.status(400).json({ success: false, message: 'Şərh çox uzundur (maks 1000 simvol)' }); return; }
+    const updated = await prisma.comment.update({
+      where: { id: comment.id },
+      data: { content: trimmed },
+      include: { user: { select: { id: true, name: true, type: true } } },
+    });
+    res.json({ success: true, comment: updated });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
 // Delete comment (auth required, only owner can delete)
 router.delete('/comments/:id', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
