@@ -2,9 +2,12 @@ import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
 
-// UPLOADS_DIR env qoyulubsa (Railway persistent Volume, məs. /data/uploads)
-// oradan istifadə edilir — şəkillər deploy-lar arasında SİLİNMİR.
-const UPLOADS_DIR = process.env.UPLOADS_DIR || path.join(__dirname, '../../uploads');
+// Şəkillərin saxlandığı qovluq. Railway persistent Volume mount ediləndə
+// avtomatik RAILWAY_VOLUME_MOUNT_PATH qoyulur — bu halda şəkillər deploy-lar
+// arasında SİLİNMİR. UPLOADS_DIR əl ilə də verilə bilər.
+const UPLOADS_DIR =
+  process.env.UPLOADS_DIR ||
+  (process.env.RAILWAY_VOLUME_MOUNT_PATH ? path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH, 'uploads') : path.join(__dirname, '../../uploads'));
 
 // Railway / fresh deploylarda uploads/ klasörü olmaya bilər — startup'da yaradırıq
 try {
