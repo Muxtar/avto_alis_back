@@ -1,14 +1,15 @@
 // Veriff (peşəkar KYC/şəxsiyyət doğrulama) inteqrasiyası.
 // Sənəd: https://devdocs.veriff.com
 // Açarlar KODA YAZILMIR — env-dən oxunur (Railway):
-//   VERIFF_API_KEY    — inteqrasiyanın API açarı (X-AUTH-CLIENT)
-//   VERIFF_SECRET     — shared secret (HMAC imzaları üçün)
-//   VERIFF_BASE_URL   — default https://stationapi.veriff.com
+//   VERIFF_API_KEY        — inteqrasiyanın API açarı (X-AUTH-CLIENT)
+//   VERIFF_SECRET         — shared secret (HMAC imzaları üçün); VERIFF_SHARED_SECRET adı da qəbul olunur
+//   VERIFF_BASE_URL       — default https://stationapi.veriff.com
 import crypto from 'crypto';
 
 const BASE = process.env.VERIFF_BASE_URL || 'https://stationapi.veriff.com';
 const API_KEY = process.env.VERIFF_API_KEY || '';
-const SECRET = process.env.VERIFF_SECRET || '';
+// Veriff kabineti bu açarı "Shared secret" adlandırır — hər iki env adını qəbul edirik.
+const SECRET = process.env.VERIFF_SECRET || process.env.VERIFF_SHARED_SECRET || '';
 
 export function isVeriffConfigured(): boolean {
   return !!(API_KEY && SECRET);
