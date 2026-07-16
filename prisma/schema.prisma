@@ -377,6 +377,15 @@ model Listing {
   @@index([businessObjectId])
 }
 
+enum MessageType {
+  TEXT
+  IMAGE
+  FILE
+  AUDIO // səs mesajı
+  VIDEO // video mesaj (video note)
+  CONTACT // paylaşılan kontakt
+}
+
 model Message {
   id             Int                  @id @default(autoincrement())
   senderId       Int
@@ -384,6 +393,14 @@ model Message {
   listingId      Int?
   consultationId Int? // dolu olarsa bu mesaj "Rəy" konsultasiyasına aiddir (ayrı icon)
   content        String
+  type           MessageType          @default(TEXT)
+  mediaUrl       String? // yüklənmiş faylın adı (şəkil/fayl/audio/video)
+  mediaName      String? // orijinal fayl adı, və ya paylaşılan kontaktın adı
+  mediaMime      String?
+  mediaSize      Int? // bayt
+  mediaDuration  Int? // saniyə (audio/video)
+  contactPhone   String? // paylaşılan kontaktın nömrəsi
+  contactUserId  Int? // paylaşılan kontakt qeydiyyatlı istifadəçidirsə
   read           Boolean              @default(false)
   deliveredAt    DateTime? // qarşı tərəf onlayn olub aldı (tək ✓ → ✓✓)
   editedAt       DateTime? // redaktə olunubsa

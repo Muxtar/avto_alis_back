@@ -45,6 +45,39 @@ export const upload = multer({
   },
 });
 
+// Çat media üçün: şəkil, səs, video və sənəd (WhatsApp kimi). Fayllar "chat-" prefiksi ilə saxlanır.
+const chatStorage = multer.diskStorage({
+  destination: (_req, _file, cb) => cb(null, UPLOADS_DIR),
+  filename: (_req, file, cb) => {
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
+    const ext = path.extname(file.originalname);
+    cb(null, `chat-${uniqueSuffix}${ext}`);
+  },
+});
+
+export const chatUpload = multer({
+  storage: chatStorage,
+  limits: { fileSize: 30 * 1024 * 1024 }, // 30 MB (səs/video/sənəd)
+  fileFilter: (_req, file, cb) => {
+    const mime = file.mimetype || '';
+    const name = file.originalname.toLowerCase();
+    const okMime =
+      /^(image|audio|video)\//.test(mime) ||
+      mime === 'application/pdf' ||
+      mime === 'application/msword' ||
+      mime.startsWith('application/vnd.openxmlformats-officedocument') ||
+      mime === 'application/vnd.ms-excel' ||
+      mime === 'application/vnd.ms-powerpoint' ||
+      mime === 'text/plain' ||
+      mime === 'application/zip' ||
+      mime === 'application/x-zip-compressed';
+    const okExt = /\.(jpe?g|png|webp|heic|heif|gif|mp3|m4a|aac|ogg|opus|wav|webm|mp4|mov|3gp|pdf|docx?|xlsx?|pptx?|txt|zip)$/i.test(name);
+    // Mobil klientlər bəzən octet-stream göndərir — yalnız icazəli uzantı varsa qəbul et.
+    if (okMime || (mime === 'application/octet-stream' && okExt) || okExt) cb(null, true);
+    else cb(new Error('Bu fayl növü dəstəklənmir'));
+  },
+});
+
 // Biznes sənədləri üçün: şəkillərə əlavə PDF də qəbul edir (vergi/bank sənədi PDF ola bilər).
 export const docUpload = multer({
   storage,
