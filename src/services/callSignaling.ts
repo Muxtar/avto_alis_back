@@ -11,6 +11,16 @@ import { verifyTokenUserId } from '../middleware/auth';
 
 const prisma = new PrismaClient();
 
+// Routes-dan real-time push üçün ortaq io referansı (çat mesajları, oxundu və s.).
+let ioRef: Server | null = null;
+export function emitToUser(userId: number, event: string, payload: any) {
+  ioRef?.to(`u:${userId}`).emit(event, payload);
+}
+export function isUserOnline(userId: number): boolean {
+  const room = ioRef?.sockets.adapter.rooms.get(`u:${userId}`);
+  return !!room && room.size > 0;
+}
+
 function iceServers() {
   const servers: any[] = [
     { urls: 'stun:stun.l.google.com:19302' },
@@ -31,6 +41,7 @@ export function initCallSignaling(httpServer: HttpServer, allowedOrigins: string
     cors: { origin: allowedOrigins, credentials: true },
     path: '/socket.io',
   });
+  ioRef = io;
 
   // Auth — handshake-də JWT token tələb olunur.
   io.use((socket, next) => {
@@ -81,6 +92,16 @@ export function initCallSignaling(httpServer: HttpServer, allowedOrigins: string
     socket.on('call:signal', (p: { to: number; data: any }) => {
       const to = parseInt(String(p?.to));
       if (to && p?.data) io.to(`u:${to}`).emit('call:signal', { from: userId, data: p.data });
+    });
+
+    // ── Çat: "yazır..." göstəricisi (yalnız ötürülür, saxlanmır) ──
+    socket.on('chat:typing', (p: { to: number }) => {
+      const to = parseInt(String(p?.to));
+      if (to && to !== userId) io.to(`u:${to}`).emit('chat:typing', { from: userId });
+    });
+    socket.on('chat:stopTyping', (p: { to: number }) => {
+      const to = parseInt(String(p?.to));
+      if (to && to !== userId) io.to(`u:${to}`).emit('chat:stopTyping', { from: userId });
     });
   });
 

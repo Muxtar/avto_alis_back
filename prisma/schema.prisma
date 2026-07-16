@@ -385,11 +385,34 @@ model Message {
   consultationId Int? // dolu olarsa bu mesaj "Rəy" konsultasiyasına aiddir (ayrı icon)
   content        String
   read           Boolean              @default(false)
+  deliveredAt    DateTime? // qarşı tərəf onlayn olub aldı (tək ✓ → ✓✓)
+  editedAt       DateTime? // redaktə olunubsa
+  deletedAt      DateTime? // "hamı üçün sil" — sətir qalır, mətn boşalır
+  replyToId      Int? // cavab verilən mesaj
   createdAt      DateTime             @default(now())
   sender         User                 @relation("SentMessages", fields: [senderId], references: [id], onDelete: Cascade)
   receiver       User                 @relation("ReceivedMessages", fields: [receiverId], references: [id], onDelete: Cascade)
   listing        Listing?             @relation(fields: [listingId], references: [id], onDelete: SetNull)
   consultation   ConsultationSession? @relation(fields: [consultationId], references: [id], onDelete: SetNull)
+  replyTo        Message?             @relation("MessageReplies", fields: [replyToId], references: [id], onDelete: SetNull)
+  replies        Message[]            @relation("MessageReplies")
+  reactions      MessageReaction[]
+
+  @@index([senderId, receiverId])
+  @@index([receiverId, read])
+}
+
+// Mesaja emoji reaksiya — hər istifadəçi bir mesaja bir emoji (WhatsApp kimi).
+model MessageReaction {
+  id        Int      @id @default(autoincrement())
+  messageId Int
+  userId    Int
+  emoji     String
+  createdAt DateTime @default(now())
+  message   Message  @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  @@unique([messageId, userId])
+  @@index([messageId])
 }
 
 model Comment {
