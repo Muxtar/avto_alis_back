@@ -220,7 +220,7 @@ router.get('/objects/:id', async (req: Request, res: Response) => {
         latitude: true, longitude: true, activityAreas: true, isActive: true,
         referralEnabled: true,
         referralRules: { select: { profession: true, commissionPercent: true, requiredDoc: true } },
-        business: { select: { id: true, name: true, status: true } },
+        business: { select: { id: true, name: true, status: true, website: true, instagram: true, facebook: true, tiktok: true, youtube: true, linkedin: true } },
       },
     });
     if (!object || !object.isActive) { res.status(404).json({ success: false, message: 'Obyekt tapılmadı' }); return; }

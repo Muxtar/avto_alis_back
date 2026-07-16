@@ -137,6 +137,9 @@ router.post('/me/businesses', adminAuth, docFields, processImages, async (req: A
     const { kind, proofType, name, voen, ownerName, founderName, phone, banks } = req.body;
     // Şirkət məlumatları sənəddən oxunur. Təsisçi sənəddə olmaya bilər — sahibə bərabər götürülür.
     const founder = (founderName?.trim() || ownerName?.trim() || '');
+    // Opsional veb-sayt / sosial linklər (boşdursa null)
+    const link = (v: any) => { const s = String(v || '').trim(); return s ? s.slice(0, 300) : null; };
+    const website = link(req.body.website), instagram = link(req.body.instagram), facebook = link(req.body.facebook), tiktok = link(req.body.tiktok), youtube = link(req.body.youtube), linkedin = link(req.body.linkedin);
     if (!name?.trim() || !voen?.trim() || !ownerName?.trim()) {
       res.status(400).json({ success: false, message: 'Şirkət sənədi oxunmadı (ad/VÖEN/sahib) — sənədi yenidən yükləyin' }); return;
     }
@@ -202,6 +205,7 @@ router.post('/me/businesses', adminAuth, docFields, processImages, async (req: A
         name: name.trim(), voen: voen.trim(),
         ownerName: ownerName.trim(), founderName: founder,
         phone: phone?.trim() || null,
+        website, instagram, facebook, tiktok, youtube, linkedin,
         taxDocImage, companyDocImage, powerOfAttorneyImage,
         bankDocImage: bankDocImages[0] || null, bankDocImages,
         idCardImage, selfieImage,
@@ -273,6 +277,10 @@ router.put('/me/businesses/:id', adminAuth, async (req: AuthRequest, res: Respon
     const biz = await prisma.business.findUnique({ where: { id } });
     if (!biz || biz.userId !== req.adminId) { res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return; }
     const { name, ownerName, founderName, phone } = req.body;
+    // Opsional link sahələri (verilibsə yenilə; boş sətir → null)
+    const linkFields = ['website', 'instagram', 'facebook', 'tiktok', 'youtube', 'linkedin'] as const;
+    const linkData: any = {};
+    for (const f of linkFields) if (req.body[f] !== undefined) { const s = String(req.body[f] || '').trim(); linkData[f] = s ? s.slice(0, 300) : null; }
     // KYC kimliyi dəyişdimi?
     const identityChanged =
       (name !== undefined && String(name).trim() !== biz.name) ||
@@ -286,6 +294,7 @@ router.put('/me/businesses/:id', adminAuth, async (req: AuthRequest, res: Respon
         ...(ownerName !== undefined && { ownerName: String(ownerName).trim() }),
         ...(founderName !== undefined && { founderName: String(founderName).trim() }),
         ...(phone !== undefined && { phone: phone?.trim() || null }),
+        ...linkData,
         ...(resetApproval && { status: 'PENDING' as any }),
       },
     });

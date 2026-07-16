@@ -828,6 +828,13 @@ model Business {
   ownerName       String
   founderName     String
   phone           String? // şirkət telefonu
+  // Opsional əlaqə/onlayn — biznes əlavə edilərkən istəyə bağlı
+  website         String? // biznesin veb-saytı
+  instagram       String?
+  facebook        String?
+  tiktok          String?
+  youtube         String?
+  linkedin        String?
   status          VerificationStatus @default(PENDING)
   isActive        Boolean            @default(true) // sahibi tərəfindən aktiv/deaktiv
   rejectionReason String?
