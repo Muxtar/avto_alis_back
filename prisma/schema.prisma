@@ -459,15 +459,24 @@ model MessageReaction {
   @@index([messageId])
 }
 
+// Rəy — məhsul (listing), obyekt (businessObject) və ya ixtisas/rəy profili (professionalUserId)
+// haqqında. Dəqiq biri doldurulur. Bir istifadəçi bir hədəf üçün yalnız bir dəfə (tətbiqdə yoxlanır).
 model Comment {
-  id        Int      @id @default(autoincrement())
-  userId    Int
-  listingId Int
-  content   String
-  rating    Int?
-  createdAt DateTime @default(now())
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  listing   Listing  @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  id                 Int             @id @default(autoincrement())
+  userId             Int
+  listingId          Int? // məhsul rəyi
+  objectId           Int? // obyekt rəyi
+  professionalUserId Int? // ixtisas/rəy profili rəyi (hədəf istifadəçi id)
+  content            String
+  rating             Int?
+  createdAt          DateTime        @default(now())
+  user               User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  listing            Listing?        @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  object             BusinessObject? @relation(fields: [objectId], references: [id], onDelete: Cascade)
+
+  @@index([listingId])
+  @@index([objectId])
+  @@index([professionalUserId])
 }
 
 model Cart {
@@ -900,6 +909,7 @@ model BusinessObject {
   managers        BusinessMember[]
   referralRules   ReferralRule[]
   purchases       Order[]          @relation("ObjectPurchases") // bu obyekt adına edilən alışlar
+  comments        Comment[] // obyekt haqqında rəylər
 
   @@index([businessId])
 }

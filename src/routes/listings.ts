@@ -3,6 +3,7 @@ import { PrismaClient, Prisma } from '@prisma/client';
 import { upload } from '../middleware/upload';
 import { processImages } from '../middleware/imageProcess';
 import { adminAuth, AuthRequest } from '../middleware/auth';
+import { purchasedListing, messagedUser } from '../services/reviewGating';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -314,14 +315,32 @@ router.post('/listings/:id/comments', adminAuth, async (req: AuthRequest, res: R
       parsedRating = n;
     }
     // Verify the listing actually exists (avoid raw FK error).
-    const exists = await prisma.listing.findUnique({ where: { id: listingId }, select: { id: true, businessId: true, businessObjectId: true } });
+    const exists = await prisma.listing.findUnique({ where: { id: listingId }, select: { id: true, businessId: true, businessObjectId: true, userId: true } });
     if (!exists) {
       res.status(404).json({ success: false, message: 'Elan tapılmadı' });
       return;
     }
-    // Yalnız VÖEN-li (biznes/obyekt) elanlara şərh yazıla bilər — fərdi (VÖEN-siz) elanlara yox.
-    if (!exists.businessId && !exists.businessObjectId) {
-      res.status(403).json({ success: false, message: 'VÖEN-siz (fərdi) elanlara şərh yazmaq mümkün deyil' });
+    if (exists.userId === req.adminId) {
+      res.status(403).json({ success: false, message: 'Öz elanınıza rəy yaza bilməzsiniz' });
+      return;
+    }
+    // Kim rəy yaza bilər: VÖEN-li elana — məhsulu satın alan; fərdi elana — satıcı ilə əlaqə saxlayan.
+    const isVoen = !!(exists.businessId || exists.businessObjectId);
+    if (isVoen) {
+      if (!(await purchasedListing(req.adminId!, listingId))) {
+        res.status(403).json({ success: false, message: 'Yalnız məhsulu satın aldıqdan sonra rəy yaza bilərsiniz' });
+        return;
+      }
+    } else {
+      if (!(await messagedUser(req.adminId!, exists.userId))) {
+        res.status(403).json({ success: false, message: 'Fərdi elana rəy üçün əvvəlcə satıcı ilə əlaqə saxlayın (chat)' });
+        return;
+      }
+    }
+    // Bir dəfə — artıq rəy varsa dəyişməlidir (silib/redaktə).
+    const already = await prisma.comment.findFirst({ where: { userId: req.adminId!, listingId } });
+    if (already) {
+      res.status(400).json({ success: false, message: 'Bu məhsula artıq rəy yazmısınız — mövcud rəyinizi dəyişə bilərsiniz' });
       return;
     }
     const comment = await prisma.comment.create({
@@ -348,9 +367,16 @@ router.put('/comments/:id', adminAuth, async (req: AuthRequest, res: Response) =
     const trimmed = typeof req.body.content === 'string' ? req.body.content.trim() : '';
     if (!trimmed) { res.status(400).json({ success: false, message: 'Şərh mətni tələb olunur' }); return; }
     if (trimmed.length > 1000) { res.status(400).json({ success: false, message: 'Şərh çox uzundur (maks 1000 simvol)' }); return; }
+    // Reytinqi də dəyişmək mümkündür (verilibsə).
+    let ratingData: any = {};
+    if (req.body.rating !== undefined && req.body.rating !== null && req.body.rating !== '') {
+      const n = typeof req.body.rating === 'number' ? req.body.rating : parseInt(req.body.rating);
+      if (Number.isNaN(n) || n < 1 || n > 5) { res.status(400).json({ success: false, message: 'Reytinq 1-5 aralığında olmalıdır' }); return; }
+      ratingData = { rating: n };
+    }
     const updated = await prisma.comment.update({
       where: { id: comment.id },
-      data: { content: trimmed },
+      data: { content: trimmed, ...ratingData },
       include: { user: { select: { id: true, name: true, type: true } } },
     });
     res.json({ success: true, comment: updated });
