@@ -30,7 +30,7 @@ const EMPTY: CredentialAnalysis = {
 };
 
 // ə→e, ı→i kimi normallaşdırma + boşluq/registr təmizliyi — ad müqayisəsində kömək edir.
-function normalizeName(s: string): string {
+export function normalizeName(s: string): string {
   return s
     .toLocaleLowerCase('az')
     .replace(/ə/g, 'e').replace(/ı/g, 'i').replace(/ö/g, 'o')

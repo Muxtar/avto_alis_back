@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { PrismaClient } from '@prisma/client';
 import { adminAuth, AuthRequest } from '../middleware/auth';
 import { isVeriffConfigured, createVeriffSession, verifyWebhookSignature, getVeriffDecision } from '../services/veriff';
+import { normalizeName } from '../services/credentialAI';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -18,12 +19,17 @@ async function applyDecision(userId: number, v: any): Promise<string> {
   if (status === 'approved') {
     const fullName = [person.firstName, person.lastName].filter(Boolean).join(' ').trim();
     const bd = person.dateOfBirth && /^\d{4}-\d{2}-\d{2}/.test(String(person.dateOfBirth)) ? new Date(person.dateOfBirth) : null;
+    // Veriff bəzən adı vəsiqənin ARXASINDAKI (MRZ, ingilis/ASCII) versiyada qaytarır.
+    // İstifadəçinin mövcud (ön tərəf, AZ) adı ilə eyni şəxsdirsə — ön adı SAXLA (əvəz etmə).
+    const cur = await prisma.user.findUnique({ where: { id: userId }, select: { name: true } });
+    const sameName = !!(cur?.name && fullName && normalizeName(cur.name) === normalizeName(fullName));
+    const nameToSet = sameName ? cur!.name : fullName;
     await prisma.user.update({
       where: { id: userId },
       data: {
         idVerifyStatus: 'APPROVED',
         veriffStatus: status,
-        ...(fullName ? { name: fullName } : {}),
+        ...(nameToSet ? { name: nameToSet } : {}),
         ...(person.idNumber || doc.number ? { idNumber: String(person.idNumber || doc.number) } : {}),
         ...(bd ? { birthDate: bd } : {}),
         ...(person.gender ? { gender: String(person.gender).toUpperCase().startsWith('M') ? 'Kişi' : 'Qadın' } : {}),

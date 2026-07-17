@@ -121,6 +121,7 @@ router.delete('/me/identity', adminAuth, async (req: AuthRequest, res: Response)
         faceMatchScore: null,
         idAiNameMatch: null, idAiNameScore: null, idAiFaceMatch: null, idAiFaceScore: null, idAiReason: null,
         idVerifyStatus: null,
+        veriffSessionId: null, veriffStatus: null,
       },
     });
     // Faylları sil (best-effort).
