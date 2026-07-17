@@ -339,40 +339,28 @@ router.post('/register/complete-id', adminAuth, idPairUpload, processImages, asy
     const files = req.files as Record<string, Express.Multer.File[]> | undefined;
     const idCardFile = files?.['idCardImage']?.[0];
     const selfieFile = files?.['selfieImage']?.[0];
-    if (!idCardFile || !selfieFile) {
-      res.status(400).json({ success: false, message: 'Şəxsiyyət vəsiqəsi şəkli və selfie tələb olunur' }); return;
-    }
+    // Kimlik doğrulama artıq Veriff ilə edilir — qeydiyyatda şəkil MƏCBURİ deyil.
     const scoreNum = faceMatchScore !== undefined ? parseFloat(String(faceMatchScore)) : NaN;
-
-    // Claude AI ilə kimlik doğrulaması — vəsiqədəki ad qeydiyyat adı ilə + üz selfie ilə uyğun?
-    const ai = await verifyIdentityAI(idCardFile.path, selfieFile.path, (name || '').trim());
-
-    // Doğum tarixi/cins/FIN: əvvəlcə istifadəçinin formada yoxladığı dəyər, sonra AI.
     const bodyStr = (k: string) => (typeof (req.body as any)[k] === 'string' && (req.body as any)[k].trim() ? (req.body as any)[k].trim() : null);
-    const bd = bodyStr('birthDate') || ai.birthDate;
-    const gender = bodyStr('gender') || ai.gender;
-    const idNumber = bodyStr('idNumber') || ai.idNumber;
-    // Qeydiyyatda xəritədən seçilən konum (profildə dəyişilə bilər).
     const toFloat = (v: any) => { const n = parseFloat(String(v)); return Number.isFinite(n) ? n : null; };
     const city = bodyStr('city');
     const address = bodyStr('address');
     const latitude = req.body.latitude !== undefined ? toFloat(req.body.latitude) : null;
     const longitude = req.body.longitude !== undefined ? toFloat(req.body.longitude) : null;
 
-    const user = await prisma.user.update({
-      where: { id: userId },
-      data: {
-        name: (name || '').trim(),
-        profession: profession?.trim() || null,
+    // Köhnə (Claude) kimlik axını yalnız şəkillər göndərilibsə işləyir; əks halda kimlik Veriff-ə qalır.
+    let bd = bodyStr('birthDate');
+    let gender = bodyStr('gender');
+    let idNumber = bodyStr('idNumber');
+    let identityData: any = {};
+    if (idCardFile && selfieFile) {
+      const ai = await verifyIdentityAI(idCardFile.path, selfieFile.path, (name || '').trim());
+      bd = bd || ai.birthDate;
+      gender = gender || ai.gender;
+      idNumber = idNumber || ai.idNumber;
+      identityData = {
         idCardImage: idCardFile.filename,
         selfieImage: selfieFile.filename,
-        ...(city ? { city } : {}),
-        ...(address ? { address } : {}),
-        ...(latitude != null ? { latitude } : {}),
-        ...(longitude != null ? { longitude } : {}),
-        ...(bd && /^\d{4}-\d{2}-\d{2}$/.test(bd) ? { birthDate: new Date(bd) } : {}),
-        ...(gender ? { gender } : {}),
-        ...(idNumber ? { idNumber } : {}),
         faceMatchScore: Number.isFinite(scoreNum) ? scoreNum : (ai.ok ? ai.faceMatchScore : null),
         idAiNameMatch: ai.ok ? ai.nameMatch : null,
         idAiNameScore: ai.ok ? ai.nameMatchScore : null,
@@ -380,6 +368,22 @@ router.post('/register/complete-id', adminAuth, idPairUpload, processImages, asy
         idAiFaceScore: ai.ok ? ai.faceMatchScore : null,
         idAiReason: ai.error ? ai.error : ai.reason,
         idVerifyStatus: 'PENDING',
+      };
+    }
+
+    const user = await prisma.user.update({
+      where: { id: userId },
+      data: {
+        name: (name || '').trim(),
+        profession: profession?.trim() || null,
+        ...(city ? { city } : {}),
+        ...(address ? { address } : {}),
+        ...(latitude != null ? { latitude } : {}),
+        ...(longitude != null ? { longitude } : {}),
+        ...(bd && /^\d{4}-\d{2}-\d{2}$/.test(bd) ? { birthDate: new Date(bd) } : {}),
+        ...(gender ? { gender } : {}),
+        ...(idNumber ? { idNumber } : {}),
+        ...identityData,
         profileComplete: true,
       },
       select: { id: true, name: true, phone: true, email: true, type: true, role: true, verified: true, profileComplete: true, sellerVerified: true, idVerifyStatus: true, faceMatchScore: true },
