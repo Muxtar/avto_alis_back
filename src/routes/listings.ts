@@ -314,9 +314,14 @@ router.post('/listings/:id/comments', adminAuth, async (req: AuthRequest, res: R
       parsedRating = n;
     }
     // Verify the listing actually exists (avoid raw FK error).
-    const exists = await prisma.listing.findUnique({ where: { id: listingId }, select: { id: true } });
+    const exists = await prisma.listing.findUnique({ where: { id: listingId }, select: { id: true, businessId: true, businessObjectId: true } });
     if (!exists) {
       res.status(404).json({ success: false, message: 'Elan tapılmadı' });
+      return;
+    }
+    // Yalnız VÖEN-li (biznes/obyekt) elanlara şərh yazıla bilər — fərdi (VÖEN-siz) elanlara yox.
+    if (!exists.businessId && !exists.businessObjectId) {
+      res.status(403).json({ success: false, message: 'VÖEN-siz (fərdi) elanlara şərh yazmaq mümkün deyil' });
       return;
     }
     const comment = await prisma.comment.create({
