@@ -367,12 +367,33 @@ router.patch('/me/banks/:id/active', adminAuth, async (req: AuthRequest, res: Re
   }
 });
 
+// Ödəniş üçün əsas IBAN seç — bu hesabı primary et, digərlərini primary-dən çıxar.
+router.patch('/me/banks/:id/primary', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const id = parseInt(req.params.id);
+    const bank = await prisma.bankAccount.findUnique({ where: { id }, include: { business: true } });
+    if (!bank || bank.business.userId !== req.adminId) { res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return; }
+    await prisma.$transaction([
+      prisma.bankAccount.updateMany({ where: { businessId: bank.businessId }, data: { isPrimary: false } }),
+      prisma.bankAccount.update({ where: { id }, data: { isPrimary: true, isActive: true } }),
+    ]);
+    res.json({ success: true });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
 router.delete('/me/banks/:id', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
     const id = parseInt(req.params.id);
     const bank = await prisma.bankAccount.findUnique({ where: { id }, include: { business: true } });
     if (!bank || bank.business.userId !== req.adminId) { res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return; }
     await prisma.bankAccount.delete({ where: { id } });
+    // Silinən primary idisə — qalan aktiv hesablardan birini əsas et.
+    if (bank.isPrimary) {
+      const next = await prisma.bankAccount.findFirst({ where: { businessId: bank.businessId }, orderBy: { id: 'asc' } });
+      if (next) await prisma.bankAccount.update({ where: { id: next.id }, data: { isPrimary: true } });
+    }
     res.json({ success: true });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
