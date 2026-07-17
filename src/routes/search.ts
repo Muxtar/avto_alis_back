@@ -58,8 +58,17 @@ router.get('/professionals', async (req: Request, res: Response) => {
     const q = String(req.query.q || '').trim();
     const city = String(req.query.city || '').trim();
     const where: any = { isBlocked: false };
-    if (q) where.profession = { contains: q, mode: 'insensitive' };
-    else where.AND = [{ profession: { not: null } }, { profession: { not: '' } }];
+    // Yalnız ixtisası olan istifadəçilər; q peşə VƏ YA ad ilə uyğun gəlir
+    // (ad yalnız ixtisas sahibi üçün — istifadəçi tələbi).
+    if (q) {
+      where.AND = [
+        { profession: { not: null } },
+        { profession: { not: '' } },
+        { OR: [{ profession: { contains: q, mode: 'insensitive' } }, { name: { contains: q, mode: 'insensitive' } }] },
+      ];
+    } else {
+      where.AND = [{ profession: { not: null } }, { profession: { not: '' } }];
+    }
     if (city) where.city = { contains: city, mode: 'insensitive' };
     const professionals = await prisma.user.findMany({
       where,
