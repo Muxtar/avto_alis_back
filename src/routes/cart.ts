@@ -264,6 +264,14 @@ router.post('/cart/checkout', requireType(BUYER_TYPES), async (req: AuthRequest,
       return;
     }
 
+    // Qismən checkout — yalnız seçilmiş məhsullar (itemIds verilməyibsə hamısı).
+    const rawSel: any[] = Array.isArray(req.body.itemIds) ? req.body.itemIds : [];
+    const selIds = new Set(rawSel.map((x) => parseInt(String(x))).filter((n) => n > 0));
+    if (selIds.size) {
+      cart.items = cart.items.filter((i) => selIds.has(i.id));
+      if (cart.items.length === 0) { res.status(400).json({ success: false, message: 'Seçilmiş məhsul yoxdur' }); return; }
+    }
+
     // Stok kontrolu (preliminary; final atomic check is inside the transaction below)
     for (const item of cart.items) {
       if (item.listing.stock < item.quantity) {
@@ -518,8 +526,8 @@ router.post('/cart/checkout', requireType(BUYER_TYPES), async (req: AuthRequest,
         }
       }
 
-      // Sepeti temizle
-      await tx.cartItem.deleteMany({ where: { cartId: cart.id } });
+      // Yalnız checkout edilən (seçilmiş) məhsulları səbətdən sil — qalanları qalır.
+      await tx.cartItem.deleteMany({ where: { id: { in: cart.items.map((i) => i.id) } } });
 
       return createdOrders;
     });
