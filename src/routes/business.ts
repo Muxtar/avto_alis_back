@@ -126,14 +126,14 @@ router.post('/me/businesses', adminAuth, docFields, processImages, async (req: A
       where: { id: req.adminId! },
       select: { idVerifyStatus: true, name: true, idCardImage: true, selfieImage: true, faceMatchScore: true, idAiFaceMatch: true, idAiFaceScore: true },
     });
-    if (!me?.idVerifyStatus) {
-      res.status(403).json({ success: false, code: 'ID_NOT_VERIFIED', message: 'Biznes yaratmaq üçün əvvəlcə profilinizi tamamlayın (kimlik + üz təsdiqi).' });
+    if (me?.idVerifyStatus !== 'APPROVED') {
+      res.status(403).json({ success: false, code: 'ID_NOT_VERIFIED', message: 'Biznes yaratmaq üçün əvvəlcə profil səhifəsində kimliyinizi Veriff ilə təsdiqləyin.' });
       return;
     }
-    // Profildə kimlik artıq təsdiqlənib və üz uyğunluğu 50%-dən çoxdursa — biznesdə
-    // təkrar kimlik+selfie istənilmir, profildəki sənədlər istifadə olunur.
+    // Kimlik profildə TƏSDİQLİDİR (Veriff və ya köhnə AI) — biznesdə təkrar kimlik+selfie
+    // istənilmir. Köhnə şəkillər varsa istifadə olunur, Veriff-də isə lazım deyil.
     const faceOk = (me.faceMatchScore ?? 0) > 0.5 || me.idAiFaceMatch === true || (me.idAiFaceScore ?? 0) > 0.5;
-    const identityReusable = !!me.idCardImage && !!me.selfieImage && faceOk;
+    const identityReusable = me.idVerifyStatus === 'APPROVED' || (!!me.idCardImage && !!me.selfieImage && faceOk);
     const { kind, proofType, name, voen, ownerName, founderName, phone, banks } = req.body;
     // Şirkət məlumatları sənəddən oxunur. Təsisçi sənəddə olmaya bilər — sahibə bərabər götürülür.
     const founder = (founderName?.trim() || ownerName?.trim() || '');
