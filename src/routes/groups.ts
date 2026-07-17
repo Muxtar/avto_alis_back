@@ -164,6 +164,29 @@ router.delete('/groups/:id/members/:userId', adminAuth, async (req: AuthRequest,
   }
 });
 
+// Üzvə səlahiyyət ver / al — admin başqa üzvü admin edir və ya adminliyini alır.
+router.patch('/groups/:id/members/:userId', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const id = parseInt(String(req.params.id));
+    const targetId = parseInt(String(req.params.userId));
+    const me = await getMember(id, req.adminId!);
+    if (!me || me.role !== 'ADMIN') { res.status(403).json({ success: false, message: 'Yalnız admin səlahiyyət dəyişə bilər' }); return; }
+    const role = String(req.body?.role || '').toUpperCase() === 'ADMIN' ? 'ADMIN' : 'MEMBER';
+    const target = await getMember(id, targetId);
+    if (!target) { res.status(404).json({ success: false, message: 'Üzv tapılmadı' }); return; }
+    // Son admini adi üzvə salmağa icazə vermə (qrup adminsiz qalmasın).
+    if (role === 'MEMBER' && target.role === 'ADMIN') {
+      const admins = await prisma.conversationMember.count({ where: { conversationId: id, role: 'ADMIN' } });
+      if (admins <= 1) { res.status(400).json({ success: false, message: 'Qrupda ən azı bir admin qalmalıdır' }); return; }
+    }
+    await prisma.conversationMember.update({ where: { conversationId_userId: { conversationId: id, userId: targetId } }, data: { role } });
+    notify(await memberIds(id), id);
+    res.json({ success: true, group: await shapeGroup(id) });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
 // Qrup adını dəyiş (admin).
 router.patch('/groups/:id', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
