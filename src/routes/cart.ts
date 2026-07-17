@@ -59,10 +59,22 @@ router.post('/cart/share', adminAuth, async (req: AuthRequest, res: Response) =>
   try {
     const cart = await prisma.cart.findUnique({ where: { userId: req.adminId! }, include: { items: true } });
     if (!cart || cart.items.length === 0) { res.status(400).json({ success: false, message: 'Səbət boşdur' }); return; }
-    const items = cart.items.map((i) => ({ listingId: i.listingId, quantity: i.quantity }));
+    // Yalnız seçilmiş məhsulları paylaş (itemIds verilməyibsə hamısı).
+    const rawSel: any[] = Array.isArray(req.body.itemIds) ? req.body.itemIds : [];
+    const selIds = new Set(rawSel.map((x) => parseInt(String(x))).filter((n) => n > 0));
+    const chosen = selIds.size ? cart.items.filter((i) => selIds.has(i.id)) : cart.items;
+    if (chosen.length === 0) { res.status(400).json({ success: false, message: 'Məhsul seçilməyib' }); return; }
+    const items = chosen.map((i) => ({ listingId: i.listingId, quantity: i.quantity }));
+    // Çatdırılma rejimi: SENDER (göndərənin ünvanına) və ya RECIPIENT (alıcı seçir).
+    const deliveryMode = String(req.body.deliveryMode || '').toUpperCase() === 'SENDER' ? 'SENDER' : 'RECIPIENT';
+    const num = (v: any) => (v != null && v !== '' ? parseFloat(String(v)) : null);
+    const loc = deliveryMode === 'SENDER' ? {
+      address: req.body.address?.trim() || null, city: req.body.city?.trim() || null,
+      latitude: num(req.body.latitude), longitude: num(req.body.longitude), phone: req.body.phone?.trim() || null,
+    } : {};
     let token = shareToken();
     for (let i = 0; i < 5; i++) {
-      try { await prisma.sharedCart.create({ data: { token, userId: req.adminId!, title: req.body?.title?.trim() || null, items } }); break; }
+      try { await prisma.sharedCart.create({ data: { token, userId: req.adminId!, title: req.body?.title?.trim() || null, items, deliveryMode, ...loc } }); break; }
       catch { token = shareToken(); }
     }
     res.json({ success: true, token });
@@ -86,7 +98,71 @@ router.get('/shared-cart/:token', async (req: AuthRequest, res: Response) => {
       .map((i) => { const l = byId.get(i.listingId); return l ? { ...l, quantity: i.quantity } : null; })
       .filter(Boolean);
     const total = result.reduce((s: number, x: any) => s + x.price * x.quantity, 0);
-    res.json({ success: true, title: sc.title, by, items: result, total, count: result.length });
+    res.json({
+      success: true, title: sc.title, by, items: result, total, count: result.length,
+      deliveryMode: sc.deliveryMode,
+      // SENDER rejimində göndərənin çatdırılma ünvanı (alıcı görür, dəyişə bilmir).
+      deliveryAddress: sc.deliveryMode === 'SENDER' ? { address: sc.address, city: sc.city, latitude: sc.latitude, longitude: sc.longitude, phone: sc.phone } : null,
+    });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
+// Paylaşılan səbəti birbaşa al (linki alan ödəyir). Rejimə görə çatdırılma:
+// SENDER → göndərənin ünvanına; RECIPIENT → alıcının verdiyi ünvana.
+router.post('/shared-cart/:token/checkout', requireType(BUYER_TYPES), async (req: AuthRequest, res: Response) => {
+  try {
+    const sc = await prisma.sharedCart.findUnique({ where: { token: req.params.token } });
+    if (!sc) { res.status(404).json({ success: false, message: 'Səbət tapılmadı' }); return; }
+    const buyerId = req.adminId!;
+    const items = Array.isArray(sc.items) ? (sc.items as any[]) : [];
+    const ids = items.map((i) => Number(i.listingId));
+    const listings = await prisma.listing.findMany({
+      where: { id: { in: ids }, OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }] },
+      select: { id: true, title: true, price: true, stock: true, userId: true },
+    });
+    const byId = new Map(listings.map((l) => [l.id, l]));
+    const rows = items.map((i) => { const l = byId.get(Number(i.listingId)); return l ? { ...l, quantity: Math.max(1, Number(i.quantity) || 1) } : null; }).filter(Boolean) as any[];
+    if (rows.length === 0) { res.status(400).json({ success: false, message: 'Bu səbətdə aktiv məhsul yoxdur' }); return; }
+
+    // Çatdırılma ünvanı — rejimə görə.
+    const num = (v: any) => (v != null && v !== '' ? parseFloat(String(v)) : null);
+    const del = sc.deliveryMode === 'SENDER'
+      ? { address: sc.address, city: sc.city, phone: sc.phone }
+      : { address: req.body.address?.trim() || null, city: req.body.city?.trim() || null, phone: req.body.phone?.trim() || null };
+    if (!del.address) { res.status(400).json({ success: false, message: 'Çatdırılma ünvanı tələb olunur' }); return; }
+    void num;
+
+    const bySeller = new Map<number, any[]>();
+    for (const r of rows) { const a = bySeller.get(r.userId) || []; a.push(r); bySeller.set(r.userId, a); }
+
+    const createdIds: number[] = [];
+    await prisma.$transaction(async (tx) => {
+      for (const [sellerId, its] of bySeller.entries()) {
+        for (const it of its) {
+          const upd = await tx.listing.updateMany({ where: { id: it.id, stock: { gte: it.quantity } }, data: { stock: { decrement: it.quantity } } });
+          if (upd.count === 0) throw new Error(`"${it.title}" üçün kifayət qədər stok yoxdur`);
+        }
+        const total = its.reduce((s: number, it: any) => s + it.price * it.quantity, 0);
+        const pickupCode = String(Math.floor(1000 + Math.random() * 9000));
+        const order = await tx.order.create({
+          data: {
+            buyerId, sellerId, total, status: 'PENDING', paymentMethod: 'CASH', paymentStatus: 'PENDING',
+            deliveryType: 'DELIVERY', address: del.address, phone: del.phone, pickupCode,
+            items: { create: its.map((it: any) => ({ listingId: it.id, quantity: it.quantity, price: it.price, title: it.title })) },
+          },
+        });
+        createdIds.push(order.id);
+        await tx.notification.create({ data: { userId: sellerId, type: 'ORDER', title: 'Yeni sifariş', body: `Paylaşılan səbətdən sifariş: ${total} AZN`, link: '/orders' } });
+      }
+    });
+    // Səbəti paylaşan şəxsə bildiriş.
+    if (sc.userId !== buyerId) {
+      await prisma.notification.create({
+        data: { userId: sc.userId, type: 'SYSTEM', title: 'Paylaşdığınız səbət alındı ✅',
+          body: sc.deliveryMode === 'SENDER' ? 'Ödəniş edildi — məhsullar sizin ünvanınıza göndərilir.' : 'Alıcı öz ünvanına sifariş verdi.', link: '/orders' },
+      }).catch(() => {});
+    }
+    res.json({ success: true, orders: createdIds });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
 
