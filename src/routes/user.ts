@@ -499,6 +499,7 @@ router.post('/me/listings', listingWriteLimiter, adminAuth, upload.array('images
         forRent: forRent === true || forRent === 'true',
         bookable: isBookable,
         allowSelfDelivery: selfDeliveryOn,
+        selfDeliveryNote: selfDeliveryOn ? (req.body.selfDeliveryNote?.trim() || null) : null,
         weightKg: wKg,
         bookingType: isBookable ? validBookingType : null,
         maxGuests: isBookable && maxGuests ? parseInt(String(maxGuests)) : null,
@@ -572,6 +573,7 @@ router.put('/me/listings/:id', adminAuth, upload.array('images', 5), processImag
         ...(barter !== undefined && { barter: barter === true || barter === 'true' }),
         ...(forRent !== undefined && { forRent: forRent === true || forRent === 'true' }),
         ...((req.body.allowSelfDelivery !== undefined || deliveryMethod !== undefined) && { allowSelfDelivery: req.body.allowSelfDelivery === true || req.body.allowSelfDelivery === 'true' || deliveryMethod === 'SELF' }),
+        ...(req.body.selfDeliveryNote !== undefined && { selfDeliveryNote: req.body.selfDeliveryNote?.trim() || null }),
         ...(req.body.weightKg !== undefined && { weightKg: req.body.weightKg !== '' && req.body.weightKg != null ? Math.max(0, parseFloat(String(req.body.weightKg))) : null }),
         ...(bookable !== undefined && (() => {
           const on = bookable === true || bookable === 'true';
