@@ -198,6 +198,9 @@ router.get('/sellers/:id', async (req: Request, res: Response) => {
     }
     // CV yalnız public edilibsə görünsün.
     if (!user.cvPublic) (user as any).cvFile = null;
+    // Rəy (konsultasiya) təklif edən şəxsin telefonu profildə ictimai DEYİL —
+    // əlaqə yalnız platforma üzərindən (platformadan kənar əlaqənin qarşısı).
+    if (user.consultationOffers?.length) (user as any).phone = null;
 
     // M1 fix: paginate seller's listings to avoid serving thousands at once.
     const page = parseInt((req.query.page as string) || '1');
