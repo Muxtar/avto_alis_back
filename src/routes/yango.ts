@@ -81,12 +81,19 @@ router.post('/yango/quote', adminAuth, async (req: AuthRequest, res: Response) =
   try {
     if (!isYangoConfigured()) { res.json({ success: true, available: false, fee: 0 }); return; }
     const businessObjectId = req.body.businessObjectId ? parseInt(String(req.body.businessObjectId)) : null;
+    const sellerId = req.body.sellerId ? parseInt(String(req.body.sellerId)) : null;
     const lat = req.body.latitude != null ? parseFloat(String(req.body.latitude)) : null;
     const lng = req.body.longitude != null ? parseFloat(String(req.body.longitude)) : null;
-    if (lat == null || lng == null || !businessObjectId) { res.status(400).json({ success: false, message: 'Obyekt və konum tələb olunur' }); return; }
-    const obj = await prisma.businessObject.findUnique({ where: { id: businessObjectId }, select: { latitude: true, longitude: true } });
-    if (!obj?.latitude || !obj?.longitude) { res.json({ success: true, available: false, fee: 0, message: 'Obyektin koordinatı yoxdur' }); return; }
-    const q = await checkPrice({ source: [obj.longitude, obj.latitude], destination: [lng, lat], weightKg: req.body.weight ? parseFloat(String(req.body.weight)) : 1 });
+    if (lat == null || lng == null || (!businessObjectId && !sellerId)) { res.status(400).json({ success: false, message: 'Konum tələb olunur' }); return; }
+    // Götürmə (pickup) yeri: biznes obyektinin koordinatı, yoxdursa satıcının profil konumu.
+    let pickup: { latitude: number | null; longitude: number | null } | null = null;
+    if (businessObjectId) {
+      pickup = await prisma.businessObject.findUnique({ where: { id: businessObjectId }, select: { latitude: true, longitude: true } });
+    } else if (sellerId) {
+      pickup = await prisma.user.findUnique({ where: { id: sellerId }, select: { latitude: true, longitude: true } });
+    }
+    if (!pickup?.latitude || !pickup?.longitude) { res.json({ success: true, available: false, fee: 0, message: 'Satıcının/obyektin koordinatı yoxdur' }); return; }
+    const q = await checkPrice({ source: [pickup.longitude, pickup.latitude], destination: [lng, lat], weightKg: req.body.weight ? parseFloat(String(req.body.weight)) : 1 });
     if (!q.ok || !q.data?.price) { res.json({ success: true, available: false, fee: 0, message: q.error }); return; }
     res.json({ success: true, available: true, fee: parseFloat(String(q.data.price)), currency: q.data.currency_rules?.code || 'AZN', eta: q.data.eta });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
