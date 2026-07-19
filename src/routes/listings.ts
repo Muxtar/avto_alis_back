@@ -97,6 +97,8 @@ router.get('/listings', async (req: Request, res: Response) => {
         where,
         include: {
           user: { select: { id: true, name: true, phone: true, type: true, avgRating: true, ratingCount: true } },
+          // VÖEN elanlarda kartda şəxsin yox, obyektin adı/№-si göstərilir.
+          businessObject: { select: { id: true, name: true } },
           _count: { select: { comments: true, favorites: true } },
         },
         orderBy,

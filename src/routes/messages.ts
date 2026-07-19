@@ -91,7 +91,29 @@ router.post('/messages', messageLimiter, adminAuth, async (req: AuthRequest, res
       }
     }
 
-    const receiver = parseInt(receiverId);
+    let receiver = parseInt(receiverId);
+    // VÖEN (obyekt) elanına yazılan mesaj — elanı paylaşana yox, obyektin əlaqə
+    // nömrəsinin sahibinə yönləndirilir. Obyektin telefonu bir istifadəçiyə aiddirsə
+    // ona, deyilsə biznes sahibinə gedir. (Satıcı alıcıya cavab yazanda dəyişmir.)
+    if (listingId) {
+      const L = await prisma.listing.findUnique({
+        where: { id: parseInt(String(listingId)) },
+        select: {
+          userId: true, businessObjectId: true,
+          businessObject: { select: { phone: true, business: { select: { userId: true } } } },
+        },
+      });
+      if (L?.businessObjectId && receiver === L.userId) {
+        let objContact: number | null = null;
+        const objPhone = L.businessObject?.phone?.trim();
+        if (objPhone) {
+          const u = await prisma.user.findFirst({ where: { phone: objPhone }, select: { id: true } });
+          if (u) objContact = u.id;
+        }
+        if (!objContact) objContact = L.businessObject?.business?.userId ?? null;
+        if (objContact && objContact !== req.adminId) receiver = objContact;
+      }
+    }
     const online = isUserOnline(receiver);
     const message = await prisma.message.create({
       data: {

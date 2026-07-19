@@ -322,6 +322,10 @@ model Listing {
   location         String?
   phone            String?
   condition        Condition       @default(NEW)
+  // Elana özəl konum — hər elanın öz xəritə nöqtəsi ola bilər (məs. ayrı-ayrı ev/mənzil).
+  // Yoxdursa satıcının default konumu istifadə olunur.
+  latitude         Float?
+  longitude        Float?
   country          String?
   brand            String?
   stock            Int             @default(1)
