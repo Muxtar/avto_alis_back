@@ -11,6 +11,13 @@ import { verifyTokenUserId } from '../middleware/auth';
 
 const prisma = new PrismaClient();
 
+// Qrup zəngi iştirakçıları — conversationId -> aktiv userId dəsti (yaddaşda).
+const groupCalls = new Map<number, Set<number>>();
+async function groupMemberIds(conversationId: number): Promise<number[]> {
+  const mems = await prisma.conversationMember.findMany({ where: { conversationId }, select: { userId: true } });
+  return mems.map((m) => m.userId);
+}
+
 // Routes-dan real-time push üçün ortaq io referansı (çat mesajları, oxundu və s.).
 let ioRef: Server | null = null;
 export function emitToUser(userId: number, event: string, payload: any) {
@@ -102,6 +109,62 @@ export function initCallSignaling(httpServer: HttpServer, allowedOrigins: string
     socket.on('chat:stopTyping', (p: { to: number }) => {
       const to = parseInt(String(p?.to));
       if (to && to !== userId) io.to(`u:${to}`).emit('chat:stopTyping', { from: userId });
+    });
+
+    // ── Qrup zəngi (mesh WebRTC) — hər iştirakçı digərləri ilə birbaşa qoşulur ──
+    // Başlat — qrup üzvlərinə dəvət göndər.
+    socket.on('groupcall:start', async (p: { conversationId: number; kind: 'audio' | 'video' }) => {
+      try {
+        const cid = parseInt(String(p?.conversationId));
+        const kind = p?.kind === 'video' ? 'video' : 'audio';
+        if (!cid) return;
+        const members = await groupMemberIds(cid);
+        if (!members.includes(userId)) return;
+        let set = groupCalls.get(cid); if (!set) { set = new Set(); groupCalls.set(cid, set); }
+        set.add(userId);
+        const me = await prisma.user.findUnique({ where: { id: userId }, select: { id: true, name: true, avatar: true } });
+        members.filter((m) => m !== userId).forEach((m) => io.to(`u:${m}`).emit('groupcall:incoming', { conversationId: cid, kind, from: me }));
+      } catch { /* keç */ }
+    });
+
+    // Qoşul — mövcud iştirakçıların siyahısını al, onları da xəbərdar et.
+    socket.on('groupcall:join', async (p: { conversationId: number }) => {
+      try {
+        const cid = parseInt(String(p?.conversationId));
+        if (!cid) return;
+        const members = await groupMemberIds(cid);
+        if (!members.includes(userId)) return;
+        let set = groupCalls.get(cid); if (!set) { set = new Set(); groupCalls.set(cid, set); }
+        const existing = Array.from(set).filter((id) => id !== userId);
+        set.add(userId);
+        const users = await prisma.user.findMany({ where: { id: { in: existing.length ? existing : [-1] } }, select: { id: true, name: true, avatar: true } });
+        socket.emit('groupcall:participants', { conversationId: cid, participants: users });
+        const me = await prisma.user.findUnique({ where: { id: userId }, select: { id: true, name: true, avatar: true } });
+        existing.forEach((id) => io.to(`u:${id}`).emit('groupcall:peer-joined', { conversationId: cid, peer: me }));
+      } catch { /* keç */ }
+    });
+
+    // Mesh siqnalı — konkret iştirakçıya SDP/ICE ötür.
+    socket.on('groupcall:signal', (p: { conversationId: number; to: number; data: any }) => {
+      const to = parseInt(String(p?.to));
+      const cid = parseInt(String(p?.conversationId));
+      if (to && p?.data) io.to(`u:${to}`).emit('groupcall:signal', { conversationId: cid, from: userId, data: p.data });
+    });
+
+    // Çıx — digər iştirakçıları xəbərdar et.
+    const leaveGroupCall = (cid: number) => {
+      const set = groupCalls.get(cid);
+      if (!set) return;
+      if (set.delete(userId)) {
+        if (set.size === 0) groupCalls.delete(cid);
+        else set.forEach((id) => io.to(`u:${id}`).emit('groupcall:peer-left', { conversationId: cid, userId }));
+      }
+    };
+    socket.on('groupcall:leave', (p: { conversationId: number }) => { const cid = parseInt(String(p?.conversationId)); if (cid) leaveGroupCall(cid); });
+
+    // Bağlantı kəsilsə bütün qrup zənglərindən çıxar.
+    socket.on('disconnect', () => {
+      for (const cid of Array.from(groupCalls.keys())) leaveGroupCall(cid);
     });
   });
 
