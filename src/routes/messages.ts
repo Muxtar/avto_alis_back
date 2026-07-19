@@ -170,6 +170,61 @@ router.delete('/messages/:id', adminAuth, async (req: AuthRequest, res: Response
   }
 });
 
+// Yalnız məndə sil — mesaj yalnız bu istifadəçidə gizlədilir (WhatsApp "mənim üçün sil").
+router.post('/messages/:id/hide', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const id = parseInt(String(req.params.id));
+    const userId = req.adminId!;
+    const m = await prisma.message.findUnique({ where: { id }, select: { id: true, senderId: true, receiverId: true, conversationId: true } });
+    if (!m) { res.status(404).json({ success: false, message: 'Mesaj tapılmadı' }); return; }
+    // İstifadəçi bu söhbətin iştirakçısı olmalıdır.
+    const participant = m.senderId === userId || m.receiverId === userId ||
+      (m.conversationId ? !!(await prisma.conversationMember.findUnique({ where: { conversationId_userId: { conversationId: m.conversationId, userId } } })) : false);
+    if (!participant) { res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return; }
+    await prisma.message.updateMany({ where: { id, NOT: { deletedForIds: { has: userId } } }, data: { deletedForIds: { push: userId } } });
+    res.json({ success: true });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+// Söhbəti məndə sil (1:1) — bu şəxslə bütün mesajlar yalnız məndə gizlədilir; söhbət siyahıdan çıxır.
+router.delete('/messages/thread/:partnerId', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.adminId!;
+    const partnerId = parseInt(String(req.params.partnerId));
+    await prisma.message.updateMany({
+      where: {
+        conversationId: null,
+        OR: [
+          { senderId: userId, receiverId: partnerId },
+          { senderId: partnerId, receiverId: userId },
+        ],
+        NOT: { deletedForIds: { has: userId } },
+      },
+      data: { deletedForIds: { push: userId } },
+    });
+    res.json({ success: true });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+// Qrup söhbətini məndə sil — qrupun bütün mesajları yalnız məndə gizlədilir.
+router.delete('/messages/group/:conversationId', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.adminId!;
+    const conversationId = parseInt(String(req.params.conversationId));
+    await prisma.message.updateMany({
+      where: { conversationId, NOT: { deletedForIds: { has: userId } } },
+      data: { deletedForIds: { push: userId } },
+    });
+    res.json({ success: true });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
 // Emoji reaksiya — toggle.
 router.post('/messages/:id/react', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
@@ -296,7 +351,7 @@ router.get('/messages/conversations', adminAuth, async (req: AuthRequest, res: R
     const userId = req.adminId!;
 
     const messages = await prisma.message.findMany({
-      where: { conversationId: null, OR: [{ senderId: userId }, { receiverId: userId }] },
+      where: { conversationId: null, OR: [{ senderId: userId }, { receiverId: userId }], NOT: { deletedForIds: { has: userId } } },
       include: {
         sender: { select: { id: true, name: true, type: true } },
         receiver: { select: { id: true, name: true, type: true } },
@@ -329,12 +384,13 @@ router.get('/messages/:partnerId', adminAuth, async (req: AuthRequest, res: Resp
     const limit = parseInt(req.query.limit as string) || 50;
     const before = req.query.before ? parseInt(req.query.before as string) : undefined;
 
-    const base = {
+    const base: any = {
       conversationId: null,
       OR: [
         { senderId: userId, receiverId: partnerId },
         { senderId: partnerId, receiverId: userId },
       ],
+      NOT: { deletedForIds: { has: userId } }, // "məndə sil" ilə gizlədilənlər görünmür
     };
     const where: any = { ...base };
     if (before) where.id = { lt: before };

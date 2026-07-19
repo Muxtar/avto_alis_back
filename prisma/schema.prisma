@@ -418,6 +418,7 @@ model Message {
   deliveredAt    DateTime? // qarşı tərəf onlayn olub aldı (tək ✓ → ✓✓)
   editedAt       DateTime? // redaktə olunubsa
   deletedAt      DateTime? // "hamı üçün sil" — sətir qalır, mətn boşalır
+  deletedForIds  Int[]     @default([]) // "yalnız məndə sil" — bu istifadəçilər üçün gizlədilib
   replyToId      Int? // cavab verilən mesaj
   createdAt      DateTime             @default(now())
   sender         User                 @relation("SentMessages", fields: [senderId], references: [id], onDelete: Cascade)

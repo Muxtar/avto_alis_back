@@ -69,9 +69,9 @@ router.get('/groups', adminAuth, async (req: AuthRequest, res: Response) => {
     });
     const groups = await Promise.all(memberships.map(async (mm) => {
       const cid = mm.conversationId;
-      const lastMessage = await prisma.message.findFirst({ where: { conversationId: cid }, orderBy: { createdAt: 'desc' }, include: { sender: { select: { id: true, name: true } } } });
+      const lastMessage = await prisma.message.findFirst({ where: { conversationId: cid, NOT: { deletedForIds: { has: me } } }, orderBy: { createdAt: 'desc' }, include: { sender: { select: { id: true, name: true } } } });
       const unreadCount = await prisma.message.count({
-        where: { conversationId: cid, senderId: { not: me }, ...(mm.lastReadAt ? { createdAt: { gt: mm.lastReadAt } } : {}) },
+        where: { conversationId: cid, senderId: { not: me }, NOT: { deletedForIds: { has: me } }, ...(mm.lastReadAt ? { createdAt: { gt: mm.lastReadAt } } : {}) },
       });
       const memberCount = await prisma.conversationMember.count({ where: { conversationId: cid } });
       return {
@@ -112,9 +112,9 @@ router.get('/groups/:id/messages', adminAuth, async (req: AuthRequest, res: Resp
     if (!(await getMember(id, req.adminId!))) { res.status(403).json({ success: false, message: 'Bu qrupun üzvü deyilsiniz' }); return; }
     const limit = parseInt(req.query.limit as string) || 50;
     const before = req.query.before ? parseInt(req.query.before as string) : undefined;
-    const where: any = { conversationId: id };
+    const where: any = { conversationId: id, NOT: { deletedForIds: { has: req.adminId! } } };
     if (before) where.id = { lt: before };
-    const total = await prisma.message.count({ where: { conversationId: id } });
+    const total = await prisma.message.count({ where: { conversationId: id, NOT: { deletedForIds: { has: req.adminId! } } } });
     const messages = await prisma.message.findMany({ where, include: msgInclude, orderBy: { createdAt: 'desc' }, take: limit });
     messages.reverse();
     await prisma.conversationMember.update({ where: { conversationId_userId: { conversationId: id, userId: req.adminId! } }, data: { lastReadAt: new Date() } });
