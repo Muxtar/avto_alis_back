@@ -248,4 +248,35 @@ router.get('/objects/:id', async (req: Request, res: Response) => {
   }
 });
 
+// Public biznes səhifəsi — QR/link ilə açılır. Yalnız təsdiqlənmiş, aktiv biznes.
+// KYC/VÖEN/sənədlər SIZDIRILMIR — yalnız açıq məlumat + obyektlər.
+router.get('/businesses/:id', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(String(req.params.id));
+    if (Number.isNaN(id)) { res.status(400).json({ success: false, message: 'Yanlış ID' }); return; }
+    const business = await prisma.business.findUnique({
+      where: { id },
+      select: {
+        id: true, name: true, phone: true, status: true, isActive: true,
+        website: true, instagram: true, facebook: true, tiktok: true, youtube: true, linkedin: true,
+        objects: {
+          where: { isActive: true },
+          select: {
+            id: true, name: true, city: true, address: true, phone: true,
+            activityAreas: true, latitude: true, longitude: true,
+            _count: { select: { listings: true } },
+          },
+          orderBy: { createdAt: 'asc' },
+        },
+      },
+    });
+    if (!business || business.status !== 'APPROVED' || !business.isActive) {
+      res.status(404).json({ success: false, message: 'Biznes tapılmadı' }); return;
+    }
+    res.json({ success: true, business });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
 export default router;
