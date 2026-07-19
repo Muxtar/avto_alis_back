@@ -500,6 +500,7 @@ router.post('/me/listings', listingWriteLimiter, adminAuth, upload.array('images
         bookable: isBookable,
         allowSelfDelivery: selfDeliveryOn,
         selfDeliveryNote: selfDeliveryOn ? (req.body.selfDeliveryNote?.trim() || null) : null,
+        pickupOnly: req.body.pickupOnly === true || req.body.pickupOnly === 'true',
         weightKg: wKg,
         bookingType: isBookable ? validBookingType : null,
         maxGuests: isBookable && maxGuests ? parseInt(String(maxGuests)) : null,
@@ -574,6 +575,7 @@ router.put('/me/listings/:id', adminAuth, upload.array('images', 5), processImag
         ...(forRent !== undefined && { forRent: forRent === true || forRent === 'true' }),
         ...((req.body.allowSelfDelivery !== undefined || deliveryMethod !== undefined) && { allowSelfDelivery: req.body.allowSelfDelivery === true || req.body.allowSelfDelivery === 'true' || deliveryMethod === 'SELF' }),
         ...(req.body.selfDeliveryNote !== undefined && { selfDeliveryNote: req.body.selfDeliveryNote?.trim() || null }),
+        ...(req.body.pickupOnly !== undefined && { pickupOnly: req.body.pickupOnly === true || req.body.pickupOnly === 'true' }),
         ...(req.body.weightKg !== undefined && { weightKg: req.body.weightKg !== '' && req.body.weightKg != null ? Math.max(0, parseFloat(String(req.body.weightKg))) : null }),
         ...(bookable !== undefined && (() => {
           const on = bookable === true || bookable === 'true';

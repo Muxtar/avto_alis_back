@@ -379,6 +379,9 @@ router.post('/cart/checkout', requireType(BUYER_TYPES), async (req: AuthRequest,
     // ── Çatdırılma seçiminin yoxlanması + Yango haqqının hesablanması (satıcı üzrə) ──
     const feeBySeller = new Map<number, number>();
     if (deliveryType === 'DELIVERY') {
+      // "Yalnız götürmə" məhsulunda çatdırılma yoxdur (Yango + satıcı çatdırması bağlı).
+      const pickupOnlyItem = cart.items.find((i) => (i.listing as any).pickupOnly);
+      if (pickupOnlyItem) { res.status(400).json({ success: false, message: `"${pickupOnlyItem.listing.title}" yalnız götürmə ilə satılır — çatdırılma mümkün deyil.` }); return; }
       if (dMethod === 'SELF') {
         // Satıcı özü çatdırılma — bütün elanlar buna icazə verməlidir.
         const notAllowed = cart.items.find((i) => !(i.listing as any).allowSelfDelivery);
