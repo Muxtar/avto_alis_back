@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { PrismaClient } from '@prisma/client';
-import { generateToken } from '../middleware/auth';
+import { createSession } from '../middleware/auth';
 import { verifyLimiter } from '../middleware/rateLimiter';
 
 const router = Router();
@@ -59,7 +59,7 @@ router.post('/verify/check', verifyLimiter, async (req: Request, res: Response) 
       select: { id: true, name: true, phone: true, type: true, role: true, profileComplete: true, sellerVerified: true },
     });
 
-    const token = generateToken(user.id);
+    const token = await createSession(user.id, req);
     res.json({ success: true, token, user, profileComplete: user.profileComplete });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
@@ -98,7 +98,7 @@ router.post('/verify/telegram', verifyLimiter, async (req: Request, res: Respons
       select: { id: true, name: true, phone: true, type: true, role: true },
     });
 
-    const token = generateToken(updatedUser.id);
+    const token = await createSession(updatedUser.id, req);
     res.json({ success: true, token, user: updatedUser });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });

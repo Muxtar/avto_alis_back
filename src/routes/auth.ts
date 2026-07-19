@@ -2,7 +2,7 @@ import { Router, Request, Response } from 'express';
 import { PrismaClient, UserType } from '@prisma/client';
 import bcrypt from 'bcryptjs';
 import { upload } from '../middleware/upload';
-import { generateToken, adminAuth, AuthRequest } from '../middleware/auth';
+import { generateToken, createSession, adminAuth, AuthRequest } from '../middleware/auth';
 import { authLimiter, registerLimiter, verifyLimiter } from '../middleware/rateLimiter';
 import { extractPassportFromFiles } from '../services/vehiclePassportAI';
 import { processImages } from '../middleware/imageProcess';
@@ -581,7 +581,7 @@ router.post('/auth/telegram', authLimiter, async (req: Request, res: Response) =
       return;
     }
 
-    const token = generateToken(user.id);
+    const token = await createSession(user.id, req);
     res.json({ success: true, token, user });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });

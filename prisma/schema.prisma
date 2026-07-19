@@ -205,6 +205,7 @@ model User {
   hostBookings  Booking[]      @relation("HostBookings")
   contacts      Contact[]      @relation("OwnContacts")
   notifications Notification[]
+  sessions      Session[]      @relation("UserSessions")
 
   // Default location — used on listings + city-search browsing.
   city      String?
@@ -1122,4 +1123,22 @@ model Contact {
 
   @@unique([ownerId, phoneDigits])
   @@index([ownerId])
+}
+
+// Bağlı cihazlar — profilə daxil olan hər cihaz/sessiya (WhatsApp "linked devices" məntiqi).
+// JWT-nin içindəki `sid` bu sətrə işarə edir; revokedAt qoyulanda həmin cihaz sistemdən atılır.
+model Session {
+  id         String    @id @default(cuid())
+  userId     Int
+  os         String? // əməliyyat sistemi (Windows, macOS, iOS, Android...)
+  browser    String? // brauzer (Firefox, Safari, Chrome...)
+  deviceType String? // Desktop | Mobile | Tablet
+  userAgent  String? // tam User-Agent (diaqnostika üçün)
+  ip         String? // son IP (təxmini)
+  createdAt  DateTime  @default(now())
+  lastSeenAt DateTime  @default(now())
+  revokedAt  DateTime? // uzaqdan bağlanma vaxtı
+  user       User      @relation("UserSessions", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
 }

@@ -1167,4 +1167,60 @@ router.delete('/me/workplaces/:id', adminAuth, async (req: AuthRequest, res: Res
   }
 });
 
+// ───────────────────────── Bağlı cihazlar (aktiv sessiyalar) ─────────────────────────
+// WhatsApp "linked devices" məntiqi: profilə bağlı hər cihaz görünür, uzaqdan atıla bilər.
+
+// Aktiv (revoke olunmamış) cihazları göstər — cari cihaz işarələnir.
+router.get('/me/sessions', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const sessions = await prisma.session.findMany({
+      where: { userId: req.adminId!, revokedAt: null },
+      orderBy: { lastSeenAt: 'desc' },
+      select: { id: true, os: true, browser: true, deviceType: true, ip: true, createdAt: true, lastSeenAt: true },
+    });
+    res.json({
+      success: true,
+      sessions: sessions.map((s) => ({ ...s, current: s.id === req.sessionId })),
+    });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+// Bir cihazı sistemdən at (uzaqdan çıxış) — yalnız öz sessiyanı.
+router.delete('/me/sessions/:id', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const id = String(req.params.id);
+    const s = await prisma.session.findUnique({ where: { id }, select: { userId: true, revokedAt: true } });
+    if (!s || s.userId !== req.adminId) { res.status(404).json({ success: false, message: 'Sessiya tapılmadı' }); return; }
+    if (!s.revokedAt) await prisma.session.update({ where: { id }, data: { revokedAt: new Date() } });
+    res.json({ success: true });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+// Cari cihazdan başqa bütün cihazları at.
+router.post('/me/sessions/revoke-others', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    await prisma.session.updateMany({
+      where: { userId: req.adminId!, revokedAt: null, ...(req.sessionId ? { id: { not: req.sessionId } } : {}) },
+      data: { revokedAt: new Date() },
+    });
+    res.json({ success: true });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+// Çıxış — cari cihaz sessiyasını bağla (frontend logout çağırır).
+router.post('/me/logout', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    if (req.sessionId) await prisma.session.updateMany({ where: { id: req.sessionId, userId: req.adminId! }, data: { revokedAt: new Date() } });
+    res.json({ success: true });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
 export default router;
