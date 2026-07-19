@@ -261,6 +261,35 @@ router.post('/messages/contact', messageLimiter, adminAuth, async (req: AuthRequ
   }
 });
 
+// Konum paylaş — 1:1 və ya qrup. latitude/longitude tələb olunur.
+router.post('/messages/location', messageLimiter, adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const latitude = parseFloat(String(req.body.latitude));
+    const longitude = parseFloat(String(req.body.longitude));
+    if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+      res.status(400).json({ success: false, message: 'Konum məlumatı yanlışdır' }); return;
+    }
+    const data = {
+      content: String(req.body.address || '').trim(), // istəyə bağlı ünvan mətni
+      type: 'LOCATION' as any,
+      latitude,
+      longitude,
+      replyToId: req.body.replyToId ? parseInt(String(req.body.replyToId)) : null,
+    };
+    const conversationId = req.body.conversationId ? parseInt(String(req.body.conversationId)) : 0;
+    if (conversationId) {
+      if (!(await assertMember(conversationId, req.adminId!))) { res.status(403).json({ success: false, message: 'Bu qrupun üzvü deyilsiniz' }); return; }
+      await createAndEmit(req.adminId!, { conversationId }, data, res);
+      return;
+    }
+    const receiver = parseInt(String(req.body.receiverId));
+    if (!receiver) { res.status(400).json({ success: false, message: 'Alıcı yoxdur' }); return; }
+    await createAndEmit(req.adminId!, { receiver }, data, res);
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
 // Get my conversations (1:1 only — qrup mesajları xaric)
 router.get('/messages/conversations', adminAuth, async (req: AuthRequest, res: Response) => {
   try {

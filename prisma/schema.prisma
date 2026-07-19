@@ -393,6 +393,7 @@ enum MessageType {
   AUDIO // səs mesajı
   VIDEO // video mesaj (video note)
   CONTACT // paylaşılan kontakt
+  LOCATION // paylaşılan konum (xəritə)
 }
 
 model Message {
@@ -411,6 +412,8 @@ model Message {
   mediaDuration  Int? // saniyə (audio/video)
   contactPhone   String? // paylaşılan kontaktın nömrəsi
   contactUserId  Int? // paylaşılan kontakt qeydiyyatlı istifadəçidirsə
+  latitude       Float? // paylaşılan konum (LOCATION)
+  longitude      Float? // paylaşılan konum (LOCATION)
   read           Boolean              @default(false)
   deliveredAt    DateTime? // qarşı tərəf onlayn olub aldı (tək ✓ → ✓✓)
   editedAt       DateTime? // redaktə olunubsa
