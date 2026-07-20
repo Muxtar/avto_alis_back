@@ -1146,3 +1146,16 @@ model Session {
 
   @@index([userId])
 }
+
+// Ana səhifə karuseli — admin şəkil/banner yükləyir (endirimlər və s.).
+model Banner {
+  id        Int      @id @default(autoincrement())
+  image     String // yüklənmiş fayl adı
+  link      String? // klikləyəndə keçid (opsional)
+  title     String? // alt yazı / başlıq (opsional)
+  active    Boolean  @default(true)
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now())
+
+  @@index([active, sortOrder])
+}
