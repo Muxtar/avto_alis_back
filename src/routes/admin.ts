@@ -766,4 +766,81 @@ router.post('/admin/social-links/:id/:action', requireAdmin, async (req: AuthReq
   }
 });
 
+// ───────── İrəli səviyyə admin: ümumi baxış (badge sayları + canlı statistika) ─────────
+router.get('/admin/overview', requireAdmin, async (_req: AuthRequest, res: Response) => {
+  try {
+    const now = new Date();
+    const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+    const [
+      users, blockedUsers, listings, orders, businesses, couriers,
+      pBusinesses, pSellerApps, pIdVer, pCredentials, pSocial, pComplaints, pReturns,
+      revenueAgg, revenueTodayAgg, ordersToday, newUsers7d, activeConsult,
+    ] = await Promise.all([
+      prisma.user.count({ where: { role: 'USER', type: { not: 'COURIER' } } }),
+      prisma.user.count({ where: { role: 'USER', isBlocked: true } }),
+      prisma.listing.count(),
+      prisma.order.count(),
+      prisma.business.count(),
+      prisma.user.count({ where: { type: 'COURIER' } }),
+      prisma.business.count({ where: { status: 'PENDING' } }),
+      prisma.sellerVerification.count({ where: { status: 'PENDING' } }),
+      prisma.user.count({ where: { idVerifyStatus: 'PENDING' } }),
+      prisma.professionDocument.count({ where: { status: 'PENDING' } }),
+      prisma.socialLink.count({ where: { verified: false } }),
+      prisma.complaint.count({ where: { status: { in: ['OPEN', 'REVIEWING'] } } }),
+      prisma.returnRequest.count({ where: { status: 'REQUESTED' } }),
+      prisma.order.aggregate({ _sum: { total: true }, where: { paymentStatus: 'PAID' } }),
+      prisma.order.aggregate({ _sum: { total: true }, where: { paymentStatus: 'PAID', createdAt: { gte: startOfDay } } }),
+      prisma.order.count({ where: { createdAt: { gte: startOfDay } } }),
+      prisma.user.count({ where: { role: 'USER', createdAt: { gte: weekAgo } } }),
+      prisma.consultationSession.count({ where: { status: 'ACTIVE' } }).catch(() => 0),
+    ]);
+    const pending = {
+      businesses: pBusinesses, sellerApps: pSellerApps, idVerifications: pIdVer,
+      credentials: pCredentials, socialLinks: pSocial, complaints: pComplaints, returns: pReturns,
+    };
+    const pendingTotal = Object.values(pending).reduce((a, b) => a + b, 0);
+    res.json({
+      success: true,
+      stats: {
+        users, blockedUsers, listings, orders, businesses, couriers,
+        revenueTotal: revenueAgg._sum.total || 0,
+        revenueToday: revenueTodayAgg._sum.total || 0,
+        ordersToday, newUsers7d, activeConsult,
+      },
+      pending,
+      pendingTotal,
+    });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+// ───────── İrəli səviyyə admin: qlobal axtarış (istifadəçi/elan/biznes/sifariş) ─────────
+router.get('/admin/search', requireAdmin, async (req: AuthRequest, res: Response) => {
+  try {
+    const q = String(req.query.q || '').trim();
+    if (!q) { res.json({ success: true, results: { users: [], listings: [], businesses: [], orders: [] } }); return; }
+    const idNum = parseInt(q);
+    const hasId = Number.isFinite(idNum) && idNum > 0;
+    const userOr: any[] = [{ name: { contains: q, mode: 'insensitive' } }, { phone: { contains: q } }];
+    if (hasId) userOr.push({ id: idNum });
+    const listOr: any[] = [{ title: { contains: q, mode: 'insensitive' } }];
+    if (hasId) listOr.push({ id: idNum });
+    const bizOr: any[] = [{ name: { contains: q, mode: 'insensitive' } }, { voen: { contains: q } }];
+    if (hasId) bizOr.push({ id: idNum });
+
+    const [usersRes, listingsRes, businessesRes, ordersRes] = await Promise.all([
+      prisma.user.findMany({ where: { role: 'USER', OR: userOr }, take: 6, select: { id: true, name: true, phone: true, type: true, isBlocked: true, avatar: true } }),
+      prisma.listing.findMany({ where: { OR: listOr }, take: 6, select: { id: true, title: true, price: true, type: true } }),
+      prisma.business.findMany({ where: { OR: bizOr }, take: 5, select: { id: true, name: true, voen: true, status: true } }),
+      hasId ? prisma.order.findMany({ where: { id: idNum }, take: 3, select: { id: true, status: true, total: true, paymentStatus: true } }) : Promise.resolve([]),
+    ]);
+    res.json({ success: true, results: { users: usersRes, listings: listingsRes, businesses: businessesRes, orders: ordersRes } });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
 export default router;
