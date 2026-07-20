@@ -95,6 +95,34 @@ router.get('/admin/users', requireAdmin, async (req: AuthRequest, res: Response)
   }
 });
 
+// Create User (admin əl ilə istifadəçi əlavə edir)
+router.post('/admin/users', requireAdmin, async (req: AuthRequest, res: Response) => {
+  try {
+    const name = String(req.body.name || '').trim();
+    const phone = String(req.body.phone || '').trim();
+    if (!name || !phone) { res.status(400).json({ success: false, message: 'Ad və telefon tələb olunur' }); return; }
+    const validTypes = ['CAR_OWNER', 'MECHANIC', 'PARTS_SELLER', 'COURIER'];
+    const type = validTypes.includes(req.body.type) ? req.body.type : 'CAR_OWNER';
+    const exists = await prisma.user.findFirst({ where: { phone } });
+    if (exists) { res.status(400).json({ success: false, message: 'Bu telefon artıq qeydiyyatdadır' }); return; }
+    const data: any = {
+      name, phone, type: type as UserType,
+      role: req.body.role === 'ADMIN' ? 'ADMIN' : 'USER',
+      verified: req.body.verified === true || req.body.verified === 'true',
+      profileComplete: true,
+    };
+    if (req.body.email) data.email = String(req.body.email).trim();
+    if (req.body.password) data.password = await bcrypt.hash(String(req.body.password), 10);
+    const user = await prisma.user.create({
+      data,
+      select: { id: true, name: true, phone: true, email: true, type: true, role: true, verified: true, isBlocked: true, createdAt: true },
+    });
+    res.status(201).json({ success: true, user });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
 // Update User
 router.put('/admin/users/:id', requireAdmin, async (req: AuthRequest, res: Response) => {
   try {
