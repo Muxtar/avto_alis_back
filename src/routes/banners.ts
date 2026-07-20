@@ -72,6 +72,7 @@ router.post('/admin/banners', requireAdmin, bannerImage, processImages, async (r
     const banner = await prisma.banner.create({
       data: {
         image: file.filename,
+        position: req.body.position === 'SIDE' ? 'SIDE' : 'MAIN',
         link: req.body.link ? String(req.body.link).trim() : null,
         title: req.body.title ? String(req.body.title).trim() : null,
         active: req.body.active !== 'false',
@@ -93,6 +94,7 @@ router.put('/admin/banners/:id', requireAdmin, async (req: AuthRequest, res: Res
     if (req.body.link !== undefined) data.link = req.body.link ? String(req.body.link).trim() : null;
     if (req.body.title !== undefined) data.title = req.body.title ? String(req.body.title).trim() : null;
     if (req.body.sortOrder !== undefined) data.sortOrder = parseInt(String(req.body.sortOrder)) || 0;
+    if (req.body.position !== undefined) data.position = req.body.position === 'SIDE' ? 'SIDE' : 'MAIN';
     const banner = await prisma.banner.update({ where: { id }, data });
     res.json({ success: true, banner });
   } catch (error: any) {
