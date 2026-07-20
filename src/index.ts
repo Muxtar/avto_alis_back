@@ -6,6 +6,7 @@ import path from 'path';
 import fs from 'fs';
 import { initCallSignaling } from './services/callSignaling';
 import { PrismaClient } from '@prisma/client';
+import bcrypt from 'bcryptjs';
 import sharp from 'sharp';
 import authRoutes from './routes/auth';
 import verifyRoutes from './routes/verify';
@@ -224,9 +225,34 @@ async function backfillOptimizeImages() {
 const server = http.createServer(app);
 initCallSignaling(server, allowedOrigins);
 
+// Admin bootstrap — env-lə idarə olunur (məlumatları SİLMİR, yalnız admin yaradır/sıfırlayır).
+// Railway-də ADMIN_BOOTSTRAP_USER + ADMIN_BOOTSTRAP_PASS qoyub yenidən deploy edin.
+async function ensureAdmin() {
+  const user = process.env.ADMIN_BOOTSTRAP_USER;
+  const pass = process.env.ADMIN_BOOTSTRAP_PASS;
+  if (!user || !pass) return;
+  const prisma = new PrismaClient();
+  try {
+    const hash = await bcrypt.hash(pass, 10);
+    const existing = await prisma.user.findFirst({ where: { name: user } });
+    if (existing) {
+      await prisma.user.update({ where: { id: existing.id }, data: { role: 'ADMIN', password: hash, verified: true } });
+      console.log(`[admin] '${user}' admin kimi yeniləndi (parol sıfırlandı).`);
+    } else {
+      await prisma.user.create({ data: { name: user, phone: `admin-${Date.now()}`, type: 'CAR_OWNER', role: 'ADMIN', password: hash, verified: true, profileComplete: true } });
+      console.log(`[admin] '${user}' admin yaradıldı.`);
+    }
+  } catch (e: any) {
+    console.error('[admin] bootstrap xətası:', e?.message);
+  } finally {
+    await prisma.$disconnect();
+  }
+}
+
 server.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
   console.log(`CORS origins: ${allowedOrigins.join(', ')}`);
+  ensureAdmin();
   backfillListingExpiresAt();
   backfillOptimizeImages();
 });
