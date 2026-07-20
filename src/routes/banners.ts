@@ -1,7 +1,7 @@
-import { Router, Request, Response } from 'express';
+import { Router, Request, Response, NextFunction } from 'express';
 import { PrismaClient } from '@prisma/client';
+import multer from 'multer';
 import { requireAdmin, AuthRequest } from '../middleware/auth';
-import { upload } from '../middleware/upload';
 import { processImages } from '../middleware/imageProcess';
 import fs from 'fs';
 import path from 'path';
@@ -12,6 +12,34 @@ const prisma = new PrismaClient();
 const UPLOADS_DIR =
   process.env.UPLOADS_DIR ||
   (process.env.RAILWAY_VOLUME_MOUNT_PATH ? path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH, 'uploads') : path.join(__dirname, '../../uploads'));
+
+// Banner üçün ayrıca yükləyici — daha böyük limit (banner şəkilləri iri olur) və
+// daha geniş şəkil qəbulu. processImages sonra JPEG-ə sıxır.
+const bannerStorage = multer.diskStorage({
+  destination: (_req, _file, cb) => cb(null, UPLOADS_DIR),
+  filename: (_req, file, cb) => cb(null, `banner-${Date.now()}-${Math.round(Math.random() * 1e9)}${path.extname(file.originalname) || '.jpg'}`),
+});
+const bannerUpload = multer({
+  storage: bannerStorage,
+  limits: { fileSize: 20 * 1024 * 1024 }, // 20 MB (iri banner şəkilləri)
+  fileFilter: (_req, file, cb) => {
+    const okMime = /^image\//i.test(file.mimetype) || file.mimetype === 'application/octet-stream';
+    const okExt = /\.(jpe?g|png|webp|heic|heif|gif|avif|bmp)$/i.test(file.originalname);
+    if (okMime || okExt) cb(null, true);
+    else cb(new Error('Yalnız şəkil faylı yükləyin (jpg, png, webp, gif...)'));
+  },
+});
+// Multer xətasını təmiz JSON-la qaytar (bağlantı sıfırlanmasın → ERR_HTTP2 olmasın).
+function bannerImage(req: Request, res: Response, next: NextFunction) {
+  bannerUpload.single('image')(req, res, (err: any) => {
+    if (err) {
+      const msg = err.code === 'LIMIT_FILE_SIZE' ? 'Şəkil çox böyükdür (max 20 MB)' : (err.message || 'Şəkil yüklənmədi');
+      res.status(400).json({ success: false, message: msg });
+      return;
+    }
+    next();
+  });
+}
 
 // Public — ana səhifə karuseli üçün aktiv bannerlər.
 router.get('/banners', async (_req: Request, res: Response) => {
@@ -37,7 +65,7 @@ router.get('/admin/banners', requireAdmin, async (_req: AuthRequest, res: Respon
 });
 
 // Admin — banner yarat (şəkil yüklə).
-router.post('/admin/banners', requireAdmin, upload.single('image'), processImages, async (req: AuthRequest, res: Response) => {
+router.post('/admin/banners', requireAdmin, bannerImage, processImages, async (req: AuthRequest, res: Response) => {
   try {
     const file = (req as any).file;
     if (!file) { res.status(400).json({ success: false, message: 'Şəkil tələb olunur' }); return; }
