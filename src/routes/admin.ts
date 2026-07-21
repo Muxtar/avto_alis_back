@@ -194,6 +194,11 @@ router.get('/admin/listings', requireAdmin, async (req: AuthRequest, res: Respon
     const where: Prisma.ListingWhereInput = {};
     // ?status=PENDING — moderasiya növbəsi
     if (status && status !== 'all') where.status = status as any;
+    // ?ownerType=object|user&ownerId=N — konkret sahibin elanları
+    const ownerType = String(req.query.ownerType || '');
+    const ownerId = parseInt(String(req.query.ownerId || ''));
+    if (ownerType === 'object' && !Number.isNaN(ownerId)) where.businessObjectId = ownerId;
+    else if (ownerType === 'user' && !Number.isNaN(ownerId)) { where.userId = ownerId; where.businessObjectId = null; }
     if (search) {
       where.OR = [
         { title: { contains: search as string, mode: 'insensitive' } },
@@ -216,6 +221,105 @@ router.get('/admin/listings', requireAdmin, async (req: AuthRequest, res: Respon
     const pendingCount = await prisma.listing.count({ where: { status: 'PENDING' } });
 
     res.json({ listings, total, pendingCount, page: parseInt(page as string), totalPages: Math.ceil(total / take) });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+// GET /admin/listing-owners — elanları SAHİBİNƏ görə qruplaşdırır.
+// VÖEN-li elan biznes obyektinə, digərləri şəxsə aid sayılır.
+// Cavab: hər sahib üçün ad, VÖEN/şirkət və elan sayları (ümumi/gözləmədə/...).
+router.get('/admin/listing-owners', requireAdmin, async (req: AuthRequest, res: Response) => {
+  try {
+    const { status, search } = req.query;
+    const base: Prisma.ListingWhereInput = {};
+    if (status && status !== 'all') base.status = status as any;
+
+    const [objRows, userRows] = await Promise.all([
+      prisma.listing.groupBy({
+        by: ['businessObjectId', 'status'],
+        where: { ...base, businessObjectId: { not: null } },
+        _count: { _all: true },
+      }),
+      prisma.listing.groupBy({
+        by: ['userId', 'status'],
+        where: { ...base, businessObjectId: null },
+        _count: { _all: true },
+      }),
+    ]);
+
+    type Owner = {
+      key: string; kind: 'OBJECT' | 'USER'; id: number;
+      name: string; subtitle: string | null; voen: string | null;
+      total: number; pending: number; approved: number; rejected: number;
+    };
+    const owners = new Map<string, Owner>();
+    const bump = (o: Owner, st: string, n: number) => {
+      o.total += n;
+      if (st === 'PENDING') o.pending += n;
+      else if (st === 'APPROVED') o.approved += n;
+      else if (st === 'REJECTED') o.rejected += n;
+    };
+
+    const objIds = [...new Set(objRows.map((r) => r.businessObjectId!).filter((x) => x != null))];
+    const userIds = [...new Set(userRows.map((r) => r.userId))];
+    const [objects, users] = await Promise.all([
+      objIds.length
+        ? prisma.businessObject.findMany({
+            where: { id: { in: objIds } },
+            select: { id: true, name: true, city: true, business: { select: { name: true, voen: true } } },
+          })
+        : Promise.resolve([]),
+      userIds.length
+        ? prisma.user.findMany({ where: { id: { in: userIds } }, select: { id: true, name: true, phone: true, type: true } })
+        : Promise.resolve([]),
+    ]);
+    const objById = new Map(objects.map((o) => [o.id, o]));
+    const userById = new Map(users.map((u) => [u.id, u]));
+
+    for (const r of objRows) {
+      const o = objById.get(r.businessObjectId!);
+      if (!o) continue;
+      const key = `OBJECT:${o.id}`;
+      if (!owners.has(key)) {
+        owners.set(key, {
+          key, kind: 'OBJECT', id: o.id,
+          name: `${o.name} (Obyekt №${o.id})`,
+          subtitle: [o.business?.name, o.city].filter(Boolean).join(' · ') || null,
+          voen: o.business?.voen || null,
+          total: 0, pending: 0, approved: 0, rejected: 0,
+        });
+      }
+      bump(owners.get(key)!, r.status, r._count._all);
+    }
+    for (const r of userRows) {
+      const u = userById.get(r.userId);
+      if (!u) continue;
+      const key = `USER:${u.id}`;
+      if (!owners.has(key)) {
+        owners.set(key, {
+          key, kind: 'USER', id: u.id,
+          name: u.name || `İstifadəçi №${u.id}`,
+          subtitle: u.phone || null,
+          voen: null,
+          total: 0, pending: 0, approved: 0, rejected: 0,
+        });
+      }
+      bump(owners.get(key)!, r.status, r._count._all);
+    }
+
+    let list = [...owners.values()];
+    if (search) {
+      const q = String(search).toLowerCase();
+      list = list.filter((o) =>
+        o.name.toLowerCase().includes(q) ||
+        (o.subtitle || '').toLowerCase().includes(q) ||
+        (o.voen || '').includes(q));
+    }
+    // Gözləyəni çox olan sahib yuxarıda — moderasiya növbəsi üçün rahat.
+    list.sort((a, b) => b.pending - a.pending || b.total - a.total || a.name.localeCompare(b.name));
+
+    res.json({ success: true, owners: list });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }
