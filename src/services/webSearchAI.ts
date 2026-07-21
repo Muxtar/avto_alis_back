@@ -36,22 +36,86 @@ function parseJson(text: string): any | null {
   try { return JSON.parse(candidate); } catch { return null; }
 }
 
-function prompt(query: string): string {
-  return `İstifadəçi bizim elan saytında "${query}" axtardı, amma saytda uyğun nəticə tapılmadı.
-İnternetdə axtar və bu sorğuya ən uyğun 4-6 nəticə tap (məhsul səhifəsi, otel/məkan səhifəsi, rəsmi sayt və s.).
-Mümkünsə Azərbaycan üçün aktual mənbələrə üstünlük ver.
+// ── Azərbaycan filtri ────────────────────────────────────────────────────────
+// Üç qat: (1) alət səviyyəsi (user_location + blocked_domains),
+// (2) prompt səviyyəsi (aşağıdakı SYSTEM/prompt), (3) kod səviyyəsi (isAzResult).
+// Model qaydanı pozsa belə, kod filtri son söz sahibidir.
 
-Axtarışı bitirdikdən sonra YALNIZ bu JSON formatında cavab ver, başqa heç nə yazma:
+// Azərbaycan şirkətlərinin .az olmayan domenləri (nadir hal).
+const AZ_BRAND_DOMAINS = new Set([
+  'tap.az', 'turbo.az', 'bina.az', 'umico.az', 'kontakt.az', 'irshad.az',
+  'bakuelectronics.az', 'birmarket.az', 'trendyol.az',
+]);
+
+// Beynəlxalq saytlarda Azərbaycana aid səhifəni tanıyan izlər.
+const AZ_PATH_HINTS = /(\/az\/|azerbaijan|azerbaycan|az[eə]rbaycan|\bbaku\b|-baku|\bbaki\b|\bganja\b|\bnakhchivan\b|\bqabala\b|\bshaki\b)/i;
+
+// Nəticə Azərbaycana aiddirsə true. Şübhə varsa false (nəticə atılır).
+export function isAzResult(url: string): boolean {
+  try {
+    const u = new URL(url);
+    const host = u.hostname.toLowerCase().replace(/^www\./, '');
+    if (host === 'az' || host.endsWith('.az')) return true;   // .az domenləri
+    if (AZ_BRAND_DOMAINS.has(host)) return true;              // tanınmış AZ brendləri
+    return AZ_PATH_HINTS.test(host + u.pathname);             // beynəlxalq saytın AZ səhifəsi
+  } catch {
+    return false;
+  }
+}
+
+// Azərbaycanla əlaqəsi olmayan qlobal pazarlar — alət səviyyəsində bağlanır.
+const BLOCKED_DOMAINS = [
+  'amazon.com', 'aliexpress.com', 'ebay.com', 'hepsiburada.com',
+  'trendyol.com', 'wildberries.ru', 'ozon.ru', 'temu.com',
+];
+
+const SYSTEM = `Sən tradixai (Azərbaycan onlayn elan platforması) üçün internet axtarışı köməkçisisən.
+İstifadəçi saytda nəsə axtarıb, amma nəticə tapılmayıb. Sənin işin həmin sorğunu
+internetdə axtarıb YALNIZ AZƏRBAYCANA AİD nəticələr qaytarmaqdır.
+
+Coğrafi qayda (ən vacib qayda — heç vaxt pozma):
+- Nəticə Azərbaycanda satılan, yerləşən və ya Azərbaycandan sifariş edilə bilən olmalıdır.
+  Azərbaycanla əlaqəsi olmayan nəticəni SİYAHIYA SALMA.
+- Üstünlük sırası: (1) .az domenləri və Azərbaycan şirkətlərinin rəsmi saytları,
+  (2) beynəlxalq saytların Azərbaycan bölməsi (məs. booking.com-un Bakı oteli səhifəsi),
+  (3) başqa heç nə.
+- Beynəlxalq sayt yalnız o halda uyğundur ki, HƏMİN SƏHİFƏ Azərbaycandakı məhsul/məkan
+  haqqında olsun. Ümumi qlobal səhifə uyğun deyil.
+- Şübhə varsa nəticəni at. Az sayda düzgün nəticə, çox sayda uyğunsuzdan yaxşıdır.
+
+Dürüstlük qaydası:
+- Yalnız axtarış nəticələrindən gələn REAL ünvanları yaz. URL uydurma.
+- Qiymət, ünvan, telefon kimi məlumatı yalnız səhifədə görmüsənsə yaz.
+- Heç nə tapmasan, boş siyahı qaytar və bunu açıq bildir. Uydurma ilə doldurma.
+
+Cavab dili: Azərbaycan dili.`;
+
+function prompt(query: string): string {
+  return `İstifadəçi bizim saytda "${query}" axtardı, saytda uyğun elan tapılmadı.
+
+Bunu internetdə axtar və Azərbaycanda mövcud olan ən uyğun 4-6 nəticəni tap.
+Axtararkən sorğuya "Azərbaycan" və ya "Bakı" kimi yer göstəricisi əlavə et.
+
+Nəticə tipləri (sorğuya uyğun olanı seç):
+- Məhsuldursa: Azərbaycan mağazalarının məhsul səhifələri
+- Otel/məkandırsa: rəsmi sayt və ya rezervasiya səhifəsi (Azərbaycandakı obyekt)
+- Xidmətdirsə: xidməti Azərbaycanda göstərən şirkətin səhifəsi
+
+Axtarışı bitirdikdən sonra YALNIZ bu JSON-u qaytar, başqa heç nə yazma:
 {
   "summary": "1-2 cümlə Azərbaycan dilində qısa xülasə",
   "results": [
-    { "title": "başlıq", "url": "tam https ünvan", "snippet": "1 cümlə izah (Azərbaycan dilində)" }
+    {
+      "title": "səhifənin başlığı",
+      "url": "tam https ünvan",
+      "snippet": "1 cümlə izah — nə olduğu və Azərbaycanla əlaqəsi",
+      "az_reason": "niyə bu nəticə Azərbaycana aiddir (qısa)"
+    }
   ]
 }
 
-Qeydlər:
-- "url" mütləq axtarış nəticəsindən gələn real ünvan olsun, uydurma yazma.
-- Nəticə tapılmazsa "results" boş massiv olsun və "summary"-də bunu bildir.`;
+Qeyd: "az_reason"-u özün üçün yaz — hər nəticəni siyahıya salmadan əvvəl onun
+Azərbaycanla əlaqəsini yoxla. Əlaqəni izah edə bilmirsənsə, nəticəni at.`;
 }
 
 /**
@@ -75,7 +139,15 @@ export async function webSearch(query: string): Promise<WebSearchResponse> {
       const res: any = await ai.messages.create({
         model: AI_MODEL,
         max_tokens: 2000,
-        tools: [{ type: 'web_search_20260209', name: 'web_search', max_uses: 5 } as any],
+        system: SYSTEM,
+        tools: [{
+          type: 'web_search_20260209',
+          name: 'web_search',
+          max_uses: 5,
+          // Axtarış motoru nəticələri Azərbaycana görə sıralasın.
+          user_location: { type: 'approximate', country: 'AZ', city: 'Baku', timezone: 'Asia/Baku' },
+          blocked_domains: BLOCKED_DOMAINS,
+        } as any],
         messages,
       });
       if (res.stop_reason === 'refusal') return { ...EMPTY, error: 'Bu sorğu üçün axtarış edilə bilmədi.' };
@@ -97,7 +169,10 @@ export async function webSearch(query: string): Promise<WebSearchResponse> {
 
   const results: WebResult[] = Array.isArray(parsed.results)
     ? parsed.results
-        .filter((r: any) => r && typeof r.url === 'string' && /^https?:\/\//i.test(r.url))
+        // Son güvənlik qatı: model qaydanı pozsa belə, Azərbaycana aid
+        // olmayan nəticə buraxılmır. "az_reason" daxili yoxlama üçündür,
+        // istifadəçiyə göndərilmir.
+        .filter((r: any) => r && typeof r.url === 'string' && /^https?:\/\//i.test(r.url) && isAzResult(r.url))
         .slice(0, 6)
         .map((r: any) => ({
           title: String(r.title || r.url).slice(0, 160),
