@@ -10,6 +10,8 @@ export interface WebResult {
   title: string;
   url: string;
   snippet: string;
+  price: number | null;   // AZN — səhifədə görünürsə
+  site: string;           // mənbə sayt (tap.az, turbo.az ...)
 }
 
 export interface WebSearchResponse {
@@ -139,13 +141,21 @@ Axtarışı bitirdikdən sonra YALNIZ bu JSON-u qaytar, başqa heç nə yazma:
   "summary": "1-2 cümlə Azərbaycan dilində qısa xülasə",
   "results": [
     {
-      "title": "səhifənin başlığı",
+      "title": "elanın / məhsulun adı",
       "url": "tam https ünvan",
+      "site": "mənbə sayt, məs. tap.az",
+      "price": 1250,
       "snippet": "1 cümlə izah — nə olduğu və Azərbaycanla əlaqəsi",
       "az_reason": "niyə bu nəticə Azərbaycana aiddir (qısa)"
     }
   ]
 }
+
+"price" haqqında:
+- YALNIZ axtarış nəticəsində/səhifədə həqiqətən gördüyün qiyməti yaz.
+- Yalnız RƏQƏM yaz, AZN ilə: 1250 (── "1250 AZN", "1.250" və ya mətn YOX).
+- Qiymət dollar/avro ilədirsə, təxmini çevirmə etmə — price: null qoy.
+- Qiyməti görmürsənsə price: null. Təxmin etmə, uydurma.
 
 Qeyd: "az_reason"-u özün üçün yaz — hər nəticəni siyahıya salmadan əvvəl onun
 Azərbaycanla əlaqəsini yoxla. Əlaqəni izah edə bilmirsənsə, nəticəni at.`;
@@ -246,12 +256,39 @@ export async function webSearch(query: string): Promise<WebSearchResponse> {
         // olmayan nəticə buraxılmır. "az_reason" daxili yoxlama üçündür,
         // istifadəçiyə göndərilmir.
         .filter((r: any) => r && typeof r.url === 'string' && /^https?:\/\//i.test(r.url) && isAzResult(r.url))
-        .slice(0, 6)
-        .map((r: any) => ({
-          title: String(r.title || r.url).slice(0, 160),
-          url: String(r.url),
-          snippet: String(r.snippet || '').slice(0, 300),
-        }))
+        .map((r: any) => {
+          // Qiyməti yalnız təmiz rəqəm kimi qəbul edirik; "1.250 AZN" kimi
+          // mətn gəlsə də rəqəmə çeviririk, alınmasa null.
+          let price: number | null = null;
+          if (typeof r.price === 'number' && Number.isFinite(r.price) && r.price > 0) {
+            price = r.price;
+          } else if (typeof r.price === 'string') {
+            // Xarici valyuta (USD/EUR/RUB) AZN kimi göstərilməməlidir — belə
+            // qiyməti atırıq, əks halda "1500 $" ucuz AZN kimi sıralanardı.
+            const foreign = /[$€₽]|usd|eur|dollar|avro|rub/i.test(r.price);
+            if (!foreign) {
+              const n = parseFloat(r.price.replace(/[^\d.,]/g, '').replace(/\.(?=\d{3}\b)/g, '').replace(',', '.'));
+              if (Number.isFinite(n) && n > 0) price = n;
+            }
+          }
+          let site = String(r.site || '').trim().toLowerCase();
+          if (!site) { try { site = new URL(r.url).hostname.replace(/^www\./, ''); } catch { site = ''; } }
+          return {
+            title: String(r.title || r.url).slice(0, 160),
+            url: String(r.url),
+            snippet: String(r.snippet || '').slice(0, 300),
+            price,
+            site: site.slice(0, 60),
+          };
+        })
+        // Ucuzdan bahaya. Qiyməti bilinməyənlər sona düşür.
+        .sort((a: WebResult, b: WebResult) => {
+          if (a.price == null && b.price == null) return 0;
+          if (a.price == null) return 1;
+          if (b.price == null) return -1;
+          return a.price - b.price;
+        })
+        .slice(0, 6)   // sıralamadan SONRA kəsirik ki, ən ucuzlar itməsin
     : [];
 
   // Model nəticə tapıb, amma hamısı Azərbaycan filtrindən keçməyibsə —
