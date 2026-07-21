@@ -512,6 +512,8 @@ router.post('/me/listings', listingWriteLimiter, adminAuth, upload.array('images
         businessId: bizId,
         businessObjectId: bizObjId,
         expiresAt,
+        // Yeni elan admin təsdiqini gözləyir — saytda hələ görünmür.
+        status: 'PENDING',
       },
     });
     res.status(201).json({ success: true, listing });
@@ -660,6 +662,7 @@ router.post('/me/listings/bulk', bulkLimiter, adminAuth, async (req: AuthRequest
             businessId: bizId,
             businessObjectId: bizObjId,
             expiresAt,
+            status: 'PENDING', // toplu yükləmə də moderasiyadan keçir
           },
         });
         created.push({ index: i, id: listing.id, externalId: it.externalId });

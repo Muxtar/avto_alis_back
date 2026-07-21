@@ -2,7 +2,7 @@ import { Router, Request, Response } from 'express';
 import { PrismaClient, Prisma } from '@prisma/client';
 import { upload } from '../middleware/upload';
 import { processImages } from '../middleware/imageProcess';
-import { adminAuth, AuthRequest } from '../middleware/auth';
+import { adminAuth, AuthRequest, verifyTokenUserId } from '../middleware/auth';
 import { purchasedListing, messagedUser } from '../services/reviewGating';
 
 const router = Router();
@@ -16,6 +16,8 @@ router.get('/listings', async (req: Request, res: Response) => {
     const take = parseInt(limit as string);
 
     const where: Prisma.ListingWhereInput = {
+      // Yalnız admin tərəfindən təsdiqlənmiş elanlar saytda görünür.
+      status: 'APPROVED',
       AND: [
         { OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }] },
         // Deaktiv biznes/obyektin elanları marketplace-də görünməsin.
@@ -162,7 +164,7 @@ router.get('/stats', async (_req: Request, res: Response) => {
 router.get('/listings/filters', async (req: Request, res: Response) => {
   try {
     const { category, type } = req.query;
-    const base: any = { OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }] };
+    const base: any = { status: 'APPROVED', OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }] };
     if (category) base.category = { startsWith: String(category) };
     if (type && type !== 'all') base.type = type as any;
     const [brands, cities, agg] = await Promise.all([
@@ -233,6 +235,7 @@ router.get('/sellers/:id', async (req: Request, res: Response) => {
     const skip = (page - 1) * limit;
     const sellerListingsWhere = {
       userId: user.id,
+      status: 'APPROVED' as const, // gözləmədə/rədd edilmiş elanlar profildə görünmür
       OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
     };
     const [listings, listingsTotal] = await Promise.all([
@@ -307,6 +310,19 @@ router.get('/listings/:id', async (req: Request, res: Response) => {
     if (listing.expiresAt && listing.expiresAt <= new Date()) {
       res.status(404).json({ success: false, message: 'Elan tapılmadı' });
       return;
+    }
+    // Moderasiyadan keçməmiş elanı yalnız sahibi və admin görə bilər.
+    if (listing.status !== 'APPROVED') {
+      const viewerId = verifyTokenUserId(req.headers.authorization?.replace('Bearer ', ''));
+      let allowed = viewerId != null && viewerId === listing.userId;
+      if (!allowed && viewerId != null) {
+        const viewer = await prisma.user.findUnique({ where: { id: viewerId }, select: { role: true } });
+        allowed = viewer?.role === 'ADMIN';
+      }
+      if (!allowed) {
+        res.status(404).json({ success: false, message: 'Elan tapılmadı' });
+        return;
+      }
     }
     res.json(listing);
   } catch (error: any) {
@@ -461,6 +477,7 @@ router.post('/listings', adminAuth, upload.array('images', 5), processImages, as
         phone: phone || null,
         year: year ? parseInt(year) : null,
         expiresAt,
+        status: 'PENDING', // admin təsdiqindən sonra saytda görünəcək
       },
       include: { user: { select: { id: true, name: true, avatar: true, verified: true, type: true } } },
     });

@@ -30,6 +30,15 @@ enum ListingType {
   SERVICE
 }
 
+// Elan moderasiyası — yeni elan admin təsdiqindən sonra saytda görünür.
+// Default APPROVED-dur ki, `db push` zamanı MÖVCUD elanlar itməsin;
+// yeni elanlar yaradılanda status açıq şəkildə PENDING qoyulur.
+enum ListingStatus {
+  PENDING  // gözləmədə — yalnız sahibi və admin görür
+  APPROVED // təsdiqlənib — saytda görünür
+  REJECTED // rədd edilib — sahibi səbəbi görür
+}
+
 enum BookingType {
   RESERVATION // restoran/masa/məkan — tarix + saat + nəfər
   STAY // otel/bağ evi/günlük kirayə — giriş-çıxış tarixi
@@ -357,6 +366,11 @@ model Listing {
   openTime         String? // rezervasiya üçün açılış saatı "10:00"
   closeTime        String? // rezervasiya üçün bağlanış saatı "23:00"
   viewCount        Int             @default(0)
+  // Moderasiya — bax: ListingStatus. Default APPROVED (köhnə elanlar üçün),
+  // yeni elanlar create zamanı PENDING olaraq yazılır.
+  status           ListingStatus   @default(APPROVED)
+  rejectReason     String?         // rədd edilibsə səbəb (sahibi görür)
+  reviewedAt       DateTime?       // admin nə vaxt baxdı
   expiresAt        DateTime?
   // Biznes bağlantısı — elan bir obyektə (filiala) aiddirsə kart ödənişi mümkün olur.
   businessId       Int?

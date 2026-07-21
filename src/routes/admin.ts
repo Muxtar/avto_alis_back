@@ -187,11 +187,13 @@ router.delete('/admin/users/:id', requireAdmin, async (req: AuthRequest, res: Re
 // Get All Listings
 router.get('/admin/listings', requireAdmin, async (req: AuthRequest, res: Response) => {
   try {
-    const { search, category, type, page = '1', limit = '20' } = req.query;
+    const { search, category, type, status, page = '1', limit = '20' } = req.query;
     const skip = (parseInt(page as string) - 1) * parseInt(limit as string);
     const take = parseInt(limit as string);
 
     const where: Prisma.ListingWhereInput = {};
+    // ?status=PENDING — moderasiya növbəsi
+    if (status && status !== 'all') where.status = status as any;
     if (search) {
       where.OR = [
         { title: { contains: search as string, mode: 'insensitive' } },
@@ -211,8 +213,34 @@ router.get('/admin/listings', requireAdmin, async (req: AuthRequest, res: Respon
       }),
       prisma.listing.count({ where }),
     ]);
+    const pendingCount = await prisma.listing.count({ where: { status: 'PENDING' } });
 
-    res.json({ listings, total, page: parseInt(page as string), totalPages: Math.ceil(total / take) });
+    res.json({ listings, total, pendingCount, page: parseInt(page as string), totalPages: Math.ceil(total / take) });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+// Elan moderasiyası — təsdiqlə / rədd et.
+// body: { status: 'APPROVED' | 'REJECTED' | 'PENDING', rejectReason?: string }
+router.patch('/admin/listings/:id/status', requireAdmin, async (req: AuthRequest, res: Response) => {
+  try {
+    const id = parseInt(req.params.id);
+    const status = String(req.body?.status || '').toUpperCase();
+    if (!['APPROVED', 'REJECTED', 'PENDING'].includes(status)) {
+      res.status(400).json({ success: false, message: 'status yalnız APPROVED, REJECTED və ya PENDING ola bilər' });
+      return;
+    }
+    const listing = await prisma.listing.update({
+      where: { id },
+      data: {
+        status: status as any,
+        rejectReason: status === 'REJECTED' ? (String(req.body?.rejectReason || '').trim() || null) : null,
+        reviewedAt: status === 'PENDING' ? null : new Date(),
+      },
+      select: { id: true, title: true, status: true, rejectReason: true, userId: true },
+    });
+    res.json({ success: true, listing });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }

@@ -174,6 +174,7 @@ router.get('/search/by-city/:city', async (req: Request, res: Response) => {
       prisma.listing.findMany({
         where: {
           city,
+          status: 'APPROVED',
           OR: [{ expiresAt: null }, { expiresAt: { gt: now } }],
         },
         include: {
@@ -259,7 +260,7 @@ router.get('/objects/:id', async (req: Request, res: Response) => {
     });
     if (!object || !object.isActive) { res.status(404).json({ success: false, message: 'Obyekt tapılmadı' }); return; }
     const listings = await prisma.listing.findMany({
-      where: { businessObjectId: id, OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] },
+      where: { businessObjectId: id, status: 'APPROVED', OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] },
       include: {
         user: { select: { id: true, name: true, type: true } },
         _count: { select: { comments: true } },
