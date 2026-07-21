@@ -91,6 +91,8 @@ Dürüstlük qaydası:
 - Yalnız axtarış nəticələrindən gələn REAL ünvanları yaz. URL uydurma.
 - Qiymət, ünvan, telefon kimi məlumatı yalnız səhifədə görmüsənsə yaz.
 - Heç nə tapmasan, boş siyahı qaytar və bunu açıq bildir. Uydurma ilə doldurma.
+- Axtarış sayı məhduddur. Limitə çatmamış tapdıqlarını qaytar; limit bəhanəsi ilə
+  boş cavab vermə.
 
 Cavab dili: Azərbaycan dili.`;
 
@@ -105,14 +107,25 @@ Sorğu qısa və ya qısaldılmış ola bilər (məs. "x5" → BMW X5 avtomobili
 nə demək olduğunu müəyyən et, sonra tam adla axtar. Bir neçə məna varsa,
 Azərbaycanda ən çox axtarılanı seç.
 
-ƏVVƏLCƏ bu Azərbaycan platformalarına bax (sorğunu "site:" ilə də sına,
-məs. "site:tap.az ${query}"):
-- Ümumi elanlar: tap.az, lalafo.az
-- Avtomobil: turbo.az
-- Daşınmaz əmlak: bina.az
-- Onlayn mağaza / məhsul: umico.az, kontakt.az, irshad.az, bakuelectronics.az, birmarket.az
-Bu saytlarda uyğun nəticə tapsan, onları siyahının BAŞINA qoy.
-Tapmasan, digər Azərbaycan mənbələrinə keç.
+AXTARIŞ BÜDCƏSİ: təxminən 10 axtarışın var. Onu səmərəli xərclə —
+hər saytı ayrıca yoxlamağa çalışma, büdcə bitər və əliboş qalarsan.
+
+Strategiya (bu sıra ilə):
+1. 1-2 ümumi axtarış: "<məhsul adı> Azərbaycan" və "<məhsul adı> Bakı qiymət".
+   Çox vaxt bu, tap.az / lalafo.az / umico.az nəticələrini onsuz da gətirir.
+2. Hələ də azdırsa, YALNIZ ən uyğun 1-2 platformada "site:" ilə axtar:
+   - Avtomobil → site:turbo.az
+   - Ev/mənzil/torpaq → site:bina.az
+   - Digər məhsullar → site:tap.az və ya site:lalafo.az
+3. Qalan büdcəni ehtiyatda saxla.
+
+Bu platformalardan nəticə tapsan, onları siyahının BAŞINA qoy:
+tap.az, lalafo.az, turbo.az (avtomobil), bina.az (əmlak),
+umico.az / kontakt.az / irshad.az / bakuelectronics.az / birmarket.az (mağaza).
+
+VACİB: axtarış büdcən bitməyə yaxınlaşırsa, DAYAN və o ana qədər tapdığın
+etibarlı nəticələri qaytar. Əliboş cavab vermə — 1-2 düzgün nəticə də
+heç nədən yaxşıdır. (Yenə də uydurma URL yazma.)
 
 Nəticə tipləri (sorğuya uyğun olanı seç):
 - Məhsuldursa: yuxarıdakı elan/mağaza platformalarının məhsul səhifələri
@@ -156,16 +169,16 @@ export async function webSearch(query: string): Promise<WebSearchResponse> {
   // düşürük ki, axtarış tamamilə sıradan çıxmasın.
   const TOOL_VARIANTS: any[] = [
     {
-      type: 'web_search_20260209', name: 'web_search', max_uses: 5,
+      type: 'web_search_20260209', name: 'web_search', max_uses: 10,
       user_location: { type: 'approximate', country: 'AZ', city: 'Baku', timezone: 'Asia/Baku' },
       blocked_domains: BLOCKED_DOMAINS,
     },
-    { type: 'web_search_20260209', name: 'web_search', max_uses: 5 },
+    { type: 'web_search_20260209', name: 'web_search', max_uses: 10 },
     {
-      type: 'web_search_20250305', name: 'web_search', max_uses: 5,
+      type: 'web_search_20250305', name: 'web_search', max_uses: 10,
       user_location: { type: 'approximate', country: 'AZ', city: 'Baku', timezone: 'Asia/Baku' },
     },
-    { type: 'web_search_20250305', name: 'web_search', max_uses: 5 },
+    { type: 'web_search_20250305', name: 'web_search', max_uses: 10 },
   ];
 
   let text = '';
@@ -179,7 +192,7 @@ export async function webSearch(query: string): Promise<WebSearchResponse> {
       for (let i = 0; i < 6; i++) {
         const res: any = await ai.messages.create({
           model: AI_MODEL,
-          max_tokens: 2000,
+          max_tokens: 3000,
           system: SYSTEM,
           tools: [TOOL_VARIANTS[v]],
           messages,
@@ -254,6 +267,11 @@ export async function webSearch(query: string): Promise<WebSearchResponse> {
   }
 
   console.log('[webSearch] sorğu:', q, '| model:', raw.length, '| AZ filtrindən keçən:', results.length);
+
+  // Nəticə yoxdursa modelin öz izahını (məs. "limit aşıldı") istifadəçiyə
+  // göstərmirik — qarışıq və narahatedicidir. Sadə mesaj kifayətdir.
+  if (results.length === 0) return { ok: true, summary: '', results: [] };
+
   return {
     ok: true,
     summary: typeof parsed.summary === 'string' ? parsed.summary.slice(0, 400) : '',
