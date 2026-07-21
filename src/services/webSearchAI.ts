@@ -43,8 +43,12 @@ function parseJson(text: string): any | null {
 
 // Azərbaycan şirkətlərinin .az olmayan domenləri (nadir hal).
 const AZ_BRAND_DOMAINS = new Set([
-  'tap.az', 'turbo.az', 'bina.az', 'umico.az', 'kontakt.az', 'irshad.az',
-  'bakuelectronics.az', 'birmarket.az', 'trendyol.az',
+  // Elan / pazar platformaları
+  'tap.az', 'turbo.az', 'bina.az', 'lalafo.az', 'lalafo.com', 'umico.az',
+  'birmarket.az', 'emalls.az', 'boss.az', 'jobsearch.az',
+  // Mağaza şəbəkələri
+  'kontakt.az', 'irshad.az', 'bakuelectronics.az', 'trendyol.az',
+  'soliton.az', 'texnomart.az', 'optimal.az',
 ]);
 
 // Beynəlxalq saytlarda Azərbaycana aid səhifəni tanıyan izlər.
@@ -96,8 +100,19 @@ function prompt(query: string): string {
 Bunu internetdə axtar və Azərbaycanda mövcud olan ən uyğun 4-6 nəticəni tap.
 Axtararkən sorğuya "Azərbaycan" və ya "Bakı" kimi yer göstəricisi əlavə et.
 
+ƏVVƏLCƏ bu Azərbaycan platformalarına bax (sorğunu "site:" ilə də sına,
+məs. "site:tap.az ${query}"):
+- Ümumi elanlar: tap.az, lalafo.az
+- Avtomobil: turbo.az
+- Daşınmaz əmlak: bina.az
+- Onlayn mağaza / məhsul: umico.az, kontakt.az, irshad.az, bakuelectronics.az, birmarket.az
+Bu saytlarda uyğun nəticə tapsan, onları siyahının BAŞINA qoy.
+Tapmasan, digər Azərbaycan mənbələrinə keç.
+
 Nəticə tipləri (sorğuya uyğun olanı seç):
-- Məhsuldursa: Azərbaycan mağazalarının məhsul səhifələri
+- Məhsuldursa: yuxarıdakı elan/mağaza platformalarının məhsul səhifələri
+- Avtomobildirsə: turbo.az elan səhifəsi
+- Ev/mənzil/torpaqdırsa: bina.az və ya tap.az elan səhifəsi
 - Otel/məkandırsa: rəsmi sayt və ya rezervasiya səhifəsi (Azərbaycandakı obyekt)
 - Xidmətdirsə: xidməti Azərbaycanda göstərən şirkətin səhifəsi
 
