@@ -100,6 +100,11 @@ function prompt(query: string): string {
 Bunu internetdə axtar və Azərbaycanda mövcud olan ən uyğun 4-6 nəticəni tap.
 Axtararkən sorğuya "Azərbaycan" və ya "Bakı" kimi yer göstəricisi əlavə et.
 
+Sorğu qısa və ya qısaldılmış ola bilər (məs. "x5" → BMW X5 avtomobili,
+"s24" → Samsung Galaxy S24, "air 2" → iPad Air 2). Belə halda əvvəlcə onun
+nə demək olduğunu müəyyən et, sonra tam adla axtar. Bir neçə məna varsa,
+Azərbaycanda ən çox axtarılanı seç.
+
 ƏVVƏLCƏ bu Azərbaycan platformalarına bax (sorğunu "site:" ilə də sına,
 məs. "site:tap.az ${query}"):
 - Ümumi elanlar: tap.az, lalafo.az
@@ -144,44 +149,84 @@ export async function webSearch(query: string): Promise<WebSearchResponse> {
   const q = query.trim().slice(0, 200);
   if (!q) return { ...EMPTY, error: 'Axtarış mətni boşdur.' };
 
-  const messages: any[] = [{ role: 'user', content: prompt(q) }];
-  let text = '';
+  console.log('[webSearch] başladı — sorğu:', q, '| model:', AI_MODEL);
 
-  try {
-    // Server aləti (web_search) işləyərkən model `pause_turn` ilə dayana bilər —
-    // bu halda cavabı geri göndərib davam etdiririk (maks. 3 dəfə).
-    for (let i = 0; i < 4; i++) {
-      const res: any = await ai.messages.create({
-        model: AI_MODEL,
-        max_tokens: 2000,
-        system: SYSTEM,
-        tools: [{
-          type: 'web_search_20260209',
-          name: 'web_search',
-          max_uses: 5,
-          // Axtarış motoru nəticələri Azərbaycana görə sıralasın.
-          user_location: { type: 'approximate', country: 'AZ', city: 'Baku', timezone: 'Asia/Baku' },
-          blocked_domains: BLOCKED_DOMAINS,
-        } as any],
-        messages,
-      });
-      if (res.stop_reason === 'refusal') return { ...EMPTY, error: 'Bu sorğu üçün axtarış edilə bilmədi.' };
-      if (res.stop_reason === 'pause_turn') {
-        messages.push({ role: 'assistant', content: res.content });
-        continue;
+  // Alət konfiqurasiyaları — sıra ilə sınanır. Yeni versiya (dinamik filtr +
+  // user_location + blocked_domains) hesabda dəstəklənmirsə, sadə versiyaya
+  // düşürük ki, axtarış tamamilə sıradan çıxmasın.
+  const TOOL_VARIANTS: any[] = [
+    {
+      type: 'web_search_20260209', name: 'web_search', max_uses: 5,
+      user_location: { type: 'approximate', country: 'AZ', city: 'Baku', timezone: 'Asia/Baku' },
+      blocked_domains: BLOCKED_DOMAINS,
+    },
+    { type: 'web_search_20260209', name: 'web_search', max_uses: 5 },
+    {
+      type: 'web_search_20250305', name: 'web_search', max_uses: 5,
+      user_location: { type: 'approximate', country: 'AZ', city: 'Baku', timezone: 'Asia/Baku' },
+    },
+    { type: 'web_search_20250305', name: 'web_search', max_uses: 5 },
+  ];
+
+  let text = '';
+  let lastError: any = null;
+
+  for (let v = 0; v < TOOL_VARIANTS.length && !text; v++) {
+    const messages: any[] = [{ role: 'user', content: prompt(q) }];
+    try {
+      // Server aləti işləyərkən model `pause_turn` ilə dayana bilər —
+      // bu halda cavabı geri göndərib davam etdiririk.
+      for (let i = 0; i < 6; i++) {
+        const res: any = await ai.messages.create({
+          model: AI_MODEL,
+          max_tokens: 2000,
+          system: SYSTEM,
+          tools: [TOOL_VARIANTS[v]],
+          messages,
+        });
+        if (res.stop_reason === 'refusal') return { ...EMPTY, error: 'Bu sorğu üçün axtarış edilə bilmədi.' };
+        if (res.stop_reason === 'pause_turn') {
+          messages.push({ role: 'assistant', content: res.content });
+          continue;
+        }
+        text = res.content.filter((b: any) => b.type === 'text').map((b: any) => b.text).join('\n').trim();
+        break;
       }
-      text = res.content.filter((b: any) => b.type === 'text').map((b: any) => b.text).join('\n').trim();
-      break;
+      if (v > 0 && text) console.warn('[webSearch] alət variantı', v, 'ilə işlədi:', TOOL_VARIANTS[v].type);
+    } catch (e: any) {
+      lastError = e;
+      // Provayder xəta mətni kənara sızdırılmır — yalnız daxili log.
+      // Səbəbi ayırd etmək üçün: açar, model adı və ya alət versiyası problemi.
+      console.error('[webSearch] variant', v, TOOL_VARIANTS[v].type, 'xəta:',
+        e?.status, e?.name, e?.message, e?.error ? JSON.stringify(e.error).slice(0, 400) : '');
+      // 400 = alət/parametr qəbul edilmədi → növbəti varianta keç.
+      // Digər xətalarda (401/429/5xx) variant dəyişmək kömək etmir.
+      if (e?.status !== 400) break;
     }
-  } catch (e: any) {
-    // Provayder xəta mətni kənara sızdırılmır — yalnız daxili log.
-    console.error('[webSearch] failed:', e?.message);
-    return { ...EMPTY, error: 'İnternet axtarışı alınmadı. Yenidən cəhd edin.' };
+  }
+
+  if (!text && lastError) {
+    const st = lastError?.status;
+    const msg = st === 401 ? 'AI açarı etibarsızdır.'
+      : st === 429 ? 'Axtarış limiti doldu, bir azdan yenidən cəhd edin.'
+      : st === 404 ? 'AI modeli əlçatan deyil.'
+      : 'İnternet axtarışı alınmadı. Yenidən cəhd edin.';
+    return { ...EMPTY, error: msg };
+  }
+
+
+  if (!text) {
+    console.error('[webSearch] boş cavab (pause_turn limiti?) — sorğu:', q);
+    return { ...EMPTY, error: 'Axtarış tamamlanmadı. Yenidən cəhd edin.' };
   }
 
   const parsed = parseJson(text);
-  if (!parsed) return { ...EMPTY, error: 'Nəticələr oxunmadı.' };
+  if (!parsed) {
+    console.error('[webSearch] JSON oxunmadı — sorğu:', q, '| cavabın başı:', text.slice(0, 200));
+    return { ...EMPTY, error: 'Nəticələr oxunmadı.' };
+  }
 
+  const raw: any[] = Array.isArray(parsed.results) ? parsed.results : [];
   const results: WebResult[] = Array.isArray(parsed.results)
     ? parsed.results
         // Son güvənlik qatı: model qaydanı pozsa belə, Azərbaycana aid
@@ -196,6 +241,19 @@ export async function webSearch(query: string): Promise<WebSearchResponse> {
         }))
     : [];
 
+  // Model nəticə tapıb, amma hamısı Azərbaycan filtrindən keçməyibsə —
+  // bunu "heç nə tapılmadı"dan fərqləndiririk (həm log, həm istifadəçi üçün).
+  if (raw.length > 0 && results.length === 0) {
+    console.warn('[webSearch] bütün nəticələr AZ filtrindən keçmədi — sorğu:', q,
+      '| atılan:', raw.map((r: any) => r?.url).filter(Boolean).join(', ').slice(0, 300));
+    return {
+      ok: true,
+      summary: 'Nəticələr tapıldı, amma Azərbaycana aid olmadığı üçün göstərilmədi.',
+      results: [],
+    };
+  }
+
+  console.log('[webSearch] sorğu:', q, '| model:', raw.length, '| AZ filtrindən keçən:', results.length);
   return {
     ok: true,
     summary: typeof parsed.summary === 'string' ? parsed.summary.slice(0, 400) : '',
