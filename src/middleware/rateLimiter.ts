@@ -62,6 +62,9 @@ export const inquiryLimiter = rateLimit(20, 60 * 60 * 1000);
 // Image search — OpenAI vision API qoruması: 15 istek / saat
 export const imageSearchLimiter = rateLimit(15, 60 * 60 * 1000);
 
+// İnternet axtarışı (Claude web_search) — xərc qoruması: 30 istek / saat
+export const webSearchLimiter = rateLimit(30, 60 * 60 * 1000);
+
 // Mesaj göndərmə — spam/flood qoruması: 40 istek / dəqiqə
 export const messageLimiter = rateLimit(40, 60 * 1000);
 

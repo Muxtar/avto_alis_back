@@ -5,7 +5,8 @@ import { processImages } from '../middleware/imageProcess';
 import { analyzeImage } from '../services/deepseek';
 import { imageToSearchQuery, visionSearchEnabled } from '../services/visionSearchAI';
 import { adminAuth, AuthRequest } from '../middleware/auth';
-import { imageSearchLimiter } from '../middleware/rateLimiter';
+import { imageSearchLimiter, webSearchLimiter } from '../middleware/rateLimiter';
+import { webSearch, webSearchEnabled } from '../services/webSearchAI';
 import fs from 'fs';
 
 const router = Router();
@@ -69,6 +70,26 @@ router.post('/search/image', imageSearchLimiter, adminAuth, upload.single('image
         .join(' ')
         .trim() || analysis.summary,
     });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+// POST /api/search/web — saytda nəticə tapılmayanda internetdən axtarır.
+// Claude-un web_search server aləti işlədilir. Auth + saatlıq limit var,
+// çünki hər sorğu real pula başa gəlir.
+router.post('/search/web', webSearchLimiter, adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    if (!webSearchEnabled()) {
+      res.status(503).json({ success: false, message: 'İnternet axtarışı hazırda əlçatan deyil' });
+      return;
+    }
+    const q = String(req.body?.query || '').trim();
+    if (!q) { res.status(400).json({ success: false, message: 'Axtarış mətni tələb olunur' }); return; }
+
+    const data = await webSearch(q);
+    if (!data.ok) { res.status(422).json({ success: false, message: data.error || 'Nəticə tapılmadı' }); return; }
+    res.json({ success: true, summary: data.summary, results: data.results });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }
