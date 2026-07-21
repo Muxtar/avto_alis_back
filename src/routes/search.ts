@@ -3,6 +3,7 @@ import { PrismaClient } from '@prisma/client';
 import { upload } from '../middleware/upload';
 import { processImages } from '../middleware/imageProcess';
 import { analyzeImage } from '../services/deepseek';
+import { imageToSearchQuery, visionSearchEnabled } from '../services/visionSearchAI';
 import { adminAuth, AuthRequest } from '../middleware/auth';
 import { imageSearchLimiter } from '../middleware/rateLimiter';
 import fs from 'fs';
@@ -29,6 +30,30 @@ router.post('/search/image', imageSearchLimiter, adminAuth, upload.single('image
     // at max 1280px. Read it back and base64-encode for the vision model.
     const buffer = await fs.promises.readFile(file.path);
     const base64 = buffer.toString('base64');
+
+    // Claude vision (ANTHROPIC_API_KEY) varsa onu üstün tuturuq — sayt ümumi
+    // elan saytıdır, ona görə ümumi məhsul tanıma lazımdır. Yoxdursa, köhnə
+    // (avtomobil ehtiyat hissəsi üçün qurulmuş) vision axını işə düşür.
+    if (visionSearchEnabled()) {
+      const vision = await imageToSearchQuery(base64, 'image/jpeg');
+      fs.promises.unlink(file.path).catch(() => undefined);
+      if (!vision.ok) {
+        res.status(422).json({ success: false, message: vision.error || 'Şəkil tanınmadı' });
+        return;
+      }
+      res.json({
+        success: true,
+        searchQuery: vision.query,
+        analysis: {
+          productType: vision.productType,
+          brand: vision.brand,
+          category: vision.category,
+          keywords: vision.keywords,
+        },
+      });
+      return;
+    }
+
     const analysis = await analyzeImage(base64, 'image/jpeg');
 
     // Clean up the temporary upload — we don't need to keep search images.

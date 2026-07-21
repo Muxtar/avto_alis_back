@@ -158,6 +158,29 @@ router.get('/stats', async (_req: Request, res: Response) => {
 });
 
 // Get categories (MUST be before /listings/:id)
+// Kateqoriyaya uyğun filtr məlumatları (marka/şəhər/qiymət aralığı) — sol filtr paneli üçün.
+router.get('/listings/filters', async (req: Request, res: Response) => {
+  try {
+    const { category, type } = req.query;
+    const base: any = { OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }] };
+    if (category) base.category = { startsWith: String(category) };
+    if (type && type !== 'all') base.type = type as any;
+    const [brands, cities, agg] = await Promise.all([
+      prisma.listing.findMany({ where: { ...base, brand: { not: null } }, select: { brand: true }, distinct: ['brand'], orderBy: { brand: 'asc' }, take: 300 }),
+      prisma.listing.findMany({ where: { ...base, city: { not: null } }, select: { city: true }, distinct: ['city'], orderBy: { city: 'asc' } }),
+      prisma.listing.aggregate({ where: base, _min: { price: true }, _max: { price: true } }),
+    ]);
+    res.json({
+      success: true,
+      brands: brands.map((b) => b.brand).filter(Boolean),
+      cities: cities.map((c) => c.city).filter(Boolean),
+      price: { min: agg._min.price ?? null, max: agg._max.price ?? null },
+    });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
 router.get('/listings/categories', async (_req: Request, res: Response) => {
   try {
     const categories = await prisma.listing.findMany({
