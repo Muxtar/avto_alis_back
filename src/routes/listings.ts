@@ -324,7 +324,20 @@ router.get('/listings/:id', async (req: Request, res: Response) => {
         return;
       }
     }
-    res.json(listing);
+
+    // canReview — bu istifadəçi rəy yaza bilərmi? VÖEN-li elana məhsulu satın
+    // alanlar, fərdi elana isə satıcı ilə əlaqə saxlayanlar rəy yaza bilər.
+    // Frontend bunu bilib rəy formu yerinə "Satıcıdan soruş" göstərir.
+    let canReview = false;
+    const reviewerId = verifyTokenUserId(req.headers.authorization?.replace('Bearer ', ''));
+    if (reviewerId != null && reviewerId !== listing.userId) {
+      const isVoen = !!(listing.businessId || listing.businessObjectId);
+      canReview = isVoen
+        ? await purchasedListing(reviewerId, listing.id)
+        : await messagedUser(reviewerId, listing.userId);
+    }
+
+    res.json({ ...listing, canReview });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }
