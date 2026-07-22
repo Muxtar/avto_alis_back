@@ -934,7 +934,7 @@ router.get('/admin/overview', requireAdmin, async (_req: AuthRequest, res: Respo
     const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
     const [
       users, blockedUsers, listings, orders, businesses, couriers,
-      pBusinesses, pSellerApps, pIdVer, pCredentials, pSocial, pComplaints, pReturns,
+      pBusinesses, pSellerApps, pIdVer, pCredentials, pSocial, pComplaints, pReturns, pListings,
       revenueAgg, revenueTodayAgg, ordersToday, newUsers7d, activeConsult,
     ] = await Promise.all([
       prisma.user.count({ where: { role: 'USER', type: { not: 'COURIER' } } }),
@@ -950,6 +950,7 @@ router.get('/admin/overview', requireAdmin, async (_req: AuthRequest, res: Respo
       prisma.socialLink.count({ where: { verified: false } }),
       prisma.complaint.count({ where: { status: { in: ['OPEN', 'REVIEWING'] } } }),
       prisma.returnRequest.count({ where: { status: 'REQUESTED' } }),
+      prisma.listing.count({ where: { status: 'PENDING' } }),
       prisma.order.aggregate({ _sum: { total: true }, where: { paymentStatus: 'PAID' } }),
       prisma.order.aggregate({ _sum: { total: true }, where: { paymentStatus: 'PAID', createdAt: { gte: startOfDay } } }),
       prisma.order.count({ where: { createdAt: { gte: startOfDay } } }),
@@ -959,6 +960,7 @@ router.get('/admin/overview', requireAdmin, async (_req: AuthRequest, res: Respo
     const pending = {
       businesses: pBusinesses, sellerApps: pSellerApps, idVerifications: pIdVer,
       credentials: pCredentials, socialLinks: pSocial, complaints: pComplaints, returns: pReturns,
+      listings: pListings,
     };
     const pendingTotal = Object.values(pending).reduce((a, b) => a + b, 0);
     res.json({
