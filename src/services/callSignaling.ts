@@ -13,6 +13,8 @@ const prisma = new PrismaClient();
 
 // Qrup zəngi iştirakçıları — conversationId -> aktiv userId dəsti (yaddaşda).
 const groupCalls = new Map<number, Set<number>>();
+// Bir qrup zəngində maksimum iştirakçı sayı (mesh WebRTC kiçik qruplar üçün).
+const MAX_GROUP_CALL = 5;
 async function groupMemberIds(conversationId: number): Promise<number[]> {
   const mems = await prisma.conversationMember.findMany({ where: { conversationId }, select: { userId: true } });
   return mems.map((m) => m.userId);
@@ -121,6 +123,11 @@ export function initCallSignaling(httpServer: HttpServer, allowedOrigins: string
         const members = await groupMemberIds(cid);
         if (!members.includes(userId)) return;
         let set = groupCalls.get(cid); if (!set) { set = new Set(); groupCalls.set(cid, set); }
+        // Limit — artıq dolu deyilsə əlavə et.
+        if (!set.has(userId) && set.size >= MAX_GROUP_CALL) {
+          socket.emit('groupcall:full', { conversationId: cid, max: MAX_GROUP_CALL });
+          return;
+        }
         set.add(userId);
         const me = await prisma.user.findUnique({ where: { id: userId }, select: { id: true, name: true, avatar: true } });
         members.filter((m) => m !== userId).forEach((m) => io.to(`u:${m}`).emit('groupcall:incoming', { conversationId: cid, kind, from: me }));
@@ -135,6 +142,11 @@ export function initCallSignaling(httpServer: HttpServer, allowedOrigins: string
         const members = await groupMemberIds(cid);
         if (!members.includes(userId)) return;
         let set = groupCalls.get(cid); if (!set) { set = new Set(); groupCalls.set(cid, set); }
+        // Limit — qoşulmaq istəyən yeni nəfərdirsə və zəng doludursa, imtina et.
+        if (!set.has(userId) && set.size >= MAX_GROUP_CALL) {
+          socket.emit('groupcall:full', { conversationId: cid, max: MAX_GROUP_CALL });
+          return;
+        }
         const existing = Array.from(set).filter((id) => id !== userId);
         set.add(userId);
         const users = await prisma.user.findMany({ where: { id: { in: existing.length ? existing : [-1] } }, select: { id: true, name: true, avatar: true } });
