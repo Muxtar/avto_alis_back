@@ -35,8 +35,11 @@ export async function createOtp(userId: number): Promise<OtpResult> {
     }
   }
 
-  // Kodu cavabda göstər: debug açıqdırsa həmişə; əks halda real göndərilməyibsə
-  // (fake rejim və ya çatdırılma alınmayıb) — ki istifadəçi test edə bilsin.
-  const showCode = showDev || !delivered;
+  // Kodu cavabda göstər (input üstündə "fake"):
+  //  • test (fake) rejimində HƏMİŞƏ göstərilir,
+  //  • real rejimdə GÖSTƏRİLMİR — kod yalnız WhatsApp-a gedir (göndərmə alınmasa
+  //    belə fake göstərmirik ki, admin problemi görsün; debug flag-ı istisna),
+  //  • show_dev_code aktivdirsə həmişə göstərilir (yalnız developer üçün).
+  const showCode = showDev || !realMode;
   return { code, delivered, showCode };
 }

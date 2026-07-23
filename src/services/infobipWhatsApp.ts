@@ -40,64 +40,90 @@ export interface OtpSendResult {
   configured: boolean;
   delivered: boolean;
   error?: string;
+  detail?: string;
 }
 
-// Doğrulama kodunu WhatsApp şablon mesajı ilə göndərir.
-// Konfiqurasiya yoxdursa {configured:false} qaytarır (test rejimi saxlanılır).
-export async function sendWhatsAppOtp(phone: string, code: string): Promise<OtpSendResult> {
-  if (!isInfobipConfigured()) return { configured: false, delivered: false };
+// Konfiqurasiya vəziyyəti — admin diaqnostikası üçün (dəyərlər açıqlanmır,
+// yalnız var/yox). templateName və sender diaqnostika üçün göstərilir.
+export function infobipStatus() {
+  const missing: string[] = [];
+  if (!API_KEY) missing.push('INFOBIP_API_KEY');
+  if (!RAW_BASE) missing.push('INFOBIP_BASE_URL');
+  if (!SENDER) missing.push('INFOBIP_WA_SENDER');
+  if (!TEMPLATE) missing.push('INFOBIP_WA_TEMPLATE');
+  return {
+    configured: isInfobipConfigured(),
+    missing,
+    templateName: TEMPLATE || null,
+    sender: SENDER || null,
+    language: LANG,
+    otpButton: OTP_BUTTON,
+    baseUrl: RAW_BASE ? baseUrl().replace(/^https?:\/\//, '') : null,
+  };
+}
 
-  const to = toRecipient(phone);
-  if (!to) return { configured: true, delivered: false, error: 'invalid_phone' };
+export interface SendDetail {
+  ok: boolean;
+  status: number; // HTTP status (0 = şəbəkə/konfiqurasiya)
+  error?: string; // qısa kod
+  detail?: string; // Infobip cavabı / xəta mətni (diaqnostika üçün)
+}
 
-  // OTP "authentication" şablonu: body-də kod, opsional olaraq kopyala-kod düyməsi.
-  const templateData: any = { body: { placeholders: [code] } };
-  if (OTP_BUTTON) {
-    templateData.buttons = [{ type: 'URL', parameter: code }];
+// Aşağı səviyyəli şablon göndərmə — tam diaqnostika qaytarır.
+async function sendTemplate(phone: string, code: string): Promise<SendDetail> {
+  if (!isInfobipConfigured()) {
+    return { ok: false, status: 0, error: 'not_configured', detail: 'Env dəyişənləri tam deyil: ' + infobipStatus().missing.join(', ') };
   }
+  const to = toRecipient(phone);
+  if (!to) return { ok: false, status: 0, error: 'invalid_phone', detail: 'Nömrə düzgün deyil' };
+
+  // OTP "authentication" şablonu: body-də kod, opsional kopyala-kod düyməsi.
+  const templateData: any = { body: { placeholders: [code] } };
+  if (OTP_BUTTON) templateData.buttons = [{ type: 'URL', parameter: code }];
 
   const payload = {
-    messages: [
-      {
-        from: SENDER,
-        to,
-        content: {
-          templateName: TEMPLATE,
-          templateData,
-          language: LANG,
-        },
-      },
-    ],
+    messages: [{ from: SENDER, to, content: { templateName: TEMPLATE, templateData, language: LANG } }],
   };
 
   try {
     const res = await fetch(`${baseUrl()}/whatsapp/1/message/template`, {
       method: 'POST',
-      headers: {
-        Authorization: `App ${API_KEY}`,
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
-      },
+      headers: { Authorization: `App ${API_KEY}`, 'Content-Type': 'application/json', Accept: 'application/json' },
       body: JSON.stringify(payload),
     });
+    const text = await res.text().catch(() => '');
+    let data: any = null;
+    try { data = JSON.parse(text); } catch { /* mətn kimi qalır */ }
 
     if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      console.error('[infobip] WhatsApp OTP göndərilmədi:', res.status, text.slice(0, 500));
-      return { configured: true, delivered: false, error: `http_${res.status}` };
+      // Infobip xəta mətni — səbəbi göstərir (məs. şablon adı yanlış, sender yoxdur...).
+      const reason = data?.requestError?.serviceException?.text || text.slice(0, 800);
+      console.error('[infobip] WhatsApp göndərilmədi:', res.status, reason);
+      return { ok: false, status: res.status, error: `http_${res.status}`, detail: reason };
     }
 
-    const data: any = await res.json().catch(() => null);
-    // Uğurlu təqdim: status qrupu PENDING/DELIVERED (rədd = REJECTED).
     const msg = data?.messages?.[0];
-    const group = msg?.status?.groupName || msg?.status?.group;
-    if (group && String(group).toUpperCase() === 'REJECTED') {
-      console.error('[infobip] WhatsApp OTP rədd edildi:', JSON.stringify(msg?.status));
-      return { configured: true, delivered: false, error: 'rejected' };
+    const group = String(msg?.status?.groupName || msg?.status?.group || '').toUpperCase();
+    if (group === 'REJECTED') {
+      const reason = msg?.status?.description || JSON.stringify(msg?.status || {});
+      console.error('[infobip] WhatsApp rədd edildi:', reason);
+      return { ok: false, status: res.status, error: 'rejected', detail: reason };
     }
-    return { configured: true, delivered: true };
+    return { ok: true, status: res.status, detail: msg?.status?.description || group || 'PENDING' };
   } catch (e: any) {
-    console.error('[infobip] WhatsApp OTP xətası:', e?.message || e);
-    return { configured: true, delivered: false, error: 'network' };
+    console.error('[infobip] WhatsApp xətası:', e?.message || e);
+    return { ok: false, status: 0, error: 'network', detail: e?.message || 'Şəbəkə xətası' };
   }
+}
+
+// Doğrulama kodunu WhatsApp ilə göndərir (OTP axını üçün).
+export async function sendWhatsAppOtp(phone: string, code: string): Promise<OtpSendResult> {
+  const r = await sendTemplate(phone, code);
+  return { configured: isInfobipConfigured(), delivered: r.ok, error: r.error, detail: r.detail };
+}
+
+// Admin diaqnostikası — verilmiş nömrəyə test kodu göndərir, tam nəticə qaytarır.
+export async function testWhatsApp(phone: string): Promise<SendDetail & ReturnType<typeof infobipStatus>> {
+  const r = await sendTemplate(phone, '123456');
+  return { ...infobipStatus(), ...r };
 }

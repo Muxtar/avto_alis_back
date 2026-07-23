@@ -5,6 +5,7 @@ import { adminAuth, requireAdmin, AuthRequest, generateToken } from '../middlewa
 import { authLimiter } from '../middleware/rateLimiter';
 import { refund as kapitalRefund } from '../services/kapital';
 import { listFlags, setFlag } from '../services/settings';
+import { infobipStatus, testWhatsApp } from '../services/infobipWhatsApp';
 import fs from 'fs';
 import path from 'path';
 
@@ -30,6 +31,28 @@ router.patch('/admin/settings', requireAdmin, async (req: AuthRequest, res: Resp
     if (!key) { res.status(400).json({ success: false, message: 'key tələb olunur' }); return; }
     await setFlag(key, value);
     res.json({ success: true, key, value });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+// WhatsApp (Infobip) konfiqurasiya vəziyyəti — env dəyişənləri var/yox.
+router.get('/admin/whatsapp-status', requireAdmin, async (_req: AuthRequest, res: Response) => {
+  try {
+    res.json({ success: true, status: infobipStatus() });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+// Test WhatsApp mesajı göndər — Infobip-in real cavabını/xətasını qaytarır ki,
+// admin nömrəyə kod gəlməməsinin səbəbini görsün.
+router.post('/admin/whatsapp-test', requireAdmin, async (req: AuthRequest, res: Response) => {
+  try {
+    const phone = String(req.body?.phone || '').trim();
+    if (!phone) { res.status(400).json({ success: false, message: 'phone tələb olunur' }); return; }
+    const result = await testWhatsApp(phone);
+    res.json({ success: true, result });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }
