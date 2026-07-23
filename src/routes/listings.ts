@@ -48,6 +48,10 @@ router.get('/listings', async (req: Request, res: Response) => {
     if (country) where.country = country as string;
     if (brand) where.brand = { contains: brand as string, mode: 'insensitive' };
     if (model) where.model = { contains: model as string, mode: 'insensitive' };
+    // Satıcı/obyekt üzrə filtr — məhsul detalı səhifəsində "satıcının/obyektin
+    // digər elanları" bölməsi üçün.
+    if (req.query.sellerId) { const sid = parseInt(String(req.query.sellerId)); if (sid) where.userId = sid; }
+    if (req.query.objectId) { const oid = parseInt(String(req.query.objectId)); if (oid) where.businessObjectId = oid; }
     if (city) where.city = city as string;
     if (fuelType) where.fuelType = fuelType as any;
     if (paymentType) {
