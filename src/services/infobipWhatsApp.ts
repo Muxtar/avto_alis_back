@@ -14,7 +14,9 @@
 
 const API_KEY = process.env.INFOBIP_API_KEY || '';
 const RAW_BASE = process.env.INFOBIP_BASE_URL || '';
-const SENDER = process.env.INFOBIP_WA_SENDER || '';
+// Göndərən nömrə də rəqəmlərlə olmalıdır — "+44 7860 088970" → "447860088970".
+// (Infobip `from` sahəsi + və boşluq qəbul etmir.)
+const SENDER = (process.env.INFOBIP_WA_SENDER || '').replace(/[^\d]/g, '');
 const TEMPLATE = process.env.INFOBIP_WA_TEMPLATE || '';
 const LANG = process.env.INFOBIP_WA_LANG || 'en';
 const OTP_BUTTON = process.env.INFOBIP_WA_OTP_BUTTON === 'true';
