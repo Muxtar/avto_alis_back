@@ -7,6 +7,7 @@ import { authLimiter, registerLimiter, verifyLimiter } from '../middleware/rateL
 import { extractPassportFromFiles } from '../services/vehiclePassportAI';
 import { processImages } from '../middleware/imageProcess';
 import { verifyIdentityAI } from '../services/credentialAI';
+import { sendWhatsAppOtp, isInfobipConfigured } from '../services/infobipWhatsApp';
 
 // Hər avtomobil üçün ön+arxa cüt şəkil. `passportImagesFront[i]` və
 // `passportImagesBack[i]` indeksləri eyni avtomobilə aiddir.
@@ -107,12 +108,33 @@ function safeJsonParse(str: string): { data: any; error: string | null } {
   }
 }
 
-async function createVerificationCode(userId: number) {
+// Kod yaradır, DB-yə yazır və (konfiqurasiya varsa) WhatsApp ilə göndərir.
+// Qaytarır: { code, delivered, configured } — `delivered=true` isə kod real
+// göndərilib (cavabda gizlədilir); əks halda test rejimi.
+async function createVerificationCode(userId: number): Promise<{ code: string; delivered: boolean; configured: boolean }> {
   const code = generateCode();
   await prisma.verificationCode.create({
     data: { userId, code, expiresAt: new Date(Date.now() + 5 * 60 * 1000) },
   });
-  return code;
+  let delivered = false;
+  let configured = isInfobipConfigured();
+  if (configured) {
+    const u = await prisma.user.findUnique({ where: { id: userId }, select: { phone: true } });
+    if (u?.phone) {
+      const r = await sendWhatsAppOtp(u.phone, code);
+      delivered = r.delivered;
+      configured = r.configured;
+    }
+  }
+  return { code, delivered, configured };
+}
+
+// Cavaba əlavə olunan OTP sahələri. Kod WhatsApp ilə real göndərildisə cavabda
+// gizlədilir (təhlükəsizlik). Test rejimində (dev və ya SHOW_DEV_CODE) kod
+// qaytarılır ki, WhatsApp konfiqurasiyası olmadan da sınaq mümkün olsun.
+function otpFields(r: { code: string; delivered: boolean }) {
+  const showCode = !r.delivered && (process.env.NODE_ENV !== 'production' || process.env.SHOW_DEV_CODE === 'true');
+  return { delivered: r.delivered, ...(showCode && { verificationCode: r.code }) };
 }
 
 // Phone-only registration/login (unified). Creates user if new, returns userId + verification code
@@ -128,14 +150,12 @@ router.post('/register/phone', registerLimiter, async (req: Request, res: Respon
       user = await prisma.user.create({ data: { phone } });
     }
 
-    const verificationCode = await createVerificationCode(user.id);
-    // TEST MODE: always return verificationCode until Twilio is integrated
-    const isDev = process.env.NODE_ENV !== 'production' || process.env.SHOW_DEV_CODE === 'true';
+    const otp = await createVerificationCode(user.id);
     res.status(201).json({
       success: true,
       userId: user.id,
       isNew: !user.profileComplete,
-      ...(isDev && { verificationCode }),
+      ...otpFields(otp),
     });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
@@ -402,10 +422,8 @@ router.post('/verify/resend', verifyLimiter, async (req: Request, res: Response)
     if (!uid) { res.status(400).json({ success: false, message: 'userId tələb olunur' }); return; }
     const user = await prisma.user.findUnique({ where: { id: uid } });
     if (!user) { res.status(404).json({ success: false, message: 'İstifadəçi tapılmadı' }); return; }
-    const verificationCode = await createVerificationCode(uid);
-    // TEST MODE: always return verificationCode until Twilio is integrated
-    const isDev = process.env.NODE_ENV !== 'production' || process.env.SHOW_DEV_CODE === 'true';
-    res.json({ success: true, ...(isDev && { verificationCode }) });
+    const otp = await createVerificationCode(uid);
+    res.json({ success: true, ...otpFields(otp) });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }
@@ -443,11 +461,8 @@ router.post('/register/car-owner', registerLimiter, passportPairUpload, async (r
       include: { vehicles: true },
     });
 
-    const verificationCode = await createVerificationCode(user.id);
-    // Dev modunda kodu dondur (test icin), production'da dondurme
-    // TEST MODE: always return verificationCode until Twilio is integrated
-    const isDev = process.env.NODE_ENV !== 'production' || process.env.SHOW_DEV_CODE === 'true';
-    res.status(201).json({ success: true, user, userId: user.id, ...(isDev && { verificationCode }) });
+    const otp = await createVerificationCode(user.id);
+    res.status(201).json({ success: true, user, userId: user.id, ...otpFields(otp) });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }
@@ -483,11 +498,8 @@ router.post('/register/mechanic', registerLimiter, async (req: Request, res: Res
       include: { workplaces: true },
     });
 
-    const verificationCode = await createVerificationCode(user.id);
-    // Dev modunda kodu dondur (test icin), production'da dondurme
-    // TEST MODE: always return verificationCode until Twilio is integrated
-    const isDev = process.env.NODE_ENV !== 'production' || process.env.SHOW_DEV_CODE === 'true';
-    res.status(201).json({ success: true, user, userId: user.id, ...(isDev && { verificationCode }) });
+    const otp = await createVerificationCode(user.id);
+    res.status(201).json({ success: true, user, userId: user.id, ...otpFields(otp) });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }
@@ -523,11 +535,8 @@ router.post('/register/parts-seller', async (req: Request, res: Response) => {
       include: { workplaces: true },
     });
 
-    const verificationCode = await createVerificationCode(user.id);
-    // Dev modunda kodu dondur (test icin), production'da dondurme
-    // TEST MODE: always return verificationCode until Twilio is integrated
-    const isDev = process.env.NODE_ENV !== 'production' || process.env.SHOW_DEV_CODE === 'true';
-    res.status(201).json({ success: true, user, userId: user.id, ...(isDev && { verificationCode }) });
+    const otp = await createVerificationCode(user.id);
+    res.status(201).json({ success: true, user, userId: user.id, ...otpFields(otp) });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }
@@ -645,11 +654,8 @@ router.post('/register/telegram', registerLimiter, async (req: Request, res: Res
       include: { vehicles: true, workplaces: true },
     });
 
-    const verificationCode = await createVerificationCode(user.id);
-    // Dev modunda kodu dondur (test icin), production'da dondurme
-    // TEST MODE: always return verificationCode until Twilio is integrated
-    const isDev = process.env.NODE_ENV !== 'production' || process.env.SHOW_DEV_CODE === 'true';
-    res.status(201).json({ success: true, user, userId: user.id, ...(isDev && { verificationCode }) });
+    const otp = await createVerificationCode(user.id);
+    res.status(201).json({ success: true, user, userId: user.id, ...otpFields(otp) });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }
