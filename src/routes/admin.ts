@@ -853,54 +853,9 @@ router.get('/admin/analytics', requireAdmin, async (_req: AuthRequest, res: Resp
   }
 });
 
-// ==================== KİMLİK (FACE) YOXLAMASI ====================
-// İstifadəçilərin kimlik vəsiqəsi + selfie yoxlamaları (face-api.js balı + admin gözü).
-router.get('/admin/id-verifications', requireAdmin, async (req: AuthRequest, res: Response) => {
-  try {
-    const status = String(req.query.status || 'PENDING').toUpperCase();
-    const where: Prisma.UserWhereInput = status === 'ALL'
-      ? { idCardImage: { not: null } }
-      : { idVerifyStatus: status as any };
-    const users = await prisma.user.findMany({
-      where,
-      orderBy: { id: 'desc' },
-      select: {
-        id: true, name: true, phone: true, profession: true,
-        idCardImage: true, selfieImage: true, faceMatchScore: true, idVerifyStatus: true,
-        idAiNameMatch: true, idAiNameScore: true, idAiFaceMatch: true, idAiFaceScore: true, idAiReason: true,
-      },
-      take: 200,
-    });
-    res.json({ success: true, users });
-  } catch (error: any) {
-    res.status(400).json({ success: false, message: error.message });
-  }
-});
-
-router.post('/admin/id-verifications/:userId/:action', requireAdmin, async (req: AuthRequest, res: Response) => {
-  try {
-    const userId = parseInt(req.params.userId);
-    const action = String(req.params.action);
-    if (!['approve', 'reject'].includes(action)) { res.status(400).json({ success: false, message: 'Yanlış əməliyyat' }); return; }
-    const user = await prisma.user.update({
-      where: { id: userId },
-      data: { idVerifyStatus: action === 'approve' ? 'APPROVED' : 'REJECTED' },
-      select: { id: true, idVerifyStatus: true },
-    });
-    await prisma.notification.create({
-      data: {
-        userId,
-        type: 'SYSTEM',
-        title: 'Kimlik yoxlaması',
-        body: action === 'approve' ? 'Kimliyiniz təsdiqləndi ✓' : 'Kimlik yoxlaması rədd edildi. Yenidən cəhd edin.',
-        link: '/profile',
-      },
-    }).catch(() => {});
-    res.json({ success: true, user });
-  } catch (error: any) {
-    res.status(400).json({ success: false, message: error.message });
-  }
-});
+// ==================== KİMLİK YOXLAMASI (LEGV EDİLDİ) ====================
+// Kimlik doğrulaması artıq Veriff ilə avtomatik aparılır — admin paneldə əl ilə
+// təsdiq/rədd endpoint-lərinə ehtiyac yoxdur, ona görə silindi.
 
 // ==================== PEŞƏ SƏNƏDLƏRİ (AI ad-soyad yoxlaması) ====================
 router.get('/admin/credentials', requireAdmin, async (req: AuthRequest, res: Response) => {
@@ -982,7 +937,7 @@ router.get('/admin/overview', requireAdmin, async (_req: AuthRequest, res: Respo
     const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
     const [
       users, blockedUsers, listings, orders, businesses, couriers,
-      pBusinesses, pSellerApps, pIdVer, pCredentials, pSocial, pComplaints, pReturns, pListings,
+      pBusinesses, pSellerApps, pCredentials, pSocial, pComplaints, pReturns, pListings,
       revenueAgg, revenueTodayAgg, ordersToday, newUsers7d, activeConsult,
     ] = await Promise.all([
       prisma.user.count({ where: { role: 'USER', type: { not: 'COURIER' } } }),
@@ -993,7 +948,6 @@ router.get('/admin/overview', requireAdmin, async (_req: AuthRequest, res: Respo
       prisma.user.count({ where: { type: 'COURIER' } }),
       prisma.business.count({ where: { status: 'PENDING' } }),
       prisma.sellerVerification.count({ where: { status: 'PENDING' } }),
-      prisma.user.count({ where: { idVerifyStatus: 'PENDING' } }),
       prisma.professionDocument.count({ where: { status: 'PENDING' } }),
       prisma.socialLink.count({ where: { verified: false } }),
       prisma.complaint.count({ where: { status: { in: ['OPEN', 'REVIEWING'] } } }),
@@ -1006,7 +960,7 @@ router.get('/admin/overview', requireAdmin, async (_req: AuthRequest, res: Respo
       prisma.consultationSession.count({ where: { status: 'ACTIVE' } }).catch(() => 0),
     ]);
     const pending = {
-      businesses: pBusinesses, sellerApps: pSellerApps, idVerifications: pIdVer,
+      businesses: pBusinesses, sellerApps: pSellerApps,
       credentials: pCredentials, socialLinks: pSocial, complaints: pComplaints, returns: pReturns,
       listings: pListings,
     };
