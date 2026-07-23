@@ -114,7 +114,27 @@ export function initCallSignaling(httpServer: HttpServer, allowedOrigins: string
     });
 
     // ── Qrup zəngi (mesh WebRTC) — hər iştirakçı digərləri ilə birbaşa qoşulur ──
-    // Başlat — qrup üzvlərinə dəvət göndər.
+    // Ortaq qoşulma məntiqi: limit yoxla, istifadəçini otağa əlavə et, ONA mövcud
+    // iştirakçıların siyahısını göndər (groupcall:participants) və MÖVCUD
+    // iştirakçıları yeni gələnlə xəbərdar et (groupcall:peer-joined). Beləliklə
+    // həm "start", həm "join" edən mesh-ə düzgün qoşulur (əvvəl yalnız "join"
+    // bunu edirdi — "start" edən heç kimi görmürdü, ona görə qrup zəngi işləmirdi).
+    const joinGroupRoom = async (cid: number): Promise<boolean> => {
+      let set = groupCalls.get(cid); if (!set) { set = new Set(); groupCalls.set(cid, set); }
+      if (!set.has(userId) && set.size >= MAX_GROUP_CALL) {
+        socket.emit('groupcall:full', { conversationId: cid, max: MAX_GROUP_CALL });
+        return false;
+      }
+      const existing = Array.from(set).filter((id) => id !== userId);
+      set.add(userId);
+      const users = await prisma.user.findMany({ where: { id: { in: existing.length ? existing : [-1] } }, select: { id: true, name: true, avatar: true } });
+      socket.emit('groupcall:participants', { conversationId: cid, participants: users });
+      const me = await prisma.user.findUnique({ where: { id: userId }, select: { id: true, name: true, avatar: true } });
+      existing.forEach((id) => io.to(`u:${id}`).emit('groupcall:peer-joined', { conversationId: cid, peer: me }));
+      return true;
+    };
+
+    // Başlat — özü də mesh-ə qoşulur VƏ hələ qoşulmayan qrup üzvlərinə dəvət göndərir.
     socket.on('groupcall:start', async (p: { conversationId: number; kind: 'audio' | 'video' }) => {
       try {
         const cid = parseInt(String(p?.conversationId));
@@ -122,37 +142,21 @@ export function initCallSignaling(httpServer: HttpServer, allowedOrigins: string
         if (!cid) return;
         const members = await groupMemberIds(cid);
         if (!members.includes(userId)) return;
-        let set = groupCalls.get(cid); if (!set) { set = new Set(); groupCalls.set(cid, set); }
-        // Limit — artıq dolu deyilsə əlavə et.
-        if (!set.has(userId) && set.size >= MAX_GROUP_CALL) {
-          socket.emit('groupcall:full', { conversationId: cid, max: MAX_GROUP_CALL });
-          return;
-        }
-        set.add(userId);
+        if (!(await joinGroupRoom(cid))) return;
+        const set = groupCalls.get(cid);
         const me = await prisma.user.findUnique({ where: { id: userId }, select: { id: true, name: true, avatar: true } });
-        members.filter((m) => m !== userId).forEach((m) => io.to(`u:${m}`).emit('groupcall:incoming', { conversationId: cid, kind, from: me }));
+        members.filter((m) => m !== userId && !set?.has(m)).forEach((m) => io.to(`u:${m}`).emit('groupcall:incoming', { conversationId: cid, kind, from: me }));
       } catch { /* keç */ }
     });
 
-    // Qoşul — mövcud iştirakçıların siyahısını al, onları da xəbərdar et.
+    // Qoşul — dəvəti (incoming) qəbul edən iştirakçı üçün: sadəcə mesh-ə qoşulur.
     socket.on('groupcall:join', async (p: { conversationId: number }) => {
       try {
         const cid = parseInt(String(p?.conversationId));
         if (!cid) return;
         const members = await groupMemberIds(cid);
         if (!members.includes(userId)) return;
-        let set = groupCalls.get(cid); if (!set) { set = new Set(); groupCalls.set(cid, set); }
-        // Limit — qoşulmaq istəyən yeni nəfərdirsə və zəng doludursa, imtina et.
-        if (!set.has(userId) && set.size >= MAX_GROUP_CALL) {
-          socket.emit('groupcall:full', { conversationId: cid, max: MAX_GROUP_CALL });
-          return;
-        }
-        const existing = Array.from(set).filter((id) => id !== userId);
-        set.add(userId);
-        const users = await prisma.user.findMany({ where: { id: { in: existing.length ? existing : [-1] } }, select: { id: true, name: true, avatar: true } });
-        socket.emit('groupcall:participants', { conversationId: cid, participants: users });
-        const me = await prisma.user.findUnique({ where: { id: userId }, select: { id: true, name: true, avatar: true } });
-        existing.forEach((id) => io.to(`u:${id}`).emit('groupcall:peer-joined', { conversationId: cid, peer: me }));
+        await joinGroupRoom(cid);
       } catch { /* keç */ }
     });
 
