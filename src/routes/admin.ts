@@ -6,6 +6,8 @@ import { authLimiter } from '../middleware/rateLimiter';
 import { refund as kapitalRefund } from '../services/kapital';
 import { listFlags, setFlag } from '../services/settings';
 import { infobipStatus, testWhatsApp } from '../services/infobipWhatsApp';
+import { smsStatus, testSms } from '../services/infobipSms';
+import { otpChannel } from '../services/otp';
 import fs from 'fs';
 import path from 'path';
 
@@ -36,23 +38,24 @@ router.patch('/admin/settings', requireAdmin, async (req: AuthRequest, res: Resp
   }
 });
 
-// WhatsApp (Infobip) konfiqurasiya vəziyyəti — env dəyişənləri var/yox.
+// OTP (Infobip) konfiqurasiya vəziyyəti — aktiv kanal + SMS/WhatsApp env-ləri.
 router.get('/admin/whatsapp-status', requireAdmin, async (_req: AuthRequest, res: Response) => {
   try {
-    res.json({ success: true, status: infobipStatus() });
+    res.json({ success: true, channel: otpChannel(), sms: smsStatus(), whatsapp: infobipStatus() });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }
 });
 
-// Test WhatsApp mesajı göndər — Infobip-in real cavabını/xətasını qaytarır ki,
-// admin nömrəyə kod gəlməməsinin səbəbini görsün.
+// Test OTP mesajı göndər — AKTİV kanaldan (SMS və ya WhatsApp) göndərir və
+// Infobip-in real cavabını/xətasını qaytarır ki, admin səbəbi görsün.
 router.post('/admin/whatsapp-test', requireAdmin, async (req: AuthRequest, res: Response) => {
   try {
     const phone = String(req.body?.phone || '').trim();
     if (!phone) { res.status(400).json({ success: false, message: 'phone tələb olunur' }); return; }
-    const result = await testWhatsApp(phone);
-    res.json({ success: true, result });
+    const channel = otpChannel();
+    const result = channel === 'sms' ? await testSms(phone) : await testWhatsApp(phone);
+    res.json({ success: true, channel, result });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }

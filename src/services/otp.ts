@@ -4,12 +4,22 @@
 // göstərilsin. `show_dev_code` aktivdirsə kod həmişə cavabda qaytarılır (debug).
 import { PrismaClient } from '@prisma/client';
 import { sendWhatsAppOtp } from './infobipWhatsApp';
+import { sendSmsOtp, isSmsConfigured } from './infobipSms';
 import { resolveFlag } from './settings';
 
 const prisma = new PrismaClient();
 
 function generateCode(): string {
   return Math.floor(100000 + Math.random() * 900000).toString();
+}
+
+// OTP kanalı: SMS və ya WhatsApp. INFOBIP_OTP_CHANNEL env ilə seçilir; təyin
+// olunmayıbsa SMS konfiqurasiya olunubsa SMS (daha sadə), yoxsa WhatsApp.
+export function otpChannel(): 'sms' | 'whatsapp' {
+  const c = (process.env.INFOBIP_OTP_CHANNEL || '').toLowerCase();
+  if (c === 'sms') return 'sms';
+  if (c === 'whatsapp') return 'whatsapp';
+  return isSmsConfigured() ? 'sms' : 'whatsapp';
 }
 
 export interface OtpResult {
@@ -31,7 +41,10 @@ export async function createOtp(userId: number): Promise<OtpResult> {
   if (realMode) {
     const u = await prisma.user.findUnique({ where: { id: userId }, select: { phone: true } });
     if (u?.phone) {
-      delivered = (await sendWhatsAppOtp(u.phone, code)).delivered;
+      // Seçilmiş kanala görə göndər — SMS (sadə) və ya WhatsApp.
+      delivered = otpChannel() === 'sms'
+        ? (await sendSmsOtp(u.phone, code)).delivered
+        : (await sendWhatsAppOtp(u.phone, code)).delivered;
     }
   }
 
