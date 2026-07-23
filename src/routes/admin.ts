@@ -4,11 +4,36 @@ import bcrypt from 'bcryptjs';
 import { adminAuth, requireAdmin, AuthRequest, generateToken } from '../middleware/auth';
 import { authLimiter } from '../middleware/rateLimiter';
 import { refund as kapitalRefund } from '../services/kapital';
+import { listFlags, setFlag } from '../services/settings';
 import fs from 'fs';
 import path from 'path';
 
 const router = Router();
 const prisma = new PrismaClient();
+
+// ── Tənzimləmələr (feature-flags) ──
+// Admin paneldəki "Tənzimləmələr" səhifəsi üçün. Bütün flag-lar meta + cari
+// dəyər ilə qaytarılır; PATCH ilə tək açar aktiv/deaktiv edilir.
+router.get('/admin/settings', requireAdmin, async (_req: AuthRequest, res: Response) => {
+  try {
+    const flags = await listFlags();
+    res.json({ success: true, settings: flags });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+router.patch('/admin/settings', requireAdmin, async (req: AuthRequest, res: Response) => {
+  try {
+    const key = String(req.body?.key || '');
+    const value = req.body?.value === true || req.body?.value === 'true';
+    if (!key) { res.status(400).json({ success: false, message: 'key tələb olunur' }); return; }
+    await setFlag(key, value);
+    res.json({ success: true, key, value });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
 
 // Admin Login
 router.post('/admin/login', authLimiter, async (req: AuthRequest, res: Response) => {

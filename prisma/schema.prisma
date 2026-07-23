@@ -1174,3 +1174,13 @@ model Banner {
 
   @@index([active, sortOrder])
 }
+
+// Admin idarə edilən tənzimləmələr (feature-flags) — açar/dəyər. Dəyər mətn kimi
+// saxlanılır (boolean üçün "true"/"false"). Admin paneldə aktiv/deaktiv edilir.
+model Setting {
+  id        Int      @id @default(autoincrement())
+  key       String   @unique
+  value     String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}

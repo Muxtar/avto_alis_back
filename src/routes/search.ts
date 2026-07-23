@@ -7,6 +7,7 @@ import { imageToSearchQuery, visionSearchEnabled } from '../services/visionSearc
 import { adminAuth, AuthRequest } from '../middleware/auth';
 import { imageSearchLimiter, webSearchLimiter } from '../middleware/rateLimiter';
 import { webSearch, webSearchEnabled } from '../services/webSearchAI';
+import { resolveFlag } from '../services/settings';
 import fs from 'fs';
 
 const router = Router();
@@ -80,6 +81,11 @@ router.post('/search/image', imageSearchLimiter, adminAuth, upload.single('image
 // çünki hər sorğu real pula başa gəlir.
 router.post('/search/web', webSearchLimiter, adminAuth, async (req: AuthRequest, res: Response) => {
   try {
+    // Admin `internet_search` flag-ı deaktivdirsə internet axtarışı bağlıdır.
+    if (!(await resolveFlag('internet_search'))) {
+      res.status(503).json({ success: false, message: 'İnternet axtarışı deaktiv edilib' });
+      return;
+    }
     if (!webSearchEnabled()) {
       res.status(503).json({ success: false, message: 'İnternet axtarışı hazırda əlçatan deyil' });
       return;

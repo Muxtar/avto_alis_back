@@ -7,7 +7,8 @@ import { authLimiter, registerLimiter, verifyLimiter } from '../middleware/rateL
 import { extractPassportFromFiles } from '../services/vehiclePassportAI';
 import { processImages } from '../middleware/imageProcess';
 import { verifyIdentityAI } from '../services/credentialAI';
-import { sendWhatsAppOtp, isInfobipConfigured } from '../services/infobipWhatsApp';
+import { createOtp } from '../services/otp';
+import { resolveFlag } from '../services/settings';
 
 // Hər avtomobil üçün ön+arxa cüt şəkil. `passportImagesFront[i]` və
 // `passportImagesBack[i]` indeksləri eyni avtomobilə aiddir.
@@ -71,9 +72,6 @@ async function buildVehicleCreateRow(
 const router = Router();
 const prisma = new PrismaClient();
 
-function generateCode(): string {
-  return Math.floor(100000 + Math.random() * 900000).toString();
-}
 
 // Validation helpers
 function validateName(name: string): string | null {
@@ -108,33 +106,17 @@ function safeJsonParse(str: string): { data: any; error: string | null } {
   }
 }
 
-// Kod yaradır, DB-yə yazır və (konfiqurasiya varsa) WhatsApp ilə göndərir.
-// Qaytarır: { code, delivered, configured } — `delivered=true` isə kod real
-// göndərilib (cavabda gizlədilir); əks halda test rejimi.
-async function createVerificationCode(userId: number): Promise<{ code: string; delivered: boolean; configured: boolean }> {
-  const code = generateCode();
-  await prisma.verificationCode.create({
-    data: { userId, code, expiresAt: new Date(Date.now() + 5 * 60 * 1000) },
-  });
-  let delivered = false;
-  let configured = isInfobipConfigured();
-  if (configured) {
-    const u = await prisma.user.findUnique({ where: { id: userId }, select: { phone: true } });
-    if (u?.phone) {
-      const r = await sendWhatsAppOtp(u.phone, code);
-      delivered = r.delivered;
-      configured = r.configured;
-    }
-  }
-  return { code, delivered, configured };
+// Kod yaradır və admin `otp_real` flag-ına görə WhatsApp ilə göndərir və ya
+// test rejimində saxlayır (mərkəzi məntiq services/otp.ts-də).
+async function createVerificationCode(userId: number) {
+  return createOtp(userId);
 }
 
-// Cavaba əlavə olunan OTP sahələri. Kod WhatsApp ilə real göndərildisə cavabda
-// gizlədilir (təhlükəsizlik). Test rejimində (dev və ya SHOW_DEV_CODE) kod
-// qaytarılır ki, WhatsApp konfiqurasiyası olmadan da sınaq mümkün olsun.
-function otpFields(r: { code: string; delivered: boolean }) {
-  const showCode = !r.delivered && (process.env.NODE_ENV !== 'production' || process.env.SHOW_DEV_CODE === 'true');
-  return { delivered: r.delivered, ...(showCode && { verificationCode: r.code }) };
+// Cavaba əlavə olunan OTP sahələri. `showCode` services/otp.ts-də admin
+// flag-larına (otp_real / show_dev_code) görə hesablanır: real göndərildisə
+// kod gizlədilir, fake/debug rejimində qaytarılır.
+function otpFields(r: { code: string; delivered: boolean; showCode: boolean }) {
+  return { delivered: r.delivered, ...(r.showCode && { verificationCode: r.code }) };
 }
 
 // Phone-only registration/login (unified). Creates user if new, returns userId + verification code
@@ -147,6 +129,12 @@ router.post('/register/phone', registerLimiter, async (req: Request, res: Respon
 
     let user = await prisma.user.findFirst({ where: { phone, type: { not: UserType.COURIER } } });
     if (!user) {
+      // Admin `registration_open` flag-ı bağlıdırsa yeni qeydiyyat qadağandır
+      // (mövcud istifadəçilər giriş edə bilər).
+      if (!(await resolveFlag('registration_open'))) {
+        res.status(403).json({ success: false, message: 'Yeni qeydiyyat müvəqqəti bağlıdır. Zəhmət olmasa sonra yenidən cəhd edin.' });
+        return;
+      }
       user = await prisma.user.create({ data: { phone } });
     }
 
