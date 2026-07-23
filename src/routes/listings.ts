@@ -3,7 +3,7 @@ import { PrismaClient, Prisma } from '@prisma/client';
 import { upload } from '../middleware/upload';
 import { processImages } from '../middleware/imageProcess';
 import { adminAuth, AuthRequest, verifyTokenUserId } from '../middleware/auth';
-import { purchasedListing, messagedUser } from '../services/reviewGating';
+import { purchasedListing } from '../services/reviewGating';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -325,16 +325,17 @@ router.get('/listings/:id', async (req: Request, res: Response) => {
       }
     }
 
-    // canReview — bu istifadəçi rəy yaza bilərmi? VÖEN-li elana məhsulu satın
-    // alanlar, fərdi elana isə satıcı ilə əlaqə saxlayanlar rəy yaza bilər.
-    // Frontend bunu bilib rəy formu yerinə "Satıcıdan soruş" göstərir.
+    // canReview — bu istifadəçi rəy yaza bilərmi?
+    //  • VÖEN-li elan: yalnız məhsulu satın alan rəy yaza bilər.
+    //  • Fərdi (VÖEN-siz) elan: alışı izləyə bilmədiyimiz üçün hər kəs (giriş
+    //    etmiş, öz elanı olmayan) rəy yaza bilər — almadan da.
+    // Hər iki halda bir istifadəçi bir elana yalnız bir dəfə (dəyişilə bilər).
+    // VÖEN-siz-də canReview=true olduğundan frontend rəy formunu göstərir.
     let canReview = false;
     const reviewerId = verifyTokenUserId(req.headers.authorization?.replace('Bearer ', ''));
     if (reviewerId != null && reviewerId !== listing.userId) {
       const isVoen = !!(listing.businessId || listing.businessObjectId);
-      canReview = isVoen
-        ? await purchasedListing(reviewerId, listing.id)
-        : await messagedUser(reviewerId, listing.userId);
+      canReview = isVoen ? await purchasedListing(reviewerId, listing.id) : true;
     }
 
     res.json({ ...listing, canReview });
@@ -381,18 +382,12 @@ router.post('/listings/:id/comments', adminAuth, async (req: AuthRequest, res: R
       res.status(403).json({ success: false, message: 'Öz elanınıza rəy yaza bilməzsiniz' });
       return;
     }
-    // Kim rəy yaza bilər: VÖEN-li elana — məhsulu satın alan; fərdi elana — satıcı ilə əlaqə saxlayan.
+    // Kim rəy yaza bilər: VÖEN-li elana yalnız məhsulu satın alan; fərdi
+    // (VÖEN-siz) elanda alışı izləyə bilmədiyimiz üçün hər kəs almadan da.
     const isVoen = !!(exists.businessId || exists.businessObjectId);
-    if (isVoen) {
-      if (!(await purchasedListing(req.adminId!, listingId))) {
-        res.status(403).json({ success: false, message: 'Yalnız məhsulu satın aldıqdan sonra rəy yaza bilərsiniz' });
-        return;
-      }
-    } else {
-      if (!(await messagedUser(req.adminId!, exists.userId))) {
-        res.status(403).json({ success: false, message: 'Fərdi elana rəy üçün əvvəlcə satıcı ilə əlaqə saxlayın (chat)' });
-        return;
-      }
+    if (isVoen && !(await purchasedListing(req.adminId!, listingId))) {
+      res.status(403).json({ success: false, message: 'Yalnız məhsulu satın aldıqdan sonra rəy yaza bilərsiniz' });
+      return;
     }
     // Bir dəfə — artıq rəy varsa dəyişməlidir (silib/redaktə).
     const already = await prisma.comment.findFirst({ where: { userId: req.adminId!, listingId } });
