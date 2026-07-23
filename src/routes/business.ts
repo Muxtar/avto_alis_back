@@ -134,7 +134,7 @@ router.post('/me/businesses', adminAuth, docFields, processImages, async (req: A
     // (Veriff test rejimində APPROVED-a çatmaya bilər — status set olması kifayətdir.)
     const faceOk = (me.faceMatchScore ?? 0) > 0.5 || me.idAiFaceMatch === true || (me.idAiFaceScore ?? 0) > 0.5;
     const identityReusable = !!me.idVerifyStatus || (!!me.idCardImage && !!me.selfieImage && faceOk);
-    const { kind, proofType, name, voen, ownerName, founderName, phone, banks } = req.body;
+    const { proofType, name, voen, ownerName, founderName, phone, banks } = req.body;
     // Şirkət məlumatları sənəddən oxunur. Təsisçi sənəddə olmaya bilər — sahibə bərabər götürülür.
     const founder = (founderName?.trim() || ownerName?.trim() || '');
     // Opsional veb-sayt / sosial linklər (boşdursa null)
@@ -143,7 +143,15 @@ router.post('/me/businesses', adminAuth, docFields, processImages, async (req: A
     if (!name?.trim() || !voen?.trim() || !ownerName?.trim()) {
       res.status(400).json({ success: false, message: 'Şirkət sənədi oxunmadı (ad/VÖEN/sahib) — sənədi yenidən yükləyin' }); return;
     }
-    if (!['LEGAL', 'PHYSICAL'].includes(kind)) { res.status(400).json({ success: false, message: 'Şəxs növü seçin' }); return; }
+    // Şəxs növü əl ilə seçilmir — VÖEN-in son rəqəmindən avtomatik təyin olunur:
+    //   son rəqəm 1 → Hüquqi şəxs (LEGAL), 2 → Fiziki şəxs (PHYSICAL).
+    // (Server mənbədir; frontend-dən gələn dəyərə etibar edilmir.)
+    const voenDigits = voen.trim().replace(/\D/g, '');
+    const lastDigit = voenDigits.slice(-1);
+    const kind = lastDigit === '1' ? 'LEGAL' : lastDigit === '2' ? 'PHYSICAL' : null;
+    if (!kind) {
+      res.status(400).json({ success: false, message: 'VÖEN düzgün oxunmadı — şəxs növü VÖEN-in son rəqəmindən (1=hüquqi, 2=fiziki) təyin olunur' }); return;
+    }
     if (!['TAX_DOC', 'POWER_OF_ATTORNEY'].includes(proofType)) { res.status(400).json({ success: false, message: 'Sənəd növü seçin' }); return; }
 
     const taxDocImage = fileName(req, 'taxDocImage');
