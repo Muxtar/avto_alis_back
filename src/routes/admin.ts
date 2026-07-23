@@ -853,7 +853,7 @@ router.get('/admin/analytics', requireAdmin, async (_req: AuthRequest, res: Resp
   }
 });
 
-// ==================== KİMLİK YOXLAMASI (LEGV EDİLDİ) ====================
+// ==================== KİMLİK YOXLAMASI (LƏĞV EDİLDİ) ====================
 // Kimlik doğrulaması artıq Veriff ilə avtomatik aparılır — admin paneldə əl ilə
 // təsdiq/rədd endpoint-lərinə ehtiyac yoxdur, ona görə silindi.
 
