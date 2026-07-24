@@ -51,9 +51,13 @@ export interface YigimCreateInput {
   amount: number;        // AZN (məs. 50.25) — qəpiyə çevriləcək
   description?: string;
   language?: string;     // az/en/ru
-  callbackUrl: string;   // ödəniş statusu dəyişəndə webhook
+  callbackUrl: string;   // ödəniş statusu dəyişəndə webhook (server-to-server)
   type?: 'SMS' | 'DMS';  // SMS = dərhal çəkilir, DMS = blokla→sonra çək
   saveCard?: boolean;
+  token?: string;        // kart saxlama zamanı opsional öz token-imiz (verilməsə YIĞIM yaradır)
+  // Şablonun "geri qayıt" düymələri üçün: name=value;name=value (URL-encoded).
+  // Adətən back-url/fail-url — istifadəçi ödənişdən sonra saytına qaytarılsın.
+  extra?: string;
 }
 
 export interface YigimCreated { url: string; code: number; message: string; }
@@ -64,6 +68,7 @@ export async function createPayment(input: YigimCreateInput): Promise<YigimCreat
   const r = await get('/payment/create', {
     reference: input.reference,
     type: input.type || 'SMS',
+    token: input.token,
     save: input.saveCard ? 'y' : 'n',
     amount: coins,
     currency: CURRENCY_AZN,
@@ -72,8 +77,32 @@ export async function createPayment(input: YigimCreateInput): Promise<YigimCreat
     language: input.language || 'az',
     description: input.description,
     callback: input.callbackUrl,
+    extra: input.extra,
   });
   return { url: r.url, code: Number(r.code ?? 0), message: r.message };
+}
+
+export interface YigimExecuteInput {
+  reference: string;     // bu ödəniş üçün yeni unikal referans
+  token: string;         // saxlanmış kartın token-i
+  amount: number;        // AZN
+  type?: 'SMS' | 'DMS';
+  description?: string;
+}
+
+// 5.3 Birbaşa ödəniş — saxlanmış kartın token-i ilə (kart səhifəsi olmadan, sinxron).
+// status "00" = uğurlu (SMS); DMS-də "S1" = bloklandı (sonra capture/cancel).
+export async function executeSavedCard(input: YigimExecuteInput): Promise<{ status: string; code: number; raw: any }> {
+  const r = await get('/payment/execute', {
+    reference: input.reference,
+    type: input.type || 'SMS',
+    token: input.token,
+    amount: Math.round(input.amount * 100),
+    currency: CURRENCY_AZN,
+    biller: BILLER,
+    description: input.description,
+  });
+  return { status: String(r.status ?? ''), code: Number(r.code ?? 0), raw: r };
 }
 
 // 5.2 Ödəniş statusu.

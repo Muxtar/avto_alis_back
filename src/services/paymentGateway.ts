@@ -35,6 +35,10 @@ export interface CreatedPayment {
 export async function createPayment(input: CreateInput): Promise<CreatedPayment> {
   const provider = activeProvider();
   if (provider === 'yigim') {
+    // İstifadəçi WebView-da ödənişi bitirdikdən sonra saytına qayıtsın deyə
+    // şablona back-url/fail-url ötürürük (callback ayrıca server webhook-udur).
+    const fe = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/$/, '');
+    const extra = `back-url=${fe}/payment/return?status=success;fail-url=${fe}/payment/return?status=failed`;
     const r = await yigim.createPayment({
       reference: input.reference,
       amount: input.amount,
@@ -42,6 +46,7 @@ export async function createPayment(input: CreateInput): Promise<CreatedPayment>
       language: input.language,
       callbackUrl: `${input.callbackBase}/api/payment/yigim/callback`,
       type: 'SMS',
+      extra,
     });
     return { provider, redirectUrl: r.url, ref: input.reference, gatewayOrderId: null, password: null, status: null };
   }
