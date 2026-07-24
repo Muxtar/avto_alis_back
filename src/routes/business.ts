@@ -769,7 +769,13 @@ router.get('/admin/businesses', requireAdmin, async (req: AuthRequest, res: Resp
     const businesses = await prisma.business.findMany({
       where,
       include: {
-        user: { select: { id: true, name: true, phone: true, publicId: true } },
+        user: { select: {
+          id: true, name: true, phone: true, publicId: true,
+          // Yaradanın təsdiqlənmiş kimlik məlumatları — admin sənəddəki sahiblə
+          // müqayisə etsin (ad uyğundurmu, doğru/yanlışdırmı və s.).
+          idNumber: true, birthDate: true, gender: true, idVerifyStatus: true,
+          idCardImage: true, selfieImage: true, idAiNameMatch: true, idAiFaceMatch: true,
+        } },
         objects: true,
         banks: true,
       },
