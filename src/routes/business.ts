@@ -1,10 +1,18 @@
 import { Router, Request, Response } from 'express';
 import { PrismaClient } from '@prisma/client';
 import { adminAuth, requireAdmin, AuthRequest } from '../middleware/auth';
-import { upload, docUpload } from '../middleware/upload';
+import { upload, docUpload, UPLOADS_DIR } from '../middleware/upload';
 import { processImages } from '../middleware/imageProcess';
 import { verifyBusinessAI, BusinessDoc, extractBankAccounts, extractBusinessInfo, nameOverlapScore } from '../services/credentialAI';
 import fs from 'fs';
+import path from 'path';
+
+// Saxlanmış sənəd faylının (filename) diskdəki tam yolu.
+function storedPath(filename: string | null | undefined): string | null {
+  if (!filename) return null;
+  const p = path.join(UPLOADS_DIR, filename);
+  return fs.existsSync(p) ? p : null;
+}
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -202,8 +210,11 @@ router.post('/me/businesses', adminAuth, docFields, processImages, async (req: A
       res.status(403).json({ success: false, code: 'NOT_OWNER', message: 'Kimliyinizdəki ad şirkətin rəhbəri ilə uyğun deyil — yalnız rəhbər və ya etibarnaməli şəxs biznes yarada bilər.' });
       return;
     }
-    // Avtomatik təsdiq şərti: səlahiyyətli + sənəd əsl + VÖEN uyğun + yüksək əminlik + saxtakarlıq yoxdur.
-    const autoApprove = ai.ok && ai.authorized && ai.documentValid && ai.voenMatch
+    // AI-ın tövsiyəsi (avtomatik təsdiq DEYİL): səlahiyyətli + sənəd əsl + VÖEN
+    // uyğun + yüksək əminlik + saxtakarlıq yoxdur. Yekun qərarı ADMIN verir —
+    // biznes həmişə PENDING yaradılır və admin paneldə əl ilə təsdiqlənir.
+    // (AI bəzən işləmir/yanlış işləyir deyə insan yoxlaması vacibdir.)
+    const aiRecommendsApprove = ai.ok && ai.authorized && ai.documentValid && ai.voenMatch
       && ai.confidence >= 0.75 && ai.fraudSignals.length === 0;
 
     const business = await prisma.business.create({
@@ -222,18 +233,15 @@ router.post('/me/businesses', adminAuth, docFields, processImages, async (req: A
         aiConfidence: ai.ok ? ai.confidence : null,
         aiFraudSignals: ai.fraudSignals,
         aiReason: ai.error ? ai.error : ai.reason,
-        autoApproved: autoApprove,
-        ...(autoApprove ? { status: 'APPROVED' as any, reviewedAt: new Date() } : {}),
+        autoApproved: aiRecommendsApprove, // AI-ın tövsiyəsi (admin görsün) — status yox
+        // status: PENDING (default) — admin təsdiq edənə qədər.
       },
     });
 
-    // Avtomatik təsdiqlənibsə — satıcı statusunu ver + bildiriş.
-    if (autoApprove) {
-      await prisma.user.update({ where: { id: req.adminId! }, data: { sellerVerified: true, sellerVerifiedAt: new Date() } }).catch(() => {});
-      await prisma.notification.create({
-        data: { userId: req.adminId!, type: 'SYSTEM', title: 'Biznes təsdiqləndi', body: `"${name.trim()}" AI tərəfindən təsdiqləndi — artıq kartla satış mümkündür.`, link: '/business' },
-      }).catch(() => {});
-    }
+    // Admin panelə düşdü — istifadəçiyə "yoxlamaya göndərildi" bildirişi.
+    await prisma.notification.create({
+      data: { userId: req.adminId!, type: 'SYSTEM', title: 'Biznes yoxlamaya göndərildi', body: `"${name.trim()}" admin təsdiqini gözləyir. Təsdiqdən sonra kartla satış mümkün olacaq.`, link: '/business' },
+    }).catch(() => {});
 
     // Bank hesabları: hər sənədin IBAN-ları + əsas (primary) seçilən sənədin hesabı ödəniş üçün.
     const bankRows: { businessId: number; iban: string; title: string | null; isPrimary: boolean; docImage: string | null }[] = [];
@@ -267,7 +275,8 @@ router.post('/me/businesses', adminAuth, docFields, processImages, async (req: A
     res.status(201).json({
       success: true,
       business,
-      autoApproved: autoApprove,
+      autoApproved: false, // artıq avtomatik təsdiq yoxdur — admin təsdiqi gözlənilir
+      aiRecommendsApprove,
       ai: { ok: ai.ok, authorized: ai.authorized, reason: ai.error || ai.reason },
       bankAccountsFound: bankRows.length,
     });
@@ -850,6 +859,105 @@ router.put('/admin/businesses/:id/reject', requireAdmin, async (req: AuthRequest
       data: { userId: biz.userId, type: 'SYSTEM', title: 'Biznes rədd edildi', body: `"${biz.name}": ${reason.trim()}`, link: '/business' },
     }).catch(() => {});
     res.json({ success: true, business: biz });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+// ── ADMIN: biznesi AI ilə YENİDƏN yoxla (saxlanmış sənədlər üzərində) ──
+// AI bəzən işləmir/yanlış işləyir — admin istədiyi vaxt yenidən çağıra bilər.
+router.post('/admin/businesses/:id/ai-recheck', requireAdmin, async (req: AuthRequest, res: Response) => {
+  try {
+    const id = parseInt(req.params.id);
+    const biz = await prisma.business.findUnique({ where: { id }, include: { user: { select: { name: true } } } });
+    if (!biz) { res.status(404).json({ success: false, message: 'Biznes tapılmadı' }); return; }
+    const docs: BusinessDoc[] = [];
+    if (biz.proofType === 'TAX_DOC') {
+      const p = storedPath(biz.taxDocImage); if (p) docs.push({ label: 'Vergi qeydiyyatı sənədi', path: p });
+    } else {
+      const c = storedPath(biz.companyDocImage); if (c) docs.push({ label: 'Şirkət sənədi', path: c });
+      const a = storedPath(biz.powerOfAttorneyImage); if (a) docs.push({ label: 'Etibarnamə', path: a });
+    }
+    if (!docs.length) { res.status(400).json({ success: false, message: 'Yoxlanacaq sənəd tapılmadı (fayllar diskdə yoxdur)' }); return; }
+    const ai = await verifyBusinessAI(
+      docs, biz.proofType as 'TAX_DOC' | 'POWER_OF_ATTORNEY',
+      { name: biz.name, voen: biz.voen, ownerName: biz.ownerName, founderName: biz.founderName },
+      (biz.user?.name || '').trim(),
+    );
+    const aiRec = ai.ok && ai.authorized && ai.documentValid && ai.voenMatch && ai.confidence >= 0.75 && ai.fraudSignals.length === 0;
+    const updated = await prisma.business.update({
+      where: { id },
+      data: {
+        aiAuthorized: ai.ok ? ai.authorized : null,
+        aiVoenMatch: ai.ok ? ai.voenMatch : null,
+        aiConfidence: ai.ok ? ai.confidence : null,
+        aiFraudSignals: ai.fraudSignals,
+        aiReason: ai.error ? ai.error : ai.reason,
+        autoApproved: aiRec,
+      },
+    });
+    res.json({ success: true, ai, aiRecommendsApprove: aiRec, business: updated });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+// ── ADMIN: sənəddən şirkət məlumatlarını AI ilə OXU (search) — saxlamır, qaytarır ──
+// Admin nəticəni görüb istəsə redaktə formasına tətbiq edir.
+router.post('/admin/businesses/:id/ai-extract', requireAdmin, async (req: AuthRequest, res: Response) => {
+  try {
+    const id = parseInt(req.params.id);
+    const biz = await prisma.business.findUnique({ where: { id } });
+    if (!biz) { res.status(404).json({ success: false, message: 'Biznes tapılmadı' }); return; }
+    const docPath = storedPath(biz.proofType === 'TAX_DOC' ? biz.taxDocImage : biz.companyDocImage) || storedPath(biz.taxDocImage) || storedPath(biz.companyDocImage);
+    if (!docPath) { res.status(400).json({ success: false, message: 'Oxunacaq sənəd tapılmadı' }); return; }
+    const info = await extractBusinessInfo(docPath);
+    res.json({ success: true, info });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+// ── ADMIN: biznes məlumatlarını əl ilə redaktə et ──
+router.put('/admin/businesses/:id', requireAdmin, async (req: AuthRequest, res: Response) => {
+  try {
+    const id = parseInt(req.params.id);
+    const b = req.body || {};
+    const data: any = {};
+    for (const k of ['name', 'voen', 'ownerName', 'founderName', 'phone'] as const) {
+      if (typeof b[k] === 'string') data[k] = b[k].trim() || null;
+    }
+    if (b.kind === 'LEGAL' || b.kind === 'PHYSICAL') data.kind = b.kind;
+    if (b.proofType === 'TAX_DOC' || b.proofType === 'POWER_OF_ATTORNEY') data.proofType = b.proofType;
+    // name/voen boş qala bilməz
+    if (data.name === null || data.voen === null) { res.status(400).json({ success: false, message: 'Ad və VÖEN boş ola bilməz' }); return; }
+    const biz = await prisma.business.update({ where: { id }, data });
+    res.json({ success: true, business: biz });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+// ── ADMIN: bank hesabını redaktə et (IBAN/ad) ──
+router.put('/admin/banks/:id', requireAdmin, async (req: AuthRequest, res: Response) => {
+  try {
+    const id = parseInt(req.params.id);
+    const iban = String(req.body?.iban || '').replace(/\s+/g, '').toUpperCase();
+    const title = typeof req.body?.title === 'string' ? (req.body.title.trim() || null) : undefined;
+    if (!iban) { res.status(400).json({ success: false, message: 'IBAN tələb olunur' }); return; }
+    const bank = await prisma.bankAccount.update({ where: { id }, data: { iban, ...(title !== undefined ? { title } : {}) } });
+    res.json({ success: true, bank });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+// ── ADMIN: bank hesabını sil ──
+router.delete('/admin/banks/:id', requireAdmin, async (req: AuthRequest, res: Response) => {
+  try {
+    const id = parseInt(req.params.id);
+    await prisma.bankAccount.delete({ where: { id } });
+    res.json({ success: true });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }

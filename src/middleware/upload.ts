@@ -5,7 +5,7 @@ import fs from 'fs';
 // Şəkillərin saxlandığı qovluq. Railway persistent Volume mount ediləndə
 // avtomatik RAILWAY_VOLUME_MOUNT_PATH qoyulur — bu halda şəkillər deploy-lar
 // arasında SİLİNMİR. UPLOADS_DIR əl ilə də verilə bilər.
-const UPLOADS_DIR =
+export const UPLOADS_DIR =
   process.env.UPLOADS_DIR ||
   (process.env.RAILWAY_VOLUME_MOUNT_PATH ? path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH, 'uploads') : path.join(__dirname, '../../uploads'));
 
