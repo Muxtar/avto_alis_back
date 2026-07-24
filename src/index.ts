@@ -251,10 +251,30 @@ async function ensureAdmin() {
   }
 }
 
+// ADMIN_PHONES env-dəki nömrələrə uyğun istifadəçilərə admin rolu ver — startup-da.
+// Beləliklə həmin nömrə ilə normal giriş də dərhal admin panelə çıxış verir.
+async function ensureAdminPhones() {
+  const phones = (process.env.ADMIN_PHONES || '').split(',').map((s) => s.replace(/\D/g, '')).filter((s) => s.length >= 7);
+  if (!phones.length) return;
+  const prisma = new PrismaClient();
+  try {
+    for (const p of phones) {
+      const tail = p.slice(-9);
+      const r = await prisma.user.updateMany({ where: { phone: { contains: tail }, role: { not: 'ADMIN' } }, data: { role: 'ADMIN' } });
+      if (r.count) console.log(`[admin] nömrə ${tail} → ${r.count} istifadəçi admin edildi.`);
+    }
+  } catch (e: any) {
+    console.error('[admin] ADMIN_PHONES sync xətası:', e?.message);
+  } finally {
+    await prisma.$disconnect();
+  }
+}
+
 server.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
   console.log(`CORS origins: ${allowedOrigins.join(', ')}`);
   ensureAdmin();
+  ensureAdminPhones();
   backfillListingExpiresAt();
   backfillOptimizeImages();
 });

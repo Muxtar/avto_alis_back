@@ -31,6 +31,22 @@ export function generateToken(userId: number): string {
   return jwt.sign({ userId }, SIGNING_KEY, { expiresIn: '24h' });
 }
 
+// İcazə verilmiş admin nömrələri — Railway env: ADMIN_PHONES="+99450...,+99451..."
+// Yalnız env-dən idarə olunur (panel yox) — təhlükəsizlik üçün.
+export function adminPhoneList(): string[] {
+  return (process.env.ADMIN_PHONES || '')
+    .split(',').map((s) => s.replace(/\D/g, '')).filter((s) => s.length >= 7);
+}
+// Nömrə admin siyahısındadırmı? Format-dan asılı olmamaq üçün son 9 rəqəmlə
+// (milli nömrə) müqayisə edilir — +994, boşluq, 0 prefiksi fərqi problem olmasın.
+export function isAdminPhone(phone: string | null | undefined): boolean {
+  if (!phone) return false;
+  const d = String(phone).replace(/\D/g, '');
+  if (d.length < 7) return false;
+  const tail = d.slice(-9);
+  return adminPhoneList().some((a) => a === d || a.endsWith(tail) || d.endsWith(a.slice(-9)));
+}
+
 // User-Agent-dən cihaz məlumatını çıxar (WhatsApp "bağlı cihazlar" üçün).
 // Xarici asılılıq yoxdur — sadə imza uyğunlaşması.
 export function parseDevice(ua: string | undefined): { os: string | null; browser: string | null; deviceType: string } {

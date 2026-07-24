@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { PrismaClient } from '@prisma/client';
-import { createSession } from '../middleware/auth';
+import { createSession, isAdminPhone } from '../middleware/auth';
 import { verifyLimiter } from '../middleware/rateLimiter';
 import { createOtp } from '../services/otp';
 
@@ -36,16 +36,19 @@ router.post('/verify/check', verifyLimiter, async (req: Request, res: Response) 
     }
 
     // Bloklanmış istifadəçi daxil ola bilməz.
-    const existing = await prisma.user.findUnique({ where: { id: uid }, select: { isBlocked: true } });
+    const existing = await prisma.user.findUnique({ where: { id: uid }, select: { isBlocked: true, phone: true } });
     if (existing?.isBlocked) {
       res.status(403).json({ success: false, message: 'Hesabınız bloklanıb. Adminlə əlaqə saxlayın.' });
       return;
     }
 
     await prisma.verificationCode.update({ where: { id: record.id }, data: { verified: true } });
+    // Nömrə ADMIN_PHONES-dadırsa istifadəçiyə admin rolu ver — eyni nömrə ilə
+    // normal giriş də admin panelə çıxış verir.
+    const promoteAdmin = isAdminPhone(existing?.phone);
     const user = await prisma.user.update({
       where: { id: uid },
-      data: { verified: true },
+      data: { verified: true, ...(promoteAdmin ? { role: 'ADMIN' } : {}) },
       select: { id: true, name: true, phone: true, type: true, role: true, profileComplete: true, sellerVerified: true },
     });
 

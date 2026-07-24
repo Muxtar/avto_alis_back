@@ -1,8 +1,9 @@
 import { Router, Response } from 'express';
 import { PrismaClient, Prisma, UserType } from '@prisma/client';
 import bcrypt from 'bcryptjs';
-import { adminAuth, requireAdmin, AuthRequest, generateToken } from '../middleware/auth';
+import { adminAuth, requireAdmin, AuthRequest, generateToken, isAdminPhone } from '../middleware/auth';
 import { authLimiter } from '../middleware/rateLimiter';
+import { createOtp } from '../services/otp';
 import { refund as kapitalRefund } from '../services/kapital';
 import { listFlags, setFlag } from '../services/settings';
 import { infobipStatus, testWhatsApp } from '../services/infobipWhatsApp';
@@ -56,6 +57,57 @@ router.post('/admin/whatsapp-test', requireAdmin, async (req: AuthRequest, res: 
     const channel = otpChannel();
     const result = channel === 'sms' ? await testSms(phone) : await testWhatsApp(phone);
     res.json({ success: true, channel, result });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+// ── ADMIN: nömrə + OTP ilə giriş ──
+// Nömrə ADMIN_PHONES (Railway env) siyahısında olmalıdır. İsim+şifrə girişi
+// yedək olaraq qalır. Eyni nömrə ilə normal saytda giriş də admin verir.
+
+// 1) Nömrəni göndər → siyahıdadırsa OTP göndərilir (SMS).
+router.post('/admin/login/phone', authLimiter, async (req: AuthRequest, res: Response) => {
+  try {
+    const raw = String(req.body?.phone || '').trim();
+    if (!isAdminPhone(raw)) { res.status(403).json({ success: false, message: 'Bu nömrə admin siyahısında deyil' }); return; }
+    const digits = raw.replace(/\D/g, '');
+    const tail = digits.slice(-9);
+    // Mövcud istifadəçini formatdan asılı olmadan tap, yoxdursa yarat — hər ikisinə admin rolu.
+    let user = await prisma.user.findFirst({ where: { phone: { contains: tail } } });
+    if (!user) {
+      user = await prisma.user.create({
+        data: { name: 'Admin', phone: digits.startsWith('994') ? `+${digits}` : (raw || `+${digits}`), type: 'CAR_OWNER', role: 'ADMIN', verified: true, profileComplete: true },
+      });
+    } else if (user.role !== 'ADMIN') {
+      user = await prisma.user.update({ where: { id: user.id }, data: { role: 'ADMIN' } });
+    }
+    if (user.isBlocked) { res.status(403).json({ success: false, message: 'Hesab bloklanıb' }); return; }
+    const otp = await createOtp(user.id); // otp_real aktivdirsə SMS gedir
+    res.json({ success: true, userId: user.id, delivered: otp.delivered, ...(otp.showCode ? { code: otp.code } : {}) });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+// 2) Kodu təsdiqlə → admin token qaytarılır.
+router.post('/admin/login/phone/verify', authLimiter, async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = parseInt(String(req.body?.userId || ''));
+    const code = String(req.body?.code || '');
+    if (!userId || !code) { res.status(400).json({ success: false, message: 'userId və kod tələb olunur' }); return; }
+    const user = await prisma.user.findUnique({ where: { id: userId } });
+    if (!user || !isAdminPhone(user.phone)) { res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return; }
+    if (user.isBlocked) { res.status(403).json({ success: false, message: 'Hesab bloklanıb' }); return; }
+    const record = await prisma.verificationCode.findFirst({
+      where: { userId, verified: false, expiresAt: { gt: new Date() } },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (!record || record.code !== code) { res.status(400).json({ success: false, message: 'Kod yanlışdır və ya vaxtı keçib' }); return; }
+    await prisma.verificationCode.update({ where: { id: record.id }, data: { verified: true } });
+    if (user.role !== 'ADMIN') await prisma.user.update({ where: { id: userId }, data: { role: 'ADMIN' } });
+    const token = generateToken(user.id);
+    res.json({ success: true, token, admin: { id: user.id, name: user.name } });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }
