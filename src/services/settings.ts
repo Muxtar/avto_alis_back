@@ -1,7 +1,7 @@
 // Admin idarə edilən feature-flags (tənzimləmələr) — DB-də açar/dəyər.
 // Qısa TTL keşi ilə oxunur ki, hər OTP/istəkdə DB-yə getməsin.
 import { PrismaClient } from '@prisma/client';
-import { is1smsConfigured } from './sms1az';
+import { isInfobipConfigured } from './infobipWhatsApp';
 
 const prisma = new PrismaClient();
 
@@ -21,10 +21,10 @@ export const FLAGS: FlagDef[] = [
   {
     key: 'otp_real',
     section: 'production',
-    label: 'Nömrə doğrulama: real (SMS)',
+    label: 'Nömrə doğrulama: real (Infobip)',
     description:
-      'Aktiv: doğrulama kodu SMS ilə göndərilir (1sms.az). Deaktiv: kod göndərilmir, test rejimində input üstündə "fake" olaraq göstərilir. Default: 1sms.az konfiqurasiya olunubsa aktiv.',
-    default: () => is1smsConfigured(),
+      'Aktiv: doğrulama kodu Infobip ilə (SMS və ya WhatsApp) göndərilir. Deaktiv: kod göndərilmir, test rejimində input üstündə "fake" olaraq göstərilir. Default: Infobip konfiqurasiya olunubsa aktiv.',
+    default: () => isInfobipConfigured(),
   },
   {
     key: 'registration_open',

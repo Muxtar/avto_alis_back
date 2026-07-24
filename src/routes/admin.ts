@@ -5,7 +5,9 @@ import { adminAuth, requireAdmin, AuthRequest, generateToken } from '../middlewa
 import { authLimiter } from '../middleware/rateLimiter';
 import { refund as kapitalRefund } from '../services/kapital';
 import { listFlags, setFlag } from '../services/settings';
-import { sms1Status, test1sms } from '../services/sms1az';
+import { infobipStatus, testWhatsApp } from '../services/infobipWhatsApp';
+import { smsStatus, testSms } from '../services/infobipSms';
+import { otpChannel } from '../services/otp';
 import fs from 'fs';
 import path from 'path';
 
@@ -36,23 +38,24 @@ router.patch('/admin/settings', requireAdmin, async (req: AuthRequest, res: Resp
   }
 });
 
-// OTP konfiqurasiya vəziyyəti — 1sms.az env-ləri.
+// OTP konfiqurasiya vəziyyəti — aktiv kanal + Infobip SMS/WhatsApp env-ləri.
 router.get('/admin/whatsapp-status', requireAdmin, async (_req: AuthRequest, res: Response) => {
   try {
-    res.json({ success: true, channel: 'sms1az', sms1az: sms1Status() });
+    res.json({ success: true, channel: otpChannel(), sms: smsStatus(), whatsapp: infobipStatus() });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }
 });
 
-// Test OTP mesajı göndər — 1sms.az ilə göndərir və provayderin real
-// cavabını/xətasını qaytarır ki, admin səbəbi görsün.
+// Test OTP mesajı göndər — AKTİV kanaldan (Infobip SMS/WhatsApp) göndərir və
+// provayderin real cavabını/xətasını qaytarır ki, admin səbəbi görsün.
 router.post('/admin/whatsapp-test', requireAdmin, async (req: AuthRequest, res: Response) => {
   try {
     const phone = String(req.body?.phone || '').trim();
     if (!phone) { res.status(400).json({ success: false, message: 'phone tələb olunur' }); return; }
-    const result = await test1sms(phone);
-    res.json({ success: true, channel: 'sms1az', result });
+    const channel = otpChannel();
+    const result = channel === 'sms' ? await testSms(phone) : await testWhatsApp(phone);
+    res.json({ success: true, channel, result });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }
