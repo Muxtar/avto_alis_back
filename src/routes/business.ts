@@ -185,38 +185,10 @@ router.post('/me/businesses', adminAuth, docFields, processImages, async (req: A
     const bankDocImages = bankFiles.map((f) => f.filename);
     const perDoc = await Promise.all(bankFiles.map((f) => extractBankAccounts(f.path)));
 
-    // ---- Claude AI ilə şirkət sənədlərinin yoxlanması ----
-    // Profil sahibi rəhbər (vergi sənədi) və ya etibarnaməli isə avtomatik təsdiq.
-    const docs: BusinessDoc[] = [];
-    if (proofType === 'TAX_DOC') {
-      const p = filePath(req, 'taxDocImage'); if (p) docs.push({ label: 'Vergi qeydiyyatı sənədi', path: p });
-    } else {
-      const c = filePath(req, 'companyDocImage'); if (c) docs.push({ label: 'Şirkət sənədi', path: c });
-      const a = filePath(req, 'powerOfAttorneyImage'); if (a) docs.push({ label: 'Etibarnamə', path: a });
-    }
-    const ai = await verifyBusinessAI(
-      docs,
-      proofType as 'TAX_DOC' | 'POWER_OF_ATTORNEY',
-      { name: name.trim(), voen: voen.trim(), ownerName: ownerName.trim(), founderName: founder },
-      (me?.name || '').trim(),
-    );
-    // TAX_DOC: kimlik şirkətin rəhbəri ilə uyğun deyilsə biznes yaradılmır (AI açarı varsa).
-    // (Etibarnamə halında səlahiyyət etibarnamə ilə verilir — bloklanmır.)
-    const userOwnerScore = Math.max(
-      nameOverlapScore((me?.name || '').trim(), ownerName.trim()),
-      nameOverlapScore((me?.name || '').trim(), founder),
-    );
-    if (proofType === 'TAX_DOC' && ai.ok && !ai.authorized && userOwnerScore < 0.5) {
-      res.status(403).json({ success: false, code: 'NOT_OWNER', message: 'Kimliyinizdəki ad şirkətin rəhbəri ilə uyğun deyil — yalnız rəhbər və ya etibarnaməli şəxs biznes yarada bilər.' });
-      return;
-    }
-    // AI-ın tövsiyəsi (avtomatik təsdiq DEYİL): səlahiyyətli + sənəd əsl + VÖEN
-    // uyğun + yüksək əminlik + saxtakarlıq yoxdur. Yekun qərarı ADMIN verir —
-    // biznes həmişə PENDING yaradılır və admin paneldə əl ilə təsdiqlənir.
-    // (AI bəzən işləmir/yanlış işləyir deyə insan yoxlaması vacibdir.)
-    const aiRecommendsApprove = ai.ok && ai.authorized && ai.documentValid && ai.voenMatch
-      && ai.confidence >= 0.75 && ai.fraudSignals.length === 0;
-
+    // ---- AI yoxlaması BURADA edilmir (avtomatik yox) ----
+    // Sənədlərin AI yoxlaması admin panelin İSTƏYİ ilə (on-demand) aparılır:
+    // admin isterse «AI yoxla» düyməsi ilə analiz alır, istəməsə sənədə əl ilə
+    // baxıb təsdiqləyir. Biznes həmişə PENDING yaradılır → admin panelə düşür.
     const business = await prisma.business.create({
       data: {
         userId: req.adminId!,
@@ -228,12 +200,9 @@ router.post('/me/businesses', adminAuth, docFields, processImages, async (req: A
         taxDocImage, companyDocImage, powerOfAttorneyImage,
         bankDocImage: bankDocImages[0] || null, bankDocImages,
         idCardImage, selfieImage,
-        aiAuthorized: ai.ok ? ai.authorized : null,
-        aiVoenMatch: ai.ok ? ai.voenMatch : null,
-        aiConfidence: ai.ok ? ai.confidence : null,
-        aiFraudSignals: ai.fraudSignals,
-        aiReason: ai.error ? ai.error : ai.reason,
-        autoApproved: aiRecommendsApprove, // AI-ın tövsiyəsi (admin görsün) — status yox
+        // AI sahələri boş — admin paneldə «AI yoxla» ilə doldurulur.
+        aiFraudSignals: [],
+        autoApproved: false,
         // status: PENDING (default) — admin təsdiq edənə qədər.
       },
     });
@@ -275,9 +244,8 @@ router.post('/me/businesses', adminAuth, docFields, processImages, async (req: A
     res.status(201).json({
       success: true,
       business,
-      autoApproved: false, // artıq avtomatik təsdiq yoxdur — admin təsdiqi gözlənilir
-      aiRecommendsApprove,
-      ai: { ok: ai.ok, authorized: ai.authorized, reason: ai.error || ai.reason },
+      autoApproved: false,   // avtomatik təsdiq yoxdur
+      pending: true,         // admin təsdiqini gözləyir
       bankAccountsFound: bankRows.length,
     });
   } catch (error: any) {
