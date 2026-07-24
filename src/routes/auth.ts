@@ -112,9 +112,9 @@ async function createVerificationCode(userId: number) {
   return createOtp(userId);
 }
 
-// Cavaba əlavə olunan OTP sahələri. `showCode` services/otp.ts-də admin
-// flag-larına (otp_real / show_dev_code) görə hesablanır: real göndərildisə
-// kod gizlədilir, fake/debug rejimində qaytarılır.
+// Cavaba əlavə olunan OTP sahələri. `showCode` services/otp.ts-də `otp_real`
+// flag-ına görə hesablanır: real rejimdə kod ƏSLA qaytarılmır (yalnız SMS-ə
+// gedir), yalnız test/fake rejimində qaytarılır.
 function otpFields(r: { code: string; delivered: boolean; showCode: boolean }) {
   return { delivered: r.delivered, ...(r.showCode && { verificationCode: r.code }) };
 }

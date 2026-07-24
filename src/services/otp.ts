@@ -1,8 +1,8 @@
 // Doğrulama kodu (OTP) yaratma + göndərmə — mərkəzi məntiq.
 // Admin `otp_real` flag-ı aktivdirsə kod Infobip ilə (SMS və ya WhatsApp)
-// göndərilir və cavabda gizlədilir; deaktivdirsə (fake/test) kod cavabda
-// qaytarılır ki, input üstündə göstərilsin. `show_dev_code` aktivdirsə kod
-// həmişə cavabda qaytarılır (debug).
+// göndərilir və cavabda ƏSLA qaytarılmır (təhlükəsizlik — kod yalnız istifadəçinin
+// telefonuna gedir); deaktivdirsə (fake/test) kod cavabda qaytarılır ki, input
+// üstündə göstərilsin.
 import { PrismaClient } from '@prisma/client';
 import { sendWhatsAppOtp } from './infobipWhatsApp';
 import { sendSmsOtp, isSmsConfigured } from './infobipSms';
@@ -38,7 +38,6 @@ export async function createOtp(userId: number): Promise<OtpResult> {
   });
 
   const realMode = await resolveFlag('otp_real');
-  const showDev = await resolveFlag('show_dev_code');
 
   let delivered = false;
   if (realMode) {
@@ -52,11 +51,9 @@ export async function createOtp(userId: number): Promise<OtpResult> {
     }
   }
 
-  // Kodu cavabda göstər (input üstündə "fake"):
-  //  • test (fake) rejimində HƏMİŞƏ göstərilir,
-  //  • real rejimdə GÖSTƏRİLMİR — kod yalnız Infobip-ə gedir (göndərmə alınmasa
-  //    belə fake göstərmirik ki, admin problemi görsün; debug flag-ı istisna),
-  //  • show_dev_code aktivdirsə həmişə göstərilir (yalnız developer üçün).
-  const showCode = showDev || !realMode;
+  // Kodu cavabda göstər (input üstündə "fake") — YALNIZ test (fake) rejimində.
+  // Real rejimdə kod ƏSLA cavabda getmir: yalnız istifadəçinin telefonuna SMS ilə
+  // gedir. Beləliklə kod doğrulama səhifəsində görünmür (təhlükəsizlik).
+  const showCode = !realMode;
   return { code, delivered, showCode };
 }

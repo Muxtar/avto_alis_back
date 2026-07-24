@@ -40,13 +40,6 @@ export const FLAGS: FlagDef[] = [
     description: 'Saytda nəticə tapılmayanda internetdən (Claude web search) axtarış. Deaktiv edilsə internet nəticələri göstərilmir.',
     default: true,
   },
-  {
-    key: 'show_dev_code',
-    section: 'developer',
-    label: 'Doğrulama kodunu cavabda göstər (debug)',
-    description: 'Aktiv: doğrulama kodu API cavabında həmişə qaytarılır (real rejimdə belə) — yalnız developer/test üçün. Real istifadədə DEAKTIV olmalıdır.',
-    default: false,
-  },
 ];
 
 const FLAG_MAP = new Map(FLAGS.map((f) => [f.key, f]));
