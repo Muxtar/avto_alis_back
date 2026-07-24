@@ -564,6 +564,81 @@ router.get('/admin/orders', requireAdmin, async (req: AuthRequest, res: Response
   }
 });
 
+// ── Maliyyə / Ödənişlər hesabatı ──
+// Kim kimdən aldı, nə qədər ödədi, platformaya (bizə) nə qədər pul gəldi.
+// "Bizə gələn pul" = KART ödənişləri (PAID) — YIĞIM/Kapital merchant hesabımıza
+// düşür. NAĞD ödənişlər alıcı→satıcı birbaşa gedir (bizə gəlmir).
+router.get('/admin/finance', requireAdmin, async (req: AuthRequest, res: Response) => {
+  try {
+    const page = parseInt(String(req.query.page || '1')) || 1;
+    const take = Math.min(parseInt(String(req.query.limit || '25')) || 25, 100);
+    const skip = (page - 1) * take;
+    const method = String(req.query.method || 'all');       // all | CARD | CASH | WALLET
+    const payStatus = String(req.query.paymentStatus || 'all'); // all | PAID | PENDING | FAILED | REFUNDED
+    const q = String(req.query.q || '').trim();
+    const from = req.query.from ? new Date(String(req.query.from)) : null;
+    const to = req.query.to ? new Date(String(req.query.to)) : null;
+
+    // Ortaq filtr (tarix + axtarış) — özet kartları bunun üzərindən hesablanır.
+    const baseWhere: Prisma.OrderWhereInput = {};
+    if (from || to) baseWhere.createdAt = { ...(from ? { gte: from } : {}), ...(to ? { lte: to } : {}) };
+    if (q) baseWhere.OR = [
+      { buyer: { name: { contains: q, mode: 'insensitive' } } },
+      { buyer: { phone: { contains: q } } },
+      { seller: { name: { contains: q, mode: 'insensitive' } } },
+      { seller: { phone: { contains: q } } },
+    ];
+
+    // Cədvəl filtri (üstünə metod + ödəniş statusu).
+    const tableWhere: Prisma.OrderWhereInput = { ...baseWhere };
+    if (method !== 'all') tableWhere.paymentMethod = method as any;
+    if (payStatus !== 'all') tableWhere.paymentStatus = payStatus as any;
+
+    const [rows, total, cardPaid, cashPaid, refunded, allPaid, referralAgg] = await Promise.all([
+      prisma.order.findMany({
+        where: tableWhere,
+        include: {
+          items: { select: { title: true, quantity: true, price: true } },
+          buyer: { select: { id: true, name: true, phone: true } },
+          seller: { select: { id: true, name: true, phone: true } },
+        },
+        orderBy: { createdAt: 'desc' },
+        skip, take,
+      }),
+      prisma.order.count({ where: tableWhere }),
+      // Bizə gələn pul: KART + PAID
+      prisma.order.aggregate({ _sum: { total: true }, _count: true, where: { ...baseWhere, paymentMethod: 'CARD', paymentStatus: 'PAID' } }),
+      // Nağd (elden): CASH + PAID — bizə gəlmir, satıcıya birbaşa
+      prisma.order.aggregate({ _sum: { total: true }, _count: true, where: { ...baseWhere, paymentMethod: 'CASH', paymentStatus: 'PAID' } }),
+      // İadə edilmiş
+      prisma.order.aggregate({ _sum: { total: true }, _count: true, where: { ...baseWhere, paymentStatus: 'REFUNDED' } }),
+      // Bütün ödənilmiş (kart+nağd)
+      prisma.order.aggregate({ _sum: { total: true }, _count: true, where: { ...baseWhere, paymentStatus: 'PAID' } }),
+      // Referala ödəniləcək komissiya (voided olmayan)
+      prisma.order.aggregate({ _sum: { referralAmount: true }, where: { ...baseWhere, paymentStatus: 'PAID', referralVoided: false } }),
+    ]);
+
+    res.json({
+      success: true,
+      summary: {
+        cardPaidTotal: cardPaid._sum.total || 0,   // bizə gələn pul (kart)
+        cardPaidCount: cardPaid._count || 0,
+        cashPaidTotal: cashPaid._sum.total || 0,    // elden (satıcıya birbaşa)
+        cashPaidCount: cashPaid._count || 0,
+        refundedTotal: refunded._sum.total || 0,
+        refundedCount: refunded._count || 0,
+        allPaidTotal: allPaid._sum.total || 0,      // ümumi dövriyyə
+        allPaidCount: allPaid._count || 0,
+        referralPayable: referralAgg._sum.referralAmount || 0, // referrerlara ödəniləcək
+      },
+      transactions: rows,
+      total, page, totalPages: Math.ceil(total / take) || 1,
+    });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
 // Assign Courier to Order
 router.put('/admin/orders/:id/assign-courier', requireAdmin, async (req: AuthRequest, res: Response) => {
   try {
