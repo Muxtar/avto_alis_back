@@ -870,7 +870,15 @@ router.post('/admin/businesses/:id/ai-extract', requireAdmin, async (req: AuthRe
     const docPath = storedPath(biz.proofType === 'TAX_DOC' ? biz.taxDocImage : biz.companyDocImage) || storedPath(biz.taxDocImage) || storedPath(biz.companyDocImage);
     if (!docPath) { res.status(400).json({ success: false, message: 'Oxunacaq sənəd tapılmadı' }); return; }
     const info = await extractBusinessInfo(docPath);
-    res.json({ success: true, info });
+    // Bank sənəd(lər)indən IBAN-ları da oxu — admin eyni anda IBAN-ı doldursun.
+    const bankDocs = (biz.bankDocImages?.length ? biz.bankDocImages : (biz.bankDocImage ? [biz.bankDocImage] : []));
+    const ibans: string[] = [];
+    for (const bd of bankDocs) {
+      const p = storedPath(bd);
+      if (!p) continue;
+      try { const r = await extractBankAccounts(p); for (const a of r.accounts || []) if (a.iban) ibans.push(a.iban); } catch { /* keç */ }
+    }
+    res.json({ success: true, info, ibans: [...new Set(ibans)] });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }
