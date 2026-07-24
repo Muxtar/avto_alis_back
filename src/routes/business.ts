@@ -855,4 +855,42 @@ router.put('/admin/businesses/:id/reject', requireAdmin, async (req: AuthRequest
   }
 });
 
+// Biznesi sil — ona aid BÜTÜN obyektlər (FK Cascade) və elanlar (əl ilə) silinir.
+// Listing.businessId/businessObjectId FK-ları SetNull olduğu üçün elanlar avtomatik
+// silinmir; ona görə biznesə və onun obyektlərinə aid elanları əvvəlcə silirik.
+router.delete('/admin/businesses/:id', requireAdmin, async (req: AuthRequest, res: Response) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (Number.isNaN(id)) { res.status(400).json({ success: false, message: 'Yanlış ID' }); return; }
+    const objects = await prisma.businessObject.findMany({ where: { businessId: id }, select: { id: true } });
+    const objectIds = objects.map((o) => o.id);
+    const deletedListings = await prisma.$transaction(async (tx) => {
+      const del = await tx.listing.deleteMany({
+        where: { OR: [{ businessId: id }, ...(objectIds.length ? [{ businessObjectId: { in: objectIds } }] : [])] },
+      });
+      await tx.business.delete({ where: { id } }); // obyektlər FK Cascade ilə silinir
+      return del.count;
+    });
+    res.json({ success: true, deletedListings, deletedObjects: objectIds.length });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+// Obyekti sil — ona aid BÜTÜN elanlar (əl ilə) silinir.
+router.delete('/admin/objects/:id', requireAdmin, async (req: AuthRequest, res: Response) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (Number.isNaN(id)) { res.status(400).json({ success: false, message: 'Yanlış ID' }); return; }
+    const deletedListings = await prisma.$transaction(async (tx) => {
+      const del = await tx.listing.deleteMany({ where: { businessObjectId: id } });
+      await tx.businessObject.delete({ where: { id } });
+      return del.count;
+    });
+    res.json({ success: true, deletedListings });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
 export default router;
