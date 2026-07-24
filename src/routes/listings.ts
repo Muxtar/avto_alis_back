@@ -270,6 +270,24 @@ router.get('/sellers/:id', async (req: Request, res: Response) => {
   }
 });
 
+// Verilmiş id-lər arasından hələ də mövcud (APPROVED + vaxtı bitməmiş) elanların
+// id-lərini qaytarır. "Əvvəl baxdıqlarınız" silinmiş/gizli elanları göstərməsin
+// deyə istifadə olunur. (/:id-dən ƏVVƏL olmalıdır — yoxsa "exist" id kimi tutulur.)
+router.get('/listings/exist', async (req: Request, res: Response) => {
+  try {
+    const ids = String(req.query.ids || '')
+      .split(',').map((s) => parseInt(s.trim(), 10)).filter((n) => Number.isInteger(n) && n > 0);
+    if (!ids.length) { res.json({ ids: [] }); return; }
+    const rows = await prisma.listing.findMany({
+      where: { id: { in: ids.slice(0, 50) }, status: 'APPROVED', OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }] },
+      select: { id: true },
+    });
+    res.json({ ids: rows.map((r) => r.id) });
+  } catch {
+    res.json({ ids: [] });
+  }
+});
+
 // Get single listing (increment view count only if listing exists)
 router.get('/listings/:id', async (req: Request, res: Response) => {
   try {
