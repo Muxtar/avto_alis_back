@@ -149,7 +149,7 @@ router.post('/me/businesses', adminAuth, docFields, processImages, async (req: A
     const link = (v: any) => { const s = String(v || '').trim(); return s ? s.slice(0, 300) : null; };
     const website = link(req.body.website), instagram = link(req.body.instagram), facebook = link(req.body.facebook), tiktok = link(req.body.tiktok), youtube = link(req.body.youtube), linkedin = link(req.body.linkedin);
     if (!name?.trim() || !voen?.trim() || !ownerName?.trim()) {
-      res.status(400).json({ success: false, message: 'Şirkət sənədi oxunmadı (ad/VÖEN/sahib) — sənədi yenidən yükləyin' }); return;
+      res.status(400).json({ success: false, message: 'Şirkət adı, VÖEN və sahibi doldurulmalıdır' }); return;
     }
     // Şəxs növü əl ilə seçilmir — VÖEN-in son rəqəmindən avtomatik təyin olunur:
     //   son rəqəm 1 → Hüquqi şəxs (LEGAL), 2 → Fiziki şəxs (PHYSICAL).
@@ -158,7 +158,7 @@ router.post('/me/businesses', adminAuth, docFields, processImages, async (req: A
     const lastDigit = voenDigits.slice(-1);
     const kind = lastDigit === '1' ? 'LEGAL' : lastDigit === '2' ? 'PHYSICAL' : null;
     if (!kind) {
-      res.status(400).json({ success: false, message: 'VÖEN düzgün oxunmadı — şəxs növü VÖEN-in son rəqəmindən (1=hüquqi, 2=fiziki) təyin olunur' }); return;
+      res.status(400).json({ success: false, message: 'VÖEN düzgün deyil — son rəqəm 1 (hüquqi) və ya 2 (fiziki) olmalıdır' }); return;
     }
     if (!['TAX_DOC', 'POWER_OF_ATTORNEY'].includes(proofType)) { res.status(400).json({ success: false, message: 'Sənəd növü seçin' }); return; }
 
@@ -178,12 +178,11 @@ router.post('/me/businesses', adminAuth, docFields, processImages, async (req: A
       res.status(400).json({ success: false, message: 'Şəxsiyyət vəsiqəsi və selfie tələb olunur' }); return;
     }
 
-    // Bank sənədləri (bir neçə ola bilər) — IBAN-lar hər birindən AI ilə oxunur.
+    // Bank sənədləri (bir neçə ola bilər) — istifadəçi yükləyir, IBAN-ı ADMIN
+    // paneldən sənədə baxıb daxil edir (AI ilə oxuma YOXDUR).
     const bankFiles = filesOf(req, 'bankDocImage');
     if (bankFiles.length === 0) { res.status(400).json({ success: false, message: 'Ən azı bir bank hesabı sənədi tələb olunur' }); return; }
-    const primaryIdx = (() => { const n = parseInt(String(req.body.primaryBankIndex)); return Number.isInteger(n) && n >= 0 && n < bankFiles.length ? n : 0; })();
     const bankDocImages = bankFiles.map((f) => f.filename);
-    const perDoc = await Promise.all(bankFiles.map((f) => extractBankAccounts(f.path)));
 
     // ---- AI yoxlaması BURADA edilmir (avtomatik yox) ----
     // Sənədlərin AI yoxlaması admin panelin İSTƏYİ ilə (on-demand) aparılır:
@@ -212,19 +211,10 @@ router.post('/me/businesses', adminAuth, docFields, processImages, async (req: A
       data: { userId: req.adminId!, type: 'SYSTEM', title: 'Biznes yoxlamaya göndərildi', body: `"${name.trim()}" admin təsdiqini gözləyir. Təsdiqdən sonra kartla satış mümkün olacaq.`, link: '/business' },
     }).catch(() => {});
 
-    // Bank hesabları: hər sənədin IBAN-ları + əsas (primary) seçilən sənədin hesabı ödəniş üçün.
+    // Bank hesabları: yalnız əl ilə göndərilənlər (adətən boş — admin sonradan
+    // sənədə baxıb IBAN əlavə edir). AI ilə oxuma yoxdur.
     const bankRows: { businessId: number; iban: string; title: string | null; isPrimary: boolean; docImage: string | null }[] = [];
     const seenIban = new Set<string>();
-    let primaryAssigned = false;
-    perDoc.forEach((d, idx) => {
-      for (const acc of d.accounts) {
-        if (seenIban.has(acc.iban)) continue;
-        seenIban.add(acc.iban);
-        const isPrimary = idx === primaryIdx && !primaryAssigned;
-        if (isPrimary) primaryAssigned = true;
-        bankRows.push({ businessId: business.id, iban: acc.iban, title: acc.bankName, isPrimary, docImage: bankFiles[idx].filename });
-      }
-    });
     // Əl ilə əlavə olunanlar (ixtiyari).
     try {
       const arr = banks ? JSON.parse(banks) : [];
@@ -901,6 +891,21 @@ router.put('/admin/businesses/:id', requireAdmin, async (req: AuthRequest, res: 
     if (data.name === null || data.voen === null) { res.status(400).json({ success: false, message: 'Ad və VÖEN boş ola bilməz' }); return; }
     const biz = await prisma.business.update({ where: { id }, data });
     res.json({ success: true, business: biz });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+// ── ADMIN: biznesə bank hesabı (IBAN) əlavə et — sənədə baxıb ──
+router.post('/admin/businesses/:id/banks', requireAdmin, async (req: AuthRequest, res: Response) => {
+  try {
+    const businessId = parseInt(req.params.id);
+    const iban = String(req.body?.iban || '').replace(/\s+/g, '').toUpperCase();
+    const title = typeof req.body?.title === 'string' ? (req.body.title.trim() || null) : null;
+    if (!iban) { res.status(400).json({ success: false, message: 'IBAN tələb olunur' }); return; }
+    const count = await prisma.bankAccount.count({ where: { businessId } });
+    const bank = await prisma.bankAccount.create({ data: { businessId, iban, title, isPrimary: count === 0, isActive: true } });
+    res.json({ success: true, bank });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }
