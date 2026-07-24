@@ -228,7 +228,52 @@ router.delete('/admin/users/:id', requireAdmin, async (req: AuthRequest, res: Re
       res.status(403).json({ success: false, message: 'Öz hesabınızı silə bilməzsiniz' });
       return;
     }
-    await prisma.user.delete({ where: { id: targetId } });
+    // Açıq (explicit) cascade — DB-dəki FK onDelete "NO ACTION" qalmışsa belə
+    // (köhnə db push) silmə işləsin deyə bütün asılı qeydləri sıra ilə silirik.
+    const U = targetId;
+    await prisma.$transaction(async (tx) => {
+      // SetNull tərəflər: bu istifadəçi kuryer/referrer olan sifarişlərdə əlaqəni sıfırla
+      await tx.order.updateMany({ where: { courierId: U }, data: { courierId: null } });
+      await tx.order.updateMany({ where: { referrerId: U }, data: { referrerId: null } });
+      // 1) Başqa entity-lərə istinad edən uşaq cədvəllər (əvvəl silinir)
+      await tx.messageReaction.deleteMany({ where: { userId: U } });
+      await tx.returnRequest.deleteMany({ where: { OR: [{ buyerId: U }, { sellerId: U }] } });
+      await tx.inquiryOffer.deleteMany({ where: { sellerId: U } });
+      await tx.inquiryTarget.deleteMany({ where: { sellerId: U } });
+      await tx.sellerRating.deleteMany({ where: { OR: [{ sellerId: U }, { buyerId: U }] } });
+      await tx.comment.deleteMany({ where: { userId: U } });
+      await tx.conversationMember.deleteMany({ where: { userId: U } });
+      await tx.referralCart.deleteMany({ where: { referrerId: U } });
+      await tx.consultationOffer.deleteMany({ where: { userId: U } });
+      // 2) Orta səviyyə entity-lər
+      await tx.consultationSession.deleteMany({ where: { OR: [{ buyerId: U }, { professionalId: U }] } });
+      await tx.order.deleteMany({ where: { OR: [{ buyerId: U }, { sellerId: U }] } });
+      await tx.inquiry.deleteMany({ where: { buyerId: U } });
+      await tx.message.deleteMany({ where: { OR: [{ senderId: U }, { receiverId: U }] } });
+      await tx.cart.deleteMany({ where: { userId: U } });
+      await tx.sharedCart.deleteMany({ where: { userId: U } });
+      await tx.booking.deleteMany({ where: { OR: [{ guestId: U }, { hostId: U }] } });
+      await tx.complaint.deleteMany({ where: { OR: [{ complainantId: U }, { targetUserId: U }] } });
+      await tx.listing.deleteMany({ where: { userId: U } });   // OrderItem/Favorite/Comment cascade
+      await tx.business.deleteMany({ where: { userId: U } });   // BusinessObject/bank/member cascade
+      // 3) Sadə uşaq cədvəllər
+      await tx.vehicle.deleteMany({ where: { userId: U } });
+      await tx.workplace.deleteMany({ where: { userId: U } });
+      await tx.verificationCode.deleteMany({ where: { userId: U } });
+      await tx.phoneNumber.deleteMany({ where: { userId: U } });
+      await tx.emailVerification.deleteMany({ where: { userId: U } });
+      await tx.socialLink.deleteMany({ where: { userId: U } });
+      await tx.professionDocument.deleteMany({ where: { userId: U } });
+      await tx.favorite.deleteMany({ where: { userId: U } });
+      await tx.savedAddress.deleteMany({ where: { userId: U } });
+      await tx.sellerVerification.deleteMany({ where: { userId: U } });
+      await tx.notification.deleteMany({ where: { userId: U } });
+      await tx.businessMember.deleteMany({ where: { userId: U } });
+      await tx.contact.deleteMany({ where: { ownerId: U } });
+      await tx.session.deleteMany({ where: { userId: U } });
+      // 4) Nəhayət istifadəçinin özü
+      await tx.user.delete({ where: { id: U } });
+    }, { timeout: 20000 });
     res.json({ success: true });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
