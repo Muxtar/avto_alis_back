@@ -148,18 +148,12 @@ router.post('/me/businesses', adminAuth, docFields, processImages, async (req: A
     // Opsional veb-sayt / sosial linklər (boşdursa null)
     const link = (v: any) => { const s = String(v || '').trim(); return s ? s.slice(0, 300) : null; };
     const website = link(req.body.website), instagram = link(req.body.instagram), facebook = link(req.body.facebook), tiktok = link(req.body.tiktok), youtube = link(req.body.youtube), linkedin = link(req.body.linkedin);
-    if (!name?.trim() || !voen?.trim() || !ownerName?.trim()) {
-      res.status(400).json({ success: false, message: 'Şirkət adı, VÖEN və sahibi doldurulmalıdır' }); return;
-    }
-    // Şəxs növü əl ilə seçilmir — VÖEN-in son rəqəmindən avtomatik təyin olunur:
-    //   son rəqəm 1 → Hüquqi şəxs (LEGAL), 2 → Fiziki şəxs (PHYSICAL).
-    // (Server mənbədir; frontend-dən gələn dəyərə etibar edilmir.)
-    const voenDigits = voen.trim().replace(/\D/g, '');
-    const lastDigit = voenDigits.slice(-1);
-    const kind = lastDigit === '1' ? 'LEGAL' : lastDigit === '2' ? 'PHYSICAL' : null;
-    if (!kind) {
-      res.status(400).json({ success: false, message: 'VÖEN düzgün deyil — son rəqəm 1 (hüquqi) və ya 2 (fiziki) olmalıdır' }); return;
-    }
+    // Şirkət adı/VÖEN/sahibi burada TƏLƏB OLUNMUR — admin sənədlərdən doldurur.
+    // İstifadəçi yalnız sənədləri (+ əlaqə/sosial) göndərir → biznes PENDING olur.
+    // VÖEN varsa növü son rəqəmindən təyin olunur (1=hüquqi, 2=fiziki),
+    // yoxdursa default PHYSICAL — admin sonradan dəyişə bilər.
+    const voenDigits = (voen || '').replace(/\D/g, '');
+    const kind: 'LEGAL' | 'PHYSICAL' = voenDigits.slice(-1) === '1' ? 'LEGAL' : 'PHYSICAL';
     if (!['TAX_DOC', 'POWER_OF_ATTORNEY'].includes(proofType)) { res.status(400).json({ success: false, message: 'Sənəd növü seçin' }); return; }
 
     const taxDocImage = fileName(req, 'taxDocImage');
@@ -192,8 +186,8 @@ router.post('/me/businesses', adminAuth, docFields, processImages, async (req: A
       data: {
         userId: req.adminId!,
         kind, proofType,
-        name: name.trim(), voen: voen.trim(),
-        ownerName: ownerName.trim(), founderName: founder,
+        name: name?.trim() || '', voen: voen?.trim() || '',
+        ownerName: ownerName?.trim() || '', founderName: founder,
         phone: phone?.trim() || null,
         website, instagram, facebook, tiktok, youtube, linkedin,
         taxDocImage, companyDocImage, powerOfAttorneyImage,
@@ -208,7 +202,7 @@ router.post('/me/businesses', adminAuth, docFields, processImages, async (req: A
 
     // Admin panelə düşdü — istifadəçiyə "yoxlamaya göndərildi" bildirişi.
     await prisma.notification.create({
-      data: { userId: req.adminId!, type: 'SYSTEM', title: 'Biznes yoxlamaya göndərildi', body: `"${name.trim()}" admin təsdiqini gözləyir. Təsdiqdən sonra kartla satış mümkün olacaq.`, link: '/business' },
+      data: { userId: req.adminId!, type: 'SYSTEM', title: 'Biznes yoxlamaya göndərildi', body: `Biznes müraciətiniz admin təsdiqini gözləyir. Təsdiqdən sonra kartla satış mümkün olacaq.`, link: '/business' },
     }).catch(() => {});
 
     // Bank hesabları: yalnız əl ilə göndərilənlər (adətən boş — admin sonradan
@@ -885,9 +879,13 @@ router.put('/admin/businesses/:id', requireAdmin, async (req: AuthRequest, res: 
     for (const k of ['name', 'voen', 'ownerName', 'founderName', 'phone'] as const) {
       if (typeof b[k] === 'string') data[k] = b[k].trim() || null;
     }
-    if (b.kind === 'LEGAL' || b.kind === 'PHYSICAL') data.kind = b.kind;
     if (b.proofType === 'TAX_DOC' || b.proofType === 'POWER_OF_ATTORNEY') data.proofType = b.proofType;
-    // name/voen boş qala bilməz
+    // Şəxs növü: açıq göndərilibsə onu, yoxsa VÖEN-in son rəqəmindən təyin et (1=hüquqi, 2=fiziki).
+    if (b.kind === 'LEGAL' || b.kind === 'PHYSICAL') data.kind = b.kind;
+    else if (typeof data.voen === 'string' && data.voen) {
+      data.kind = data.voen.replace(/\D/g, '').slice(-1) === '1' ? 'LEGAL' : 'PHYSICAL';
+    }
+    // name/voen boş qala bilməz (admin təsdiq üçün doldurur)
     if (data.name === null || data.voen === null) { res.status(400).json({ success: false, message: 'Ad və VÖEN boş ola bilməz' }); return; }
     const biz = await prisma.business.update({ where: { id }, data });
     res.json({ success: true, business: biz });
