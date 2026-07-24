@@ -5,6 +5,7 @@
 import { PrismaClient } from '@prisma/client';
 import { sendWhatsAppOtp } from './infobipWhatsApp';
 import { sendSmsOtp, isSmsConfigured } from './infobipSms';
+import { sendVonageOtp, isVonageConfigured } from './vonageSms';
 import { resolveFlag } from './settings';
 
 const prisma = new PrismaClient();
@@ -13,12 +14,16 @@ function generateCode(): string {
   return Math.floor(100000 + Math.random() * 900000).toString();
 }
 
-// OTP kanalı: SMS və ya WhatsApp. INFOBIP_OTP_CHANNEL env ilə seçilir; təyin
-// olunmayıbsa SMS konfiqurasiya olunubsa SMS (daha sadə), yoxsa WhatsApp.
-export function otpChannel(): 'sms' | 'whatsapp' {
-  const c = (process.env.INFOBIP_OTP_CHANNEL || '').toLowerCase();
+// OTP kanalı: vonage (SMS), sms (Infobip) və ya whatsapp (Infobip).
+// OTP_CHANNEL env ilə seçilir (köhnə INFOBIP_OTP_CHANNEL da dəstəklənir).
+// Təyin olunmayıbsa: Vonage konfiqurasiyalıdırsa vonage, sonra Infobip SMS, yoxsa WhatsApp.
+export type OtpChannel = 'vonage' | 'sms' | 'whatsapp';
+export function otpChannel(): OtpChannel {
+  const c = (process.env.OTP_CHANNEL || process.env.INFOBIP_OTP_CHANNEL || '').toLowerCase();
+  if (c === 'vonage') return 'vonage';
   if (c === 'sms') return 'sms';
   if (c === 'whatsapp') return 'whatsapp';
+  if (isVonageConfigured()) return 'vonage';
   return isSmsConfigured() ? 'sms' : 'whatsapp';
 }
 
@@ -41,10 +46,13 @@ export async function createOtp(userId: number): Promise<OtpResult> {
   if (realMode) {
     const u = await prisma.user.findUnique({ where: { id: userId }, select: { phone: true } });
     if (u?.phone) {
-      // Seçilmiş kanala görə göndər — SMS (sadə) və ya WhatsApp.
-      delivered = otpChannel() === 'sms'
-        ? (await sendSmsOtp(u.phone, code)).delivered
-        : (await sendWhatsAppOtp(u.phone, code)).delivered;
+      // Seçilmiş kanala görə göndər — Vonage SMS / Infobip SMS / WhatsApp.
+      const ch = otpChannel();
+      delivered = ch === 'vonage'
+        ? (await sendVonageOtp(u.phone, code)).delivered
+        : ch === 'sms'
+          ? (await sendSmsOtp(u.phone, code)).delivered
+          : (await sendWhatsAppOtp(u.phone, code)).delivered;
     }
   }
 
