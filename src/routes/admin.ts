@@ -231,13 +231,9 @@ router.put('/admin/users/:id', requireAdmin, async (req: AuthRequest, res: Respo
   try {
     const { name, phone, type, verified, role } = req.body;
 
-    // Admin kendisini degistiremez ve baskasini admin yapamaz (sadece superadmin yapabilir)
     const targetId = parseInt(req.params.id);
-    if (role === 'ADMIN' && targetId !== req.adminId) {
-      res.status(403).json({ success: false, message: 'Başqa istifadəçiyə admin rolu vermək mümkün deyil' });
-      return;
-    }
-    // Admin kendisinin rolunu dusurememeli
+    // Admin başqa istifadəçiyə admin rolu VERƏ bilər (owner istəyi).
+    // Yalnız öz admin rolunu düşürməsinin qarşısı alınır (özünü kilidləməsin).
     if (targetId === req.adminId && role && role !== 'ADMIN') {
       res.status(403).json({ success: false, message: 'Öz admin rolunuzu dəyişə bilməzsiniz' });
       return;
