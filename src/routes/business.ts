@@ -280,6 +280,54 @@ router.put('/me/businesses/:id', adminAuth, async (req: AuthRequest, res: Respon
   }
 });
 
+// Biznes redaktəsi — sənəd (şirkət/vergi + bank) yeniləmə ilə birlikdə (multipart).
+// Ad/sahib/təsisçi VƏ YA hər hansı sənəd dəyişsə → biznes yenidən admin təsdiqinə (PENDING).
+router.post('/me/businesses/:id/edit', adminAuth, docFields, processImages, async (req: AuthRequest, res: Response) => {
+  try {
+    const id = parseInt(req.params.id);
+    const biz = await prisma.business.findUnique({ where: { id } });
+    if (!biz || biz.userId !== req.adminId) { res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return; }
+    const { name, ownerName, founderName, phone } = req.body;
+    const linkFields = ['website', 'instagram', 'facebook', 'tiktok', 'youtube', 'linkedin'] as const;
+    const linkData: any = {};
+    for (const f of linkFields) if (req.body[f] !== undefined) { const s = String(req.body[f] || '').trim(); linkData[f] = s ? s.slice(0, 300) : null; }
+    // Yeni sənədlər (verilibsə)
+    const newTax = fileName(req, 'taxDocImage');
+    const newCompany = fileName(req, 'companyDocImage');
+    const newPoa = fileName(req, 'powerOfAttorneyImage');
+    const bankFiles = filesOf(req, 'bankDocImage');
+    const newBankDocs = bankFiles.map((f) => f.filename);
+    const docsChanged = !!(newTax || newCompany || newPoa || newBankDocs.length);
+    const identityChanged =
+      (name !== undefined && String(name).trim() !== biz.name) ||
+      (ownerName !== undefined && String(ownerName).trim() !== biz.ownerName) ||
+      (founderName !== undefined && String(founderName).trim() !== biz.founderName);
+    const resetApproval = (identityChanged || docsChanged) && biz.status === 'APPROVED';
+    const updated = await prisma.business.update({
+      where: { id },
+      data: {
+        ...(name !== undefined && { name: String(name).trim() }),
+        ...(ownerName !== undefined && { ownerName: String(ownerName).trim() }),
+        ...(founderName !== undefined && { founderName: String(founderName).trim() }),
+        ...(phone !== undefined && { phone: phone?.trim() || null }),
+        ...linkData,
+        ...(newTax && { taxDocImage: newTax }),
+        ...(newCompany && { companyDocImage: newCompany }),
+        ...(newPoa && { powerOfAttorneyImage: newPoa }),
+        ...(newBankDocs.length && { bankDocImage: newBankDocs[0], bankDocImages: newBankDocs }),
+        ...(resetApproval && { status: 'PENDING' as any }),
+      },
+    });
+    if (resetApproval) {
+      const stillApproved = await prisma.business.count({ where: { userId: biz.userId, status: 'APPROVED' } });
+      if (stillApproved === 0) await prisma.user.update({ where: { id: biz.userId }, data: { sellerVerified: false } }).catch(() => {});
+    }
+    res.json({ success: true, business: updated, reApproval: resetApproval });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
 // Biznesi aktiv/deaktiv et
 router.patch('/me/businesses/:id/active', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
