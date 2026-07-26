@@ -30,6 +30,29 @@ export function isUserOnline(userId: number): boolean {
   return !!room && room.size > 0;
 }
 
+// Bu istifadəçi ilə 1:1 yazışan tərəflərin id-ləri — presence dəyişimini
+// yalnız onlara yayımlayırıq (hamıya yox — həm privacy, həm yük).
+async function chatPartnerIds(userId: number): Promise<number[]> {
+  const msgs = await prisma.message.findMany({
+    where: { OR: [{ senderId: userId }, { receiverId: userId }], receiverId: { not: null } },
+    select: { senderId: true, receiverId: true },
+    take: 3000,
+  });
+  const set = new Set<number>();
+  for (const m of msgs) {
+    if (m.senderId !== userId) set.add(m.senderId);
+    if (m.receiverId && m.receiverId !== userId) set.add(m.receiverId);
+  }
+  return Array.from(set);
+}
+
+// Bir istifadəçinin online/offline vəziyyətini yazışdığı tərəflərə göndər.
+async function broadcastPresence(userId: number, online: boolean, lastSeen?: Date) {
+  const payload = { userId, online, lastSeen: lastSeen ? lastSeen.toISOString() : null };
+  const partners = await chatPartnerIds(userId);
+  for (const pid of partners) ioRef?.to(`u:${pid}`).emit('presence:update', payload);
+}
+
 function iceServers() {
   const servers: any[] = [
     { urls: 'stun:stun.l.google.com:19302' },
@@ -67,10 +90,29 @@ export function initCallSignaling(httpServer: HttpServer, allowedOrigins: string
 
   io.on('connection', (socket: Socket) => {
     const userId = (socket as any).userId as number;
+    // Join-dan ƏVVƏL: bu istifadəçi əvvəl onlayn idimi? Deyilsə, bu qoşulma
+    // onu onlayn edir → tərəflərə "online" yayımla.
+    const wasOnline = isUserOnline(userId);
     // Hər istifadəçi öz otağına qoşulur — çoxlu cihaz/tab dəstəklənir.
     socket.join(`u:${userId}`);
+    if (!wasOnline) broadcastPresence(userId, true).catch(() => {});
     // ICE konfiqurasiyasını dərhal göndər.
     socket.emit('config', { iceServers: iceServers() });
+
+    // İstənilən istifadəçilərin online/son-görülmə vəziyyətini soruş (siyahı açılanda).
+    socket.on('presence:get', async (p: { ids?: number[] }) => {
+      const ids = Array.isArray(p?.ids) ? p.ids.filter((n) => Number.isInteger(n)).slice(0, 300) : [];
+      if (!ids.length) return;
+      try {
+        const users = await prisma.user.findMany({ where: { id: { in: ids } }, select: { id: true, lastSeen: true } });
+        const seen = new Map(users.map((u) => [u.id, u.lastSeen]));
+        socket.emit('presence:list', ids.map((id) => ({
+          userId: id,
+          online: isUserOnline(id),
+          lastSeen: seen.get(id) ? (seen.get(id) as Date).toISOString() : null,
+        })));
+      } catch { /* sükutla ötür */ }
+    });
 
     // Zəng dəvəti — qarşı tərəf onlayndırsa "call:incoming" alır.
     socket.on('call:invite', async (p: { to: number; kind: 'audio' | 'video' }) => {
@@ -184,8 +226,14 @@ export function initCallSignaling(httpServer: HttpServer, allowedOrigins: string
     socket.on('groupcall:leave', (p: { conversationId: number }) => { const cid = parseInt(String(p?.conversationId)); if (cid) leaveGroupCall(cid); });
 
     // Bağlantı kəsilsə bütün qrup zənglərindən çıxar.
-    socket.on('disconnect', () => {
+    socket.on('disconnect', async () => {
       for (const cid of Array.from(groupCalls.keys())) leaveGroupCall(cid);
+      // socket.io disconnect anında bu socket otaqdan çıxarılıb — başqa cihaz/tab
+      // qalmayıbsa istifadəçi offline olur.
+      if (isUserOnline(userId)) return;
+      const lastSeen = new Date();
+      try { await prisma.user.update({ where: { id: userId }, data: { lastSeen } }); } catch { /* sükutla ötür */ }
+      broadcastPresence(userId, false, lastSeen).catch(() => {});
     });
   });
 

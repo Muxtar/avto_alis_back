@@ -137,6 +137,7 @@ model User {
   verified              Boolean               @default(false)
   isBlocked             Boolean               @default(false) // admin tərəfindən bloklanıb
   profileComplete       Boolean               @default(false)
+  lastSeen              DateTime? // sonuncu onlayn olduğu vaxt (offline olanda "son görülmə")
   profession            String? // ixtisas (qeydiyyatda soruşulur)
   bio                   String? // istifadəçinin özü haqqında qeydi
   avatar                String? // profil şəkli
