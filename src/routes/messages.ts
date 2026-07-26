@@ -138,6 +138,39 @@ router.post('/messages', messageLimiter, adminAuth, async (req: AuthRequest, res
   }
 });
 
+// Zəng qeydi — səsli/görüntülü zəng bitəndə zəng EDƏN tərəf yazır (bir dəfə).
+// Chat-də mesaj kimi görünür; hər iki tərəf görür. status: ANSWERED | MISSED.
+router.post('/messages/call', messageLimiter, adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const to = parseInt(String(req.body.to));
+    const kind = req.body.kind === 'video' ? 'video' : 'audio';
+    const status = req.body.status === 'ANSWERED' ? 'ANSWERED' : 'MISSED';
+    const duration = Math.max(0, Math.min(24 * 3600, parseInt(String(req.body.duration)) || 0));
+    if (!to || to === req.adminId) { res.status(400).json({ success: false, message: 'Yanlış alıcı' }); return; }
+
+    const online = isUserOnline(to);
+    const message = await prisma.message.create({
+      data: {
+        senderId: req.adminId!,
+        receiverId: to,
+        type: 'CALL',
+        callKind: kind,
+        callStatus: status,
+        mediaDuration: status === 'ANSWERED' ? duration : null,
+        content: '',
+        deliveredAt: online ? new Date() : null,
+      },
+      include: msgInclude,
+    });
+
+    emitToUser(to, 'chat:message', message);
+    emitToUser(req.adminId!, 'chat:message', message);
+    res.status(201).json({ success: true, message });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
 // Redaktə et — yalnız göndərən, silinməmiş mesaj.
 router.patch('/messages/:id', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
