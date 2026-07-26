@@ -938,17 +938,20 @@ router.put('/admin/businesses/:id', requireAdmin, async (req: AuthRequest, res: 
     const id = parseInt(req.params.id);
     const b = req.body || {};
     const data: any = {};
-    for (const k of ['name', 'voen', 'ownerName', 'founderName', 'phone'] as const) {
-      if (typeof b[k] === 'string') data[k] = b[k].trim() || null;
-    }
+    const s = (v: any): string | undefined => (typeof v === 'string' ? v.trim() : undefined);
+    const name = s(b.name), voen = s(b.voen), ownerName = s(b.ownerName), founderName = s(b.founderName), phone = s(b.phone);
+    // name/voen/ownerName/founderName MƏCBURİDİR (schema non-null) — yalnız boş
+    // olmayanda yenilə. founderName boşdursa sahibə bərabər götürülür.
+    if (name) data.name = name;
+    if (voen) data.voen = voen;
+    if (ownerName) data.ownerName = ownerName;
+    const founder = founderName || ownerName; // boşdursa sahib
+    if (founder) data.founderName = founder;
+    if (phone !== undefined) data.phone = phone || null; // phone nullable-dır
     if (b.proofType === 'TAX_DOC' || b.proofType === 'POWER_OF_ATTORNEY') data.proofType = b.proofType;
     // Şəxs növü: açıq göndərilibsə onu, yoxsa VÖEN-in son rəqəmindən təyin et (1=hüquqi, 2=fiziki).
     if (b.kind === 'LEGAL' || b.kind === 'PHYSICAL') data.kind = b.kind;
-    else if (typeof data.voen === 'string' && data.voen) {
-      data.kind = data.voen.replace(/\D/g, '').slice(-1) === '1' ? 'LEGAL' : 'PHYSICAL';
-    }
-    // name/voen boş qala bilməz (admin təsdiq üçün doldurur)
-    if (data.name === null || data.voen === null) { res.status(400).json({ success: false, message: 'Ad və VÖEN boş ola bilməz' }); return; }
+    else if (voen) data.kind = voen.replace(/\D/g, '').slice(-1) === '1' ? 'LEGAL' : 'PHYSICAL';
     const biz = await prisma.business.update({ where: { id }, data });
     res.json({ success: true, business: biz });
   } catch (error: any) {
