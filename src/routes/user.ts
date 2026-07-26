@@ -264,7 +264,7 @@ function normPhone(s: any): string { return String(s || '').replace(/[^\d+]/g, '
 
 // Obyektdə satış icazəsi: biznes sahibi VƏ YA satış (canSell) səlahiyyətli ACTIVE işçi.
 // Uğurda { bizId, bizObjId }, xətada { error, code } qaytarır.
-async function resolveObjectForSelling(businessObjectId: any, userId: number): Promise<{ bizId?: number; bizObjId?: number; error?: string; code?: number }> {
+async function resolveObjectForSelling(businessObjectId: any, userId: number): Promise<{ bizId?: number; bizObjId?: number; objCity?: string | null; objAddress?: string | null; objLat?: number | null; objLng?: number | null; error?: string; code?: number }> {
   const obj = await prisma.businessObject.findUnique({
     where: { id: parseInt(String(businessObjectId)) },
     include: { business: true },
@@ -280,7 +280,7 @@ async function resolveObjectForSelling(businessObjectId: any, userId: number): P
   }
   if (!allowed) return { error: 'Bu obyektdə satış səlahiyyətiniz yoxdur', code: 403 };
   if (obj.business.status !== 'APPROVED') return { error: 'Biznes hələ təsdiqlənməyib', code: 400 };
-  return { bizId: obj.businessId, bizObjId: obj.id };
+  return { bizId: obj.businessId, bizObjId: obj.id, objCity: obj.city, objAddress: obj.address, objLat: obj.latitude, objLng: obj.longitude };
 }
 
 router.get('/me/phones', adminAuth, async (req: AuthRequest, res: Response) => {
@@ -455,11 +455,14 @@ router.post('/me/listings', listingWriteLimiter, adminAuth, upload.array('images
     // Biznes obyekti seçilibsə — TƏSDİQLƏNMİŞ biznesə aid olmalıdır (kart üçün).
     let bizId: number | null = null;
     let bizObjId: number | null = null;
+    // VÖEN elanda konum obyektdən gəlir — istifadəçi şəhər/ünvan girmir.
+    let objLoc: { city: string | null; address: string | null; lat: number | null; lng: number | null } | null = null;
     if (businessObjectId) {
       const r = await resolveObjectForSelling(businessObjectId, req.adminId!);
       if (r.error) { res.status(r.code || 403).json({ success: false, message: r.error }); return; }
       bizId = r.bizId!;
       bizObjId = r.bizObjId!;
+      objLoc = { city: r.objCity ?? null, address: r.objAddress ?? null, lat: r.objLat ?? null, lng: r.objLng ?? null };
     }
 
     // VÖEN-li elan MÜTLƏQ təsdiqlənmiş biznes obyektinə bağlı olmalıdır (kartla satış).
@@ -470,13 +473,27 @@ router.post('/me/listings', listingWriteLimiter, adminAuth, upload.array('images
     const files = req.files as Express.Multer.File[];
     const images = files?.map((f) => f.filename) || [];
 
-    // Inherit user's default city/address when caller didn't pass one.
-    const me = await prisma.user.findUnique({
-      where: { id: req.adminId! },
-      select: { city: true, address: true },
-    });
-    const effectiveCity = city || me?.city || null;
-    const effectiveLocation = location || me?.address || null;
+    // Konum: VÖEN elanda obyektdən gəlir (şəhər/ünvan/xəritə); fərdi elanda
+    // istifadəçinin girdiyi və ya profil default konumu.
+    let effectiveCity: string | null;
+    let effectiveLocation: string | null;
+    let effectiveLat: number | null;
+    let effectiveLng: number | null;
+    if (objLoc) {
+      effectiveCity = objLoc.city;
+      effectiveLocation = objLoc.address;
+      effectiveLat = objLoc.lat;
+      effectiveLng = objLoc.lng;
+    } else {
+      const me = await prisma.user.findUnique({
+        where: { id: req.adminId! },
+        select: { city: true, address: true },
+      });
+      effectiveCity = city || me?.city || null;
+      effectiveLocation = location || me?.address || null;
+      effectiveLat = req.body.latitude !== undefined && req.body.latitude !== '' && req.body.latitude != null ? parseFloat(String(req.body.latitude)) : null;
+      effectiveLng = req.body.longitude !== undefined && req.body.longitude !== '' && req.body.longitude != null ? parseFloat(String(req.body.longitude)) : null;
+    }
 
     const expiresAt = new Date(Date.now() + 20 * 24 * 60 * 60 * 1000);
     const listing = await prisma.listing.create({
@@ -493,8 +510,8 @@ router.post('/me/listings', listingWriteLimiter, adminAuth, upload.array('images
         year: year ? parseInt(year) : null,
         model: model || null,
         city: effectiveCity,
-        latitude: req.body.latitude !== undefined && req.body.latitude !== '' && req.body.latitude != null ? parseFloat(String(req.body.latitude)) : null,
-        longitude: req.body.longitude !== undefined && req.body.longitude !== '' && req.body.longitude != null ? parseFloat(String(req.body.longitude)) : null,
+        latitude: effectiveLat,
+        longitude: effectiveLng,
         fuelType: fuelType || null,
         paymentType: paymentType || null,
         barter: barter === true || barter === 'true',
