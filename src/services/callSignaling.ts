@@ -36,11 +36,16 @@ function iceServers() {
     { urls: 'stun:stun1.l.google.com:19302' },
   ];
   if (process.env.TURN_URL) {
-    servers.push({
-      urls: process.env.TURN_URL,
-      username: process.env.TURN_USERNAME || '',
-      credential: process.env.TURN_CREDENTIAL || '',
-    });
+    // Vergüllə ayrılmış çoxlu TURN URL dəstəklənir — məs. Metered bir neçə
+    // port/transport verir (80, 443, turns). Biri bağlıdırsa digəri işləyir.
+    const urls = process.env.TURN_URL.split(',').map((u) => u.trim()).filter(Boolean);
+    if (urls.length) {
+      servers.push({
+        urls: urls.length > 1 ? urls : urls[0],
+        username: process.env.TURN_USERNAME || '',
+        credential: process.env.TURN_CREDENTIAL || '',
+      });
+    }
   }
   return servers;
 }
