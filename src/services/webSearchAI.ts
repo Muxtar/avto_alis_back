@@ -34,6 +34,21 @@ const EMPTY: WebSearchResponse = { ok: false, summary: '', results: [] };
 
 const AI_MODEL = process.env.WEB_SEARCH_MODEL || 'claude-opus-4-8';
 
+// ── Yaddaş keşi ──────────────────────────────────────────────────────────────
+// Eyni sorğunun nəticəsini saxlayır ki, təkrar axtarışlar Tavily kreditini /
+// AI tokenini yandırmasın. Prosess yaddaşındadır (DB lazım deyil); serveri
+// yenidən başladanda təmizlənir — bu, məqbuldur.
+interface CacheEntry { at: number; ttl: number; data: WebSearchResponse; }
+const cache = new Map<string, CacheEntry>();
+const CACHE_MAX = 500;                       // maks. sorğu sayı (yaddaş limiti)
+const TTL_HIT = 12 * 60 * 60 * 1000;         // nəticə tapıldı → 12 saat
+const TTL_EMPTY = 60 * 60 * 1000;            // boş nəticə → 1 saat (sonra sayt yeni elan əlavə edə bilər)
+const TTL_ERROR = 2 * 60 * 1000;             // xəta → 2 dəqiqə (keçici ola bilər, uzun saxlama)
+
+function cacheKey(q: string): string {
+  return q.toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
 let client: Anthropic | null = null;
 function getClient(): Anthropic | null {
   if (!process.env.ANTHROPIC_API_KEY) return null;
@@ -180,6 +195,29 @@ Azərbaycanla əlaqəsini yoxla. Əlaqəni izah edə bilmirsənsə, nəticəni a
 export async function webSearch(query: string): Promise<WebSearchResponse> {
   const q = query.trim().slice(0, 200);
   if (!q) return { ...EMPTY, error: 'Axtarış mətni boşdur.' };
+
+  const key = cacheKey(q);
+  const hit = cache.get(key);
+  if (hit && Date.now() - hit.at < hit.ttl) {
+    console.log('[webSearch] keş HIT — sorğu:', q);
+    return hit.data;
+  }
+
+  const data = await webSearchUncached(q);
+
+  // TTL: nəticə var → uzun, boş → orta, xəta → qısa.
+  const ttl = data.ok ? (data.results.length > 0 ? TTL_HIT : TTL_EMPTY) : TTL_ERROR;
+  cache.delete(key);                          // varsa sona köçsün (LRU təmizləmə üçün)
+  cache.set(key, { at: Date.now(), ttl, data });
+  if (cache.size > CACHE_MAX) {               // ölçü limiti — ən köhnəni sil
+    const oldest = cache.keys().next().value;
+    if (oldest !== undefined) cache.delete(oldest);
+  }
+  return data;
+}
+
+// Keşsiz əsl axtarış — TAVILY_API_KEY varsa Tavily, yoxsa köhnə Claude yolu.
+async function webSearchUncached(q: string): Promise<WebSearchResponse> {
   if (process.env.TAVILY_API_KEY) return webSearchTavily(q);
   if (process.env.ANTHROPIC_API_KEY) return webSearchClaude(q);
   return { ...EMPTY, error: 'İnternet axtarışı konfiqurasiya edilməyib.' };
