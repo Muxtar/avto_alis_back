@@ -1,8 +1,17 @@
-// Saytdaxili axtarış nəticə vermədikdə internetdən axtarış — Claude (Anthropic)
-// web_search server aləti ilə. İstifadəçi başlıqdakı axtarışda məhsul və ya
-// otel adı yazır; saytda tapılmazsa nəticələr internetdən gətirilir.
+// Saytdaxili axtarış nəticə vermədikdə internetdən axtarış.
+// İstifadəçi başlıqdakı axtarışda məhsul/otel adı yazır; saytda tapılmazsa
+// nəticələr internetdən gətirilir.
 //
-// ANTHROPIC_API_KEY mühit dəyişəni tələb olunur (Railway → Variables).
+// İki yol var (dispatcher `webSearch` seçir):
+//   1) TAVILY_API_KEY varsa → Tavily axtarış motoru (ucuz, sürətli) +
+//      istəyə görə Haiku 4.5 ilə qiymət/xülasə təmizlənməsi. ƏSAS yol.
+//   2) Yalnız ANTHROPIC_API_KEY varsa → köhnə Claude web_search yolu (ehtiyat,
+//      keçid dövrü üçün — Tavily açarı əlavə edilənə qədər sayt işləsin).
+//
+// Railway → Variables:
+//   TAVILY_API_KEY      — tavily.com pulsuz açarı (əsas axtarış)
+//   ANTHROPIC_API_KEY   — Haiku təmizləmə + Claude ehtiyat yolu (istəyə görə)
+//   WEB_SEARCH_REFINE_MODEL — default 'claude-haiku-4-5'
 
 import Anthropic from '@anthropic-ai/sdk';
 
@@ -161,18 +170,203 @@ Qeyd: "az_reason"-u özün üçün yaz — hər nəticəni siyahıya salmadan ə
 Azərbaycanla əlaqəsini yoxla. Əlaqəni izah edə bilmirsənsə, nəticəni at.`;
 }
 
+// ── Dispatcher ───────────────────────────────────────────────────────────────
 /**
  * Sorğunu internetdə axtarır və struktur nəticələr qaytarır.
+ * TAVILY_API_KEY varsa Tavily (+ Haiku) istifadə olunur; yoxdursa köhnə
+ * Claude web_search yoluna düşülür. İstifadəçiyə qaytarılan forma eynidir.
  * @param query istifadəçinin axtarış mətni
  */
 export async function webSearch(query: string): Promise<WebSearchResponse> {
+  const q = query.trim().slice(0, 200);
+  if (!q) return { ...EMPTY, error: 'Axtarış mətni boşdur.' };
+  if (process.env.TAVILY_API_KEY) return webSearchTavily(q);
+  if (process.env.ANTHROPIC_API_KEY) return webSearchClaude(q);
+  return { ...EMPTY, error: 'İnternet axtarışı konfiqurasiya edilməyib.' };
+}
+
+// ── Tavily yolu (əsas) ───────────────────────────────────────────────────────
+const TAVILY_URL = 'https://api.tavily.com/search';
+const REFINE_MODEL = process.env.WEB_SEARCH_REFINE_MODEL || 'claude-haiku-4-5';
+
+// Snippet/başlıqdan AZN qiymətini çıxaran ehtiyat regex (Haiku olmayanda və ya
+// tapmadıqda). Yalnız açıq AZN/manat işarəsi olan qiyməti qəbul edir.
+function extractPriceAzn(text: string): number | null {
+  if (!text) return null;
+  const m = text.match(/(\d[\d\s.,]{0,12}\d|\d)\s*(?:azn|₼|manat|man\b)/i)
+        || text.match(/(?:qiym[əe]t|price)\D{0,4}(\d[\d\s.,]{0,12}\d|\d)/i);
+  if (!m) return null;
+  const n = parseFloat(
+    m[1].replace(/[^\d.,]/g, '').replace(/[.\s](?=\d{3}\b)/g, '').replace(',', '.'),
+  );
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+async function webSearchTavily(q: string): Promise<WebSearchResponse> {
+  console.log('[webSearch] Tavily başladı — sorğu:', q);
+
+  let data: any;
+  try {
+    const resp = await fetch(TAVILY_URL, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${process.env.TAVILY_API_KEY}`,
+      },
+      body: JSON.stringify({
+        query: `${q} Azərbaycan`,
+        search_depth: 'basic',      // 'basic' = 1 kredit; 'advanced' = 2 kredit
+        topic: 'general',
+        country: 'azerbaijan',      // nəticələri AZ-ə meyilləndirir
+        max_results: 12,
+        include_answer: true,       // hazır 1-2 cümlə xülasə
+        exclude_domains: BLOCKED_DOMAINS,
+      }),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!resp.ok) {
+      const body = await resp.text().catch(() => '');
+      console.error('[webSearch] Tavily HTTP', resp.status, body.slice(0, 300));
+      const msg = resp.status === 401 || resp.status === 403 ? 'Axtarış açarı etibarsızdır.'
+        : resp.status === 429 ? 'Axtarış limiti doldu, bir azdan yenidən cəhd edin.'
+        : 'İnternet axtarışı alınmadı. Yenidən cəhd edin.';
+      return { ...EMPTY, error: msg };
+    }
+    data = await resp.json();
+  } catch (e: any) {
+    console.error('[webSearch] Tavily xəta:', e?.name, e?.message);
+    return { ...EMPTY, error: 'İnternet axtarışı alınmadı. Yenidən cəhd edin.' };
+  }
+
+  const rawResults: any[] = Array.isArray(data?.results) ? data.results : [];
+
+  // AZ filtri — .az, tanınmış AZ brendləri, və ya beynəlxalq saytın AZ səhifəsi.
+  const azResults = rawResults.filter(
+    (r) => r && typeof r.url === 'string' && /^https?:\/\//i.test(r.url) && isAzResult(r.url),
+  );
+
+  if (rawResults.length > 0 && azResults.length === 0) {
+    console.warn('[webSearch] Tavily: nəticələr AZ filtrindən keçmədi — sorğu:', q);
+    return {
+      ok: true,
+      summary: 'Nəticələr tapıldı, amma Azərbaycana aid olmadığı üçün göstərilmədi.',
+      results: [],
+    };
+  }
+  if (azResults.length === 0) return { ok: true, summary: '', results: [] };
+
+  // İlkin xəritələmə (regex qiymət ilə). Haiku sonra dəqiqləşdirə bilər.
+  let items: WebResult[] = azResults.slice(0, 8).map((r) => {
+    let site = '';
+    try { site = new URL(r.url).hostname.replace(/^www\./, ''); } catch {}
+    const content = String(r.content || '');
+    return {
+      title: String(r.title || r.url).slice(0, 160),
+      url: String(r.url),
+      snippet: content.slice(0, 300),
+      price: extractPriceAzn(`${content} ${r.title || ''}`),
+      site: site.slice(0, 60),
+    };
+  });
+
+  let summary = typeof data?.answer === 'string' ? data.answer.slice(0, 400) : '';
+
+  // Haiku təmizləmə (ANTHROPIC_API_KEY varsa) — qiymət + snippet + xülasə.
+  const refined = await refineWithHaiku(q, items, summary);
+  if (refined) {
+    items = refined.items;
+    if (refined.summary) summary = refined.summary;
+  }
+
+  // Ucuzdan bahaya; qiyməti bilinməyənlər sona.
+  items.sort((a, b) => {
+    if (a.price == null && b.price == null) return 0;
+    if (a.price == null) return 1;
+    if (b.price == null) return -1;
+    return a.price - b.price;
+  });
+  items = items.slice(0, 6);
+
+  console.log('[webSearch] Tavily sorğu:', q, '| xam:', rawResults.length,
+    '| AZ:', azResults.length, '| göstərilən:', items.length);
+  return { ok: true, summary, results: items };
+}
+
+// Tavily snippet-lərini ucuz Haiku ilə təmizləyir: AZN qiyməti, qısa izah və
+// ümumi xülasə. Yalnız verilən nəticələrlə işləyir — yeni URL uydurmur.
+async function refineWithHaiku(
+  q: string,
+  items: WebResult[],
+  tavilyAnswer: string,
+): Promise<{ summary: string; items: WebResult[] } | null> {
+  const ai = getClient();
+  if (!ai || items.length === 0) return null;
+
+  const list = items
+    .map((r, i) => `[${i}] ${r.title}\nURL: ${r.url}\nMətn: ${r.snippet}`)
+    .join('\n\n');
+
+  const sys = 'Sən tradixai (Azərbaycan elan platforması) üçün internet axtarış '
+    + 'nəticələrini təmizləyirsən. YALNIZ verilən nəticələrlə işlə — yeni nəticə '
+    + 'və ya yeni URL uydurma. Cavab dili: Azərbaycan dili.';
+
+  const user = `İstifadəçi "${q}" axtardı. Aşağıdakı nəticələr üçün:
+1) Azərbaycan dilində 1-2 cümləlik ümumi xülasə ("summary").
+2) Hər nəticə üçün: səhifə mətnində AÇIQ AZN qiyməti varsa onu RƏQƏM kimi ("price"),
+   görünmürsə və ya USD/EUR/RUB-dursa null; 1 cümləlik qısa izah ("snippet").
+
+Nəticələr:
+${list}
+
+YALNIZ bu JSON-u qaytar, başqa heç nə yazma:
+{"summary":"...","items":[{"i":0,"price":1250,"snippet":"..."}]}`;
+
+  try {
+    const res: any = await ai.messages.create({
+      model: REFINE_MODEL,
+      max_tokens: 1200,
+      system: sys,
+      messages: [{ role: 'user', content: user }],
+    });
+    const text = res.content
+      .filter((b: any) => b.type === 'text')
+      .map((b: any) => b.text)
+      .join('\n')
+      .trim();
+    const parsed = parseJson(text);
+    if (!parsed || !Array.isArray(parsed.items)) return null;
+
+    const byIndex = new Map<number, any>();
+    for (const it of parsed.items) if (it && Number.isInteger(it.i)) byIndex.set(it.i, it);
+
+    const out = items.map((r, i) => {
+      const it = byIndex.get(i);
+      if (!it) return r;
+      // Haiku müsbət rəqəm verirsə qəbul et; yoxsa regex nəticəsini saxla.
+      let price = r.price;
+      if (typeof it.price === 'number' && Number.isFinite(it.price) && it.price > 0) price = it.price;
+      const snippet = typeof it.snippet === 'string' && it.snippet.trim()
+        ? it.snippet.slice(0, 300) : r.snippet;
+      return { ...r, price, snippet };
+    });
+
+    return {
+      summary: typeof parsed.summary === 'string' && parsed.summary.trim()
+        ? parsed.summary.slice(0, 400) : tavilyAnswer,
+      items: out,
+    };
+  } catch (e: any) {
+    console.error('[webSearch] Haiku təmizləmə xətası:', e?.status, e?.message);
+    return null;   // təmizləmə alınmasa xam Tavily nəticələri istifadə olunur
+  }
+}
+
+// ── Claude yolu (ehtiyat — Tavily açarı yoxdursa) ─────────────────────────────
+async function webSearchClaude(q: string): Promise<WebSearchResponse> {
   const ai = getClient();
   if (!ai) return { ...EMPTY, error: 'İnternet axtarışı konfiqurasiya edilməyib.' };
 
-  const q = query.trim().slice(0, 200);
-  if (!q) return { ...EMPTY, error: 'Axtarış mətni boşdur.' };
-
-  console.log('[webSearch] başladı — sorğu:', q, '| model:', AI_MODEL);
+  console.log('[webSearch] Claude (ehtiyat) başladı — sorğu:', q, '| model:', AI_MODEL);
 
   // Alət konfiqurasiyaları — sıra ilə sınanır. Yeni versiya (dinamik filtr +
   // user_location + blocked_domains) hesabda dəstəklənmirsə, sadə versiyaya
@@ -317,5 +511,5 @@ export async function webSearch(query: string): Promise<WebSearchResponse> {
 }
 
 export function webSearchEnabled(): boolean {
-  return !!process.env.ANTHROPIC_API_KEY;
+  return !!(process.env.TAVILY_API_KEY || process.env.ANTHROPIC_API_KEY);
 }
