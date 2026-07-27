@@ -4,7 +4,7 @@
 // telefonuna gedir); deaktivdirsə (fake/test) kod cavabda qaytarılır ki, input
 // üstündə göstərilsin.
 import { PrismaClient } from '@prisma/client';
-import { sendWhatsAppOtp } from './infobipWhatsApp';
+import { sendWhatsAppOtp, isInfobipConfigured } from './infobipWhatsApp';
 import { sendSmsOtp, isSmsConfigured } from './infobipSms';
 import { resolveFlag } from './settings';
 
@@ -14,21 +14,26 @@ function generateCode(): string {
   return Math.floor(100000 + Math.random() * 900000).toString();
 }
 
-// OTP kanalı: sms (Infobip SMS) və ya whatsapp (Infobip WhatsApp).
+// OTP kanalı: sms, whatsapp, və ya both (əvvəl WhatsApp, çatmasa SMS).
 // OTP_CHANNEL env ilə seçilir (köhnə INFOBIP_OTP_CHANNEL da dəstəklənir).
-// Təyin olunmayıbsa: Infobip SMS konfiqurasiyalıdırsa sms, yoxsa whatsapp.
-export type OtpChannel = 'sms' | 'whatsapp';
+// Təyin olunmayıbsa: hər ikisi konfiqurasiyalıdırsa "both", yoxsa mövcud olan.
+export type OtpChannel = 'sms' | 'whatsapp' | 'both';
 export function otpChannel(): OtpChannel {
   const c = (process.env.OTP_CHANNEL || process.env.INFOBIP_OTP_CHANNEL || '').toLowerCase();
   if (c === 'sms') return 'sms';
   if (c === 'whatsapp') return 'whatsapp';
-  return isSmsConfigured() ? 'sms' : 'whatsapp';
+  if (c === 'both') return 'both';
+  const wa = isInfobipConfigured(), sms = isSmsConfigured();
+  if (wa && sms) return 'both';   // ikisi də hazırdırsa: WhatsApp → SMS fallback
+  if (wa) return 'whatsapp';
+  return 'sms';
 }
 
 export interface OtpResult {
   code: string;
   delivered: boolean; // Infobip ilə real göndərildi?
   showCode: boolean; // cavabda kod göstərilməlidir? (fake/debug/çatdırılmayıb)
+  channel?: string;  // real çatan kanal: 'whatsapp' | 'sms'
 }
 
 export async function createOtp(userId: number): Promise<OtpResult> {
@@ -40,20 +45,26 @@ export async function createOtp(userId: number): Promise<OtpResult> {
   const realMode = await resolveFlag('otp_real');
 
   let delivered = false;
+  let usedChannel: string | undefined;
   if (realMode) {
     const u = await prisma.user.findUnique({ where: { id: userId }, select: { phone: true } });
     if (u?.phone) {
-      // Seçilmiş kanala görə göndər — Infobip SMS və ya WhatsApp.
       const ch = otpChannel();
-      delivered = ch === 'sms'
-        ? (await sendSmsOtp(u.phone, code)).delivered
-        : (await sendWhatsAppOtp(u.phone, code)).delivered;
+      // ƏVVƏL WhatsApp (whatsapp və ya both) — çatarsa kifayətdir.
+      if (ch === 'whatsapp' || ch === 'both') {
+        const wa = await sendWhatsAppOtp(u.phone, code);
+        if (wa.delivered) { delivered = true; usedChannel = 'whatsapp'; }
+      }
+      // WhatsApp çatmadısa SMS (sms və ya both) — fallback.
+      if (!delivered && (ch === 'sms' || ch === 'both')) {
+        const sms = await sendSmsOtp(u.phone, code);
+        if (sms.delivered) { delivered = true; usedChannel = 'sms'; }
+      }
     }
   }
 
   // Kodu cavabda göstər (input üstündə "fake") — YALNIZ test (fake) rejimində.
-  // Real rejimdə kod ƏSLA cavabda getmir: yalnız istifadəçinin telefonuna SMS ilə
-  // gedir. Beləliklə kod doğrulama səhifəsində görünmür (təhlükəsizlik).
+  // Real rejimdə kod ƏSLA cavabda getmir: yalnız istifadəçinin telefonuna gedir.
   const showCode = !realMode;
-  return { code, delivered, showCode };
+  return { code, delivered, showCode, channel: usedChannel };
 }

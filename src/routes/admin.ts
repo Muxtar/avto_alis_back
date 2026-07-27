@@ -48,15 +48,17 @@ router.get('/admin/whatsapp-status', requireAdmin, async (_req: AuthRequest, res
   }
 });
 
-// Test OTP mesajı göndər — AKTİV kanaldan (Infobip SMS/WhatsApp) göndərir və
-// provayderin real cavabını/xətasını qaytarır ki, admin səbəbi görsün.
+// Test OTP mesajı göndər — WhatsApp və/və ya SMS ayrıca sınanır (channel:
+// 'whatsapp' | 'sms' | 'both'). Provayderin real cavabını/xətasını qaytarır.
 router.post('/admin/whatsapp-test', requireAdmin, async (req: AuthRequest, res: Response) => {
   try {
     const phone = String(req.body?.phone || '').trim();
     if (!phone) { res.status(400).json({ success: false, message: 'phone tələb olunur' }); return; }
-    const channel = otpChannel();
-    const result = channel === 'sms' ? await testSms(phone) : await testWhatsApp(phone);
-    res.json({ success: true, channel, result });
+    const which = String(req.body?.channel || 'both').toLowerCase();
+    const result: any = {};
+    if (which === 'whatsapp' || which === 'both') result.whatsapp = await testWhatsApp(phone);
+    if (which === 'sms' || which === 'both') result.sms = await testSms(phone);
+    res.json({ success: true, channel: otpChannel(), result });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }
