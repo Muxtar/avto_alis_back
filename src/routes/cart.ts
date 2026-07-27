@@ -359,7 +359,8 @@ router.post('/cart/checkout', requireType(BUYER_TYPES), async (req: AuthRequest,
     // KART ÖDƏNİŞİ yalnız BİZNESƏ bağlı elanlar üçün mümkündür (VÖEN + bank lazımdır).
     // Fərdi satıcının məhsulu kartla alına bilməz — yalnız nağd/əldən (tap.az kimi).
     if (paymentMethod === 'CARD') {
-      const nonBusiness = cart.items.filter((i) => !i.listing.businessId);
+      // Kart yalnız biznesə bağlı elanlar üçün — businessId və ya (fallback) businessObjectId.
+      const nonBusiness = cart.items.filter((i) => !(i.listing.businessId || i.listing.businessObjectId));
       if (nonBusiness.length > 0) {
         res.status(400).json({
           success: false,
@@ -367,8 +368,16 @@ router.post('/cart/checkout', requireType(BUYER_TYPES), async (req: AuthRequest,
         });
         return;
       }
+      // Biznes id-lərini topla; elanda businessId yoxdursa obyektdən çıxar.
+      const directBizIds = cart.items.map((i) => i.listing.businessId).filter((x): x is number => !!x);
+      const objIds = cart.items.filter((i) => !i.listing.businessId && i.listing.businessObjectId).map((i) => i.listing.businessObjectId as number);
+      let objBizIds: number[] = [];
+      if (objIds.length) {
+        const objs = await prisma.businessObject.findMany({ where: { id: { in: objIds } }, select: { businessId: true } });
+        objBizIds = objs.map((o) => o.businessId);
+      }
       // Biznes aktiv VƏ təsdiqli olmalıdır.
-      const bizIds = Array.from(new Set(cart.items.map((i) => i.listing.businessId).filter((x): x is number => !!x)));
+      const bizIds = Array.from(new Set([...directBizIds, ...objBizIds]));
       const okBiz = await prisma.business.findMany({ where: { id: { in: bizIds }, isActive: true, status: 'APPROVED' }, select: { id: true } });
       if (okBiz.length !== bizIds.length) {
         res.status(400).json({ success: false, message: 'Bu məhsulların biznesi hazırda aktiv deyil — kartla ödəniş mümkün deyil.' });
@@ -506,6 +515,14 @@ router.post('/cart/checkout', requireType(BUYER_TYPES), async (req: AuthRequest,
         // C6 fix: atomic stock decrement + check via updateMany with stock>=qty guard.
         // If any update fails the predicate, we throw to roll back the whole transaction.
         for (const i of items) {
+          // KART: stok ödəniş təsdiqlənəndə (payment callback → PAID) azalır — burada
+          // yalnız mövcudluğu yoxlayırıq ki, tükənmiş məhsul satışa getməsin. Beləliklə
+          // ödənilməmiş/tərk edilmiş kart sifarişi stoku bloklamır.
+          if (paymentMethod === 'CARD') {
+            if ((i.listing.stock ?? 0) < i.quantity) throw new Error(`"${i.listing.title}" üçün kifayət qədər stok yoxdur`);
+            continue;
+          }
+          // NAĞD / CÜZDAN: elə indi azalt (öhdəlik/ödənilmiş satış).
           const result = await tx.listing.updateMany({
             where: { id: i.listingId, stock: { gte: i.quantity } },
             data: { stock: { decrement: i.quantity } },
@@ -643,15 +660,12 @@ router.post('/cart/checkout', requireType(BUYER_TYPES), async (req: AuthRequest,
           });
           paymentUrl = pay.redirectUrl;
         } catch (err: any) {
-          // Ödəniş başlaya bilmədi → kompensasiya: stok, istifadə olunan xal, promo
-          // və order-ləri geri qaytar (yoxsa stok bloklanmış, order PENDING ilişib qalır).
+          // Ödəniş başlaya bilmədi → kompensasiya: istifadə olunan xal, promo və
+          // order-ləri geri qaytar. (Kartda stok checkout-da AZALDILMIR, ona görə
+          // burada stok bərpası YOXDUR — əks halda over-increment olardı.)
           console.error('[checkout] gateway createPayment failed:', err.message);
           try {
             await prisma.$transaction(async (tx) => {
-              const its = await tx.orderItem.findMany({ where: { orderId: { in: orders.map((o) => o.id) } }, select: { listingId: true, quantity: true } });
-              for (const it of its) {
-                await tx.listing.update({ where: { id: it.listingId }, data: { stock: { increment: it.quantity } } }).catch(() => {});
-              }
               if (pointsToUse > 0) {
                 await tx.user.update({ where: { id: req.adminId! }, data: { loyaltyPoints: { increment: pointsToUse } } });
               }

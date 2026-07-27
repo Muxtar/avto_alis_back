@@ -19,13 +19,18 @@ async function settleOrders(where: { gatewayProvider?: string; gatewayRef?: stri
   await prisma.order.updateMany({ where, data: { gatewayStatus: status || null, paymentStatus: paid ? 'PAID' : 'FAILED' } });
   if (paid) {
     await prisma.order.updateMany({ where: { ...where, status: 'PENDING' }, data: { status: 'CONFIRMED' } });
-    // FAILED→PAID keçidində əvvəl geri qaytarılmış stoku yenidən tut (over-increment-in qarşısını alır).
+    // KART: stok yalnız İNDİ (ödəniş təsdiqi) azalır — bir dəfə (stockCommitted).
+    // Beləliklə ödənilməmiş/tərk edilmiş kart sifarişi stoku bloklamır.
     for (const o of orders) {
-      if (!o.stockRestored) continue;
+      if (o.stockCommitted) continue;
       for (const it of o.items) {
-        try { await prisma.listing.update({ where: { id: it.listingId }, data: { stock: { decrement: it.quantity } } }); } catch { /* silinmiş */ }
+        const r = await prisma.listing.updateMany({
+          where: { id: it.listingId, stock: { gte: it.quantity } },
+          data: { stock: { decrement: it.quantity } },
+        }).catch(() => null);
+        if (!r || r.count === 0) console.error(`[settleOrders] stok azaldıla bilmədi (order ${o.id}, listing ${it.listingId}) — stok tükənib ola bilər`);
       }
-      await prisma.order.update({ where: { id: o.id }, data: { stockRestored: false } });
+      await prisma.order.update({ where: { id: o.id }, data: { stockCommitted: true } }).catch(() => {});
     }
     if (!wasPaid) {
       const byBuyer = new Map<number, number>();
@@ -34,16 +39,9 @@ async function settleOrders(where: { gatewayProvider?: string; gatewayRef?: stri
         try { await prisma.user.update({ where: { id: buyerId }, data: { loyaltyPoints: { increment: pts } } }); } catch { /* silinmiş */ }
       }
     }
-  } else {
-    for (const o of orders) {
-      // Stoku yalnız bir dəfə geri qaytar: artıq FAILED idisə və ya stockRestored qoyulubsa keç.
-      if (o.paymentStatus === 'FAILED' || o.stockRestored) continue;
-      for (const it of o.items) {
-        try { await prisma.listing.update({ where: { id: it.listingId }, data: { stock: { increment: it.quantity } } }); } catch { /* silinmiş */ }
-      }
-      await prisma.order.update({ where: { id: o.id }, data: { stockRestored: true } });
-    }
   }
+  // FAILED — kartda stok checkout-da azaldılmayıb, ona görə geri qaytarmağa ehtiyac
+  // yoxdur (heç azalmayıb). Order PENDING+FAILED qalır; alıcı yenidən cəhd edə bilər.
 }
 
 // ====================== CALLBACK ======================
