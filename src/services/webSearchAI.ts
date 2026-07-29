@@ -93,6 +93,18 @@ export function isAzResult(url: string): boolean {
   }
 }
 
+// PUBLIC sosial media / peşəkar profil domenləri — şəxs/ixtisas axtarışında yalnız
+// AÇIQ profil LİNKİ göstərmək üçün (Google kimi). Telefon/email SCRAPE OLUNMUR.
+const SOCIAL_DOMAINS = ['instagram.com', 'facebook.com', 'fb.com', 'linkedin.com', 'x.com', 'twitter.com', 'tiktok.com', 'youtube.com', 't.me', 'telegram.me'];
+export function isSocialResult(url: string): boolean {
+  try {
+    const host = new URL(url).hostname.toLowerCase().replace(/^www\./, '');
+    return SOCIAL_DOMAINS.some((d) => host === d || host.endsWith('.' + d));
+  } catch {
+    return false;
+  }
+}
+
 // Azərbaycanla əlaqəsi olmayan qlobal pazarlar — alət səviyyəsində bağlanır.
 const BLOCKED_DOMAINS = [
   'amazon.com', 'aliexpress.com', 'ebay.com', 'hepsiburada.com',
@@ -277,9 +289,10 @@ async function webSearchTavily(q: string): Promise<WebSearchResponse> {
 
   const rawResults: any[] = Array.isArray(data?.results) ? data.results : [];
 
-  // AZ filtri — .az, tanınmış AZ brendləri, və ya beynəlxalq saytın AZ səhifəsi.
+  // Buraxılır: AZ saytları (məhsul/elan) VƏ YA public sosial media profil linkləri
+  // (şəxs/ixtisas axtarışı — yalnız açıq profil linki, scrape yox).
   const azResults = rawResults.filter(
-    (r) => r && typeof r.url === 'string' && /^https?:\/\//i.test(r.url) && isAzResult(r.url),
+    (r) => r && typeof r.url === 'string' && /^https?:\/\//i.test(r.url) && (isAzResult(r.url) || isSocialResult(r.url)),
   );
 
   if (rawResults.length > 0 && azResults.length === 0) {
