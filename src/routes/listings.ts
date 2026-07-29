@@ -3,7 +3,7 @@ import { PrismaClient, Prisma } from '@prisma/client';
 import { upload } from '../middleware/upload';
 import { processImages } from '../middleware/imageProcess';
 import { adminAuth, AuthRequest, verifyTokenUserId } from '../middleware/auth';
-import { purchasedListing } from '../services/reviewGating';
+import { purchasedListing, reviewStats } from '../services/reviewGating';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -360,7 +360,16 @@ router.get('/listings/:id', async (req: Request, res: Response) => {
       canReview = isVoen ? await purchasedListing(reviewerId, listing.id) : true;
     }
 
-    res.json({ ...listing, canReview });
+    // VÖEN elanda obyektin reytinqini (5 ulduz + bəyən/bəyənmə) də göndər —
+    // istifadəçi obyekti açmadan məhsul səhifəsində obyektin etibarını görsün.
+    let objectRating = null;
+    if (listing.businessObjectId) {
+      const rows = await prisma.comment.findMany({ where: { objectId: listing.businessObjectId }, select: { rating: true } });
+      objectRating = reviewStats(rows.map((r) => r.rating));
+    }
+    const businessObject = listing.businessObject ? { ...listing.businessObject, rating: objectRating } : listing.businessObject;
+
+    res.json({ ...listing, businessObject, canReview });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }
