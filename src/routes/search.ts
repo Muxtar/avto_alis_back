@@ -8,6 +8,7 @@ import { adminAuth, AuthRequest } from '../middleware/auth';
 import { imageSearchLimiter, webSearchLimiter } from '../middleware/rateLimiter';
 import { webSearch, webSearchEnabled } from '../services/webSearchAI';
 import { resolveFlag } from '../services/settings';
+import { reviewStats } from '../services/reviewGating';
 import fs from 'fs';
 
 const router = Router();
@@ -205,7 +206,7 @@ router.get('/search/by-city/:city', async (req: Request, res: Response) => {
           OR: [{ expiresAt: null }, { expiresAt: { gt: now } }],
         },
         include: {
-          user: { select: { id: true, name: true, type: true } },
+          user: { select: { id: true, name: true, type: true, avgRating: true, ratingCount: true } },
           _count: { select: { comments: true } },
         },
         orderBy: { createdAt: 'desc' },
@@ -289,13 +290,16 @@ router.get('/objects/:id', async (req: Request, res: Response) => {
     const listings = await prisma.listing.findMany({
       where: { businessObjectId: id, status: 'APPROVED', OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] },
       include: {
-        user: { select: { id: true, name: true, type: true } },
+        user: { select: { id: true, name: true, type: true, avgRating: true, ratingCount: true } },
         _count: { select: { comments: true } },
       },
       orderBy: { createdAt: 'desc' },
       take: 100,
     });
-    res.json({ success: true, object, listings });
+    // Obyektin 5 ulduz + bəyən/bəyənmə reytinqi (obyekt rəylərindən) — başlıqda göstərilir.
+    const ratingRows = await prisma.comment.findMany({ where: { objectId: id }, select: { rating: true } });
+    const rating = reviewStats(ratingRows.map((r) => r.rating));
+    res.json({ success: true, object: { ...object, rating }, listings });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }
