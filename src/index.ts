@@ -36,6 +36,7 @@ import yangoRoutes from './routes/yango';
 import veriffRoutes from './routes/veriff';
 import contactsRoutes from './routes/contacts';
 import bannersRoutes from './routes/banners';
+import aiRoutes from './routes/ai';
 
 const app = express();
 const PORT = process.env.PORT || 5001;
@@ -119,6 +120,7 @@ app.use('/api', yangoRoutes);
 app.use('/api', veriffRoutes);
 app.use('/api', contactsRoutes);
 app.use('/api', bannersRoutes);
+app.use('/api', aiRoutes);
 
 app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok' });

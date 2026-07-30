@@ -79,3 +79,6 @@ export const complaintLimiter = rateLimit(5, 60 * 60 * 1000);
 
 // OTP/kod göndərmə (telefon/email) — brute/SMS-flood qoruması: 5 istek / 5 dəqiqə
 export const otpLimiter = rateLimit(5, 5 * 60 * 1000);
+
+// AI köməkçi — hər sorğu Claude çağırır (xərc), ona görə məhdudlaşdırılır.
+export const aiChatLimiter = rateLimit(30, 5 * 60 * 1000);
