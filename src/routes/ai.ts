@@ -25,7 +25,9 @@ router.post('/ai/chat', aiChatLimiter, adminAuth, async (req: AuthRequest, res: 
       res.status(400).json({ success: false, message: 'Mesaj tələb olunur' });
       return;
     }
-    const { reply, pendingAction } = await runAgent(req.adminId!, history);
+    // Token daxili GET endpoint çağırışları üçün (oxuma alətləri mövcud endpoint-ləri işlədir).
+    const token = (req.headers.authorization || '').replace('Bearer ', '');
+    const { reply, pendingAction } = await runAgent(req.adminId!, token, history);
     res.json({ success: true, reply, pendingAction });
   } catch (error: any) {
     console.error('[POST /ai/chat] error:', error?.message || error);
