@@ -17,8 +17,11 @@ import { PrismaClient } from '@prisma/client';
 
 const prisma = new PrismaClient();
 
+// Modellər — DİQQƏT: yalnız bu hesabın açarının çıxışı olan modelləri işlət.
+// Mövcud servislər (credentialAI, visionSearch) 'claude-opus-4-8' işlədir → sübut olunmuş.
+// 'claude-opus-5' bəzi hesablarda əlçatan olmaya bilər; ona görə default opus-4-8.
 const MODEL_SIMPLE = process.env.AI_AGENT_MODEL || 'claude-sonnet-4-6';
-const MODEL_COMPLEX = process.env.AI_AGENT_MODEL_COMPLEX || 'claude-opus-5';
+const MODEL_COMPLEX = process.env.AI_AGENT_MODEL_COMPLEX || 'claude-opus-4-8';
 const SELF = `http://localhost:${process.env.PORT || 5001}/api`;
 const MAX_TOOL_ROUNDS = 8;
 
@@ -247,12 +250,24 @@ export async function runAgent(userId: number, token: string, history: ChatTurn[
   const ai = getClient();
   if (!ai) return { reply: 'AI köməkçi hazırda əlçatan deyil (konfiqurasiya yoxdur).', pendingAction: null };
 
-  const model = pickModel(history);
+  let model = pickModel(history);
   const messages: Anthropic.MessageParam[] = history.filter((t) => t.content?.trim()).map((t) => ({ role: t.role, content: t.content }));
   let pendingAction: PendingAction | null = null;
+  let triedFallback = false;
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
-    const resp = await ai.messages.create({ model, max_tokens: 1500, system: SYSTEM, tools: TOOLS, messages });
+    let resp: Anthropic.Message;
+    try {
+      resp = await ai.messages.create({ model, max_tokens: 1500, system: SYSTEM, tools: TOOLS, messages });
+    } catch (e: any) {
+      const msg = e?.message || String(e);
+      console.error('[aiAgent] model xətası:', model, msg);
+      // Model əlçatan deyilsə (404/not_found) sübut olunmuş modelə keç və bir dəfə yenidən cəhd et.
+      if (!triedFallback && model !== 'claude-opus-4-8' && /not_found|does not exist|model|404|permission|access/i.test(msg)) {
+        triedFallback = true; model = 'claude-opus-4-8'; round--; continue;
+      }
+      return { reply: `AI xətası: ${msg}`.slice(0, 500), pendingAction };
+    }
 
     if (resp.stop_reason !== 'tool_use') {
       const text = resp.content.filter((b): b is Anthropic.TextBlock => b.type === 'text').map((b) => b.text).join('\n').trim();
