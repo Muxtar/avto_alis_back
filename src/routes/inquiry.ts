@@ -1,7 +1,7 @@
 import { Router, Response } from 'express';
 import { PrismaClient, UserType } from '@prisma/client';
 import { adminAuth, requireType, requireSellerVerified, AuthRequest } from '../middleware/auth';
-import { analyzeRequest, chatMessage } from '../services/deepseek';
+import { analyzeRequest, chatMessage } from '../services/aiText';
 import { findRelevantSellers } from '../services/sellerMatcher';
 
 const router = Router();

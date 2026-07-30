@@ -1,5 +1,5 @@
 import { PrismaClient, Prisma } from '@prisma/client';
-import { AIAnalysis } from './deepseek';
+import { AIAnalysis } from './aiText';
 
 const prisma = new PrismaClient();
 

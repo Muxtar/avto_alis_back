@@ -2,7 +2,7 @@ import { Router, Request, Response } from 'express';
 import { PrismaClient } from '@prisma/client';
 import { upload } from '../middleware/upload';
 import { processImages } from '../middleware/imageProcess';
-import { analyzeImage } from '../services/deepseek';
+import { analyzeImage } from '../services/aiText';
 import { imageToSearchQuery, visionSearchEnabled } from '../services/visionSearchAI';
 import { adminAuth, AuthRequest } from '../middleware/auth';
 import { imageSearchLimiter, webSearchLimiter } from '../middleware/rateLimiter';
