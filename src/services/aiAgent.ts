@@ -42,9 +42,14 @@ export interface PendingAction { type: string; endpoint: string; method: string;
 // müqayisə/analiz/planlama sözləri.
 function pickModel(history: ChatTurn[]): string {
   const last = [...history].reverse().find((t) => t.role === 'user')?.content || '';
-  const kw = /(müqayis|analiz|hesabla|ən yaxşı|ən uyğun|planla|strategiya|optimal|niyə|izah et|tövsiyə|həm .*həm|müqayisə et|ucuzdan bahaya|bahadan ucuza)/i;
-  const complex = last.length > 220 || (last.match(/\?/g) || []).length >= 2 || kw.test(last);
-  return complex ? MODEL_COMPLEX : MODEL_SIMPLE;
+  // Mürəkkəb əlamətlər → Opus; əks halda (sadə əmr/sadə API) → Sonnet.
+  const kw = /(müqayis|analiz|hesabla|ən yaxşı|ən uyğun|planla|strategiya|optimal|niyə|izah et|tövsiyə|həm .*həm|ucuzdan bahaya|bahadan ucuza|sonra|əvvəlcə|hamısını|bütün .*(elan|sifariş|məhsul)|filtr|analitik|hesabat)/i;
+  // Çox əməl/çox söz (məs. "tap VƏ səbətə at VƏ mesaj yaz") da mürəkkəbdir.
+  const multiStep = ((last.match(/\b(və|sonra|həmçinin|then|and)\b/gi) || []).length >= 2);
+  const complex = last.length > 200 || (last.match(/\?/g) || []).length >= 2 || multiStep || kw.test(last);
+  const model = complex ? MODEL_COMPLEX : MODEL_SIMPLE;
+  console.log(`[aiAgent] model=${model} (${complex ? 'mürəkkəb→Opus' : 'sadə→Sonnet'})`);
+  return model;
 }
 
 // Mövcud GET endpoint-ini daxili çağır (istifadəçinin token-i ilə) — endpoint məntiqini təkrar yazma.
