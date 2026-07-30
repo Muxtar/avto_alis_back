@@ -67,7 +67,7 @@ async function getJson(path: string, token: string): Promise<any> {
 // ── Alət sxemləri ──
 const TOOLS: Anthropic.Tool[] = [
   // OXUMA
-  { name: 'search_listings', description: 'Təsdiqlənmiş elanları axtarır (ən ucuz/bahalı üçün sort). Qiymət AZN.',
+  { name: 'search_listings', description: 'Təsdiqlənmiş elanları axtarır (ən ucuz/bahalı üçün sort). query-yə yalnız məhsul/marka/model açar sözlərini ver (məs. "Toyota Corolla Cross"), "bul/axtar/maşın" kimi sözləri yox. Başlıq, təsvir, marka, model üzrə axtarır. Qiymət AZN.',
     input_schema: { type: 'object', properties: { query: { type: 'string' }, category: { type: 'string' },
       sort: { type: 'string', enum: ['relevance', 'price_asc', 'price_desc', 'newest'] }, minPrice: { type: 'number' }, maxPrice: { type: 'number' }, limit: { type: 'number' } } } },
   { name: 'listing_details', description: 'Bir elanın ətraflı məlumatı (qiymət, vəziyyət, stok, satıcı/obyekt, obyekt reytinqi).',
@@ -129,17 +129,32 @@ async function runReadTool(name: string, input: any, userId: number, token: stri
   switch (name) {
     case 'search_listings': {
       const take = clamp(input.limit, 5, 20);
-      const where: any = { status: 'APPROVED', OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] };
-      const and: any[] = [];
-      if (input.query) and.push({ OR: [ { title: { contains: String(input.query), mode: 'insensitive' } }, { description: { contains: String(input.query), mode: 'insensitive' } } ] });
-      if (input.category) and.push({ category: { contains: String(input.category), mode: 'insensitive' } });
-      if (typeof input.minPrice === 'number') and.push({ price: { gte: input.minPrice } });
-      if (typeof input.maxPrice === 'number') and.push({ price: { lte: input.maxPrice } });
-      if (and.length) where.AND = and;
-      const orderBy = input.sort === 'price_asc' ? { price: 'asc' as const } : input.sort === 'price_desc' ? { price: 'desc' as const } : { createdAt: 'desc' as const };
-      const rows = await prisma.listing.findMany({ where, orderBy, take,
-        select: { id: true, title: true, price: true, city: true, condition: true, stock: true, user: { select: { name: true } }, businessObject: { select: { name: true } } } });
-      return { count: rows.length, listings: rows.map((r) => ({ id: r.id, link: `/marketplace/${r.id}`, title: r.title, price: r.price, currency: 'AZN', city: r.city, condition: r.condition, stock: r.stock, seller: r.businessObject?.name || r.user?.name || null })) };
+      const base: any = { status: 'APPROVED', OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] };
+      const filters: any[] = [];
+      if (input.category) filters.push({ category: { contains: String(input.category), mode: 'insensitive' } });
+      if (typeof input.minPrice === 'number') filters.push({ price: { gte: input.minPrice } });
+      if (typeof input.maxPrice === 'number') filters.push({ price: { lte: input.maxPrice } });
+
+      // Sözlərə görə axtarış: hər söz başlıq/təsvir/MARKA/MODEL/forVehicle/kateqoriyada axtarılır.
+      // (Əvvəl yalnız başlıq+təsvir idi → Toyota Corolla Cross kimi marka/model sahələrdə olanlar tapılmırdı.)
+      const FIELDS = ['title', 'description', 'brand', 'model', 'forVehicle', 'category'];
+      const STOP = new Set(['bul', 'tap', 'axtar', 'lazım', 'lazim', 'araç', 'araci', 'aracı', 'araba', 'avtomobil', 'maşın', 'masin', 'nəqliyyat', 'satılır', 'satilir', 'və', 'ile', 'ilə', 'the', 'and', 'car']);
+      const tokens = String(input.query || '').toLowerCase().split(/\s+/).map((s) => s.trim()).filter((w) => w.length >= 2 && !STOP.has(w)).slice(0, 6);
+      const tokenCond = (tok: string) => ({ OR: FIELDS.map((f) => ({ [f]: { contains: tok, mode: 'insensitive' } })) });
+
+      const orderBy: any = input.sort === 'price_asc' ? { price: 'asc' } : input.sort === 'price_desc' ? { price: 'desc' } : { createdAt: 'desc' };
+      const sel = { id: true, title: true, price: true, city: true, condition: true, stock: true, brand: true, model: true, year: true, user: { select: { name: true } }, businessObject: { select: { name: true } } };
+
+      let rows: any[] = [];
+      if (tokens.length) {
+        // Dəqiq: bütün sözlər uyğun gəlməlidir (AND).
+        rows = await prisma.listing.findMany({ where: { AND: [base, ...filters, ...tokens.map(tokenCond)] }, orderBy, take, select: sel });
+        // Tapılmadısa: hər hansı söz uyğun gəlsin (OR) — yumşaq axtarış.
+        if (rows.length === 0) rows = await prisma.listing.findMany({ where: { AND: [base, ...filters], OR: tokens.map(tokenCond) }, orderBy, take, select: sel });
+      } else {
+        rows = await prisma.listing.findMany({ where: { AND: [base, ...filters] }, orderBy, take, select: sel });
+      }
+      return { count: rows.length, listings: rows.map((r) => ({ id: r.id, link: `/marketplace/${r.id}`, title: r.title, price: r.price, currency: 'AZN', city: r.city, condition: r.condition, stock: r.stock, brand: r.brand, model: r.model, year: r.year, seller: r.businessObject?.name || r.user?.name || null })) };
     }
     case 'my_orders': {
       const take = clamp(input.limit, 10, 30);
