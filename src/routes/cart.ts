@@ -827,7 +827,9 @@ router.put('/orders/:id/status', adminAuth, async (req: AuthRequest, res: Respon
       return;
     }
     // Satıcı bütün keçidləri edə bilər; alıcı yalnız: gözləyəni ləğv, göndərilən sifarişi "təhvil aldım".
-    const BUYER_TRANSITIONS: Record<string, string[]> = { PENDING: ['CANCELLED'], SHIPPED: ['DELIVERED'] };
+    // Alıcı: gözləyəni və ya təsdiqlənib hələ GÖNDƏRİLMƏMİŞ sifarişi ləğv edə bilər (ödənilibsə refund olunur);
+    // göndərilən sifarişi "təhvil aldım" edə bilər. (Göndərildikdən sonra ləğv yoxdur — mallar yoldadır.)
+    const BUYER_TRANSITIONS: Record<string, string[]> = { PENDING: ['CANCELLED'], CONFIRMED: ['CANCELLED'], SHIPPED: ['DELIVERED'] };
     const allowed = isSeller ? (ORDER_TRANSITIONS[order.status] || []) : (BUYER_TRANSITIONS[order.status] || []);
     if (!allowed.includes(next)) {
       res.status(400).json({
