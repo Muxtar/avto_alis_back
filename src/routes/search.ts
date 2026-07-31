@@ -191,7 +191,7 @@ router.get('/search/by-city/:city', async (req: Request, res: Response) => {
       prisma.user.findMany({
         where: { city, profileComplete: true },
         select: {
-          id: true, name: true, type: true, phone: true, avgRating: true, ratingCount: true,
+          id: true, name: true, type: true, avgRating: true, ratingCount: true,
           city: true, address: true, latitude: true, longitude: true,
           workplaces: { select: { name: true, address: true, latitude: true, longitude: true } },
           _count: { select: { listings: true } },
@@ -279,7 +279,7 @@ router.get('/objects/:id', async (req: Request, res: Response) => {
     const object = await prisma.businessObject.findUnique({
       where: { id },
       select: {
-        id: true, name: true, phone: true, address: true, city: true,
+        id: true, name: true, address: true, city: true,
         latitude: true, longitude: true, activityAreas: true, isActive: true,
         referralEnabled: true,
         referralRules: { select: { profession: true, commissionPercent: true, requiredDoc: true } },
@@ -314,12 +314,12 @@ router.get('/businesses/:id', async (req: Request, res: Response) => {
     const business = await prisma.business.findUnique({
       where: { id },
       select: {
-        id: true, name: true, phone: true, status: true, isActive: true,
+        id: true, name: true, status: true, isActive: true,
         website: true, instagram: true, facebook: true, tiktok: true, youtube: true, linkedin: true,
         objects: {
           where: { isActive: true },
           select: {
-            id: true, name: true, city: true, address: true, phone: true,
+            id: true, name: true, city: true, address: true, 
             activityAreas: true, latitude: true, longitude: true,
             _count: { select: { listings: true } },
           },

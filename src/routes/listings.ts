@@ -102,7 +102,7 @@ router.get('/listings', async (req: Request, res: Response) => {
       prisma.listing.findMany({
         where,
         include: {
-          user: { select: { id: true, name: true, phone: true, type: true, avgRating: true, ratingCount: true } },
+          user: { select: { id: true, name: true, type: true, avgRating: true, ratingCount: true } },
           // VÖEN elanlarda kartda şəxsin yox, obyektin adı/№-si göstərilir.
           businessObject: { select: { id: true, name: true } },
           _count: { select: { comments: true, favorites: true } },
@@ -206,7 +206,7 @@ router.get('/sellers/:id', async (req: Request, res: Response) => {
     const user = await prisma.user.findUnique({
       where: { id: parseInt(req.params.id) },
       select: {
-        id: true, name: true, phone: true, type: true, createdAt: true, workplaces: true,
+        id: true, name: true, type: true, createdAt: true, workplaces: true,
         serviceBrands: true, serviceAllBrands: true, serviceCategories: true,
         sellerVerified: true, idVerifyStatus: true, avatar: true, profession: true, bio: true,
         birthDate: true, gender: true, // kimlik məlumatları — FIN və vəsiqə şəkli ictimai DEYİL
@@ -245,7 +245,7 @@ router.get('/sellers/:id', async (req: Request, res: Response) => {
     const [listings, listingsTotal] = await Promise.all([
       prisma.listing.findMany({
         where: sellerListingsWhere,
-        include: { user: { select: { id: true, name: true, phone: true, type: true } } },
+        include: { user: { select: { id: true, name: true, type: true } } },
         orderBy: { createdAt: 'desc' },
         skip,
         take: limit,
@@ -301,7 +301,7 @@ router.get('/listings/:id', async (req: Request, res: Response) => {
         // YALNIZ açıq sahələr — idCardImage/selfie/FIN/parol və s. SIZDIRILMIR.
         user: {
           select: {
-            id: true, name: true, phone: true, type: true, avatar: true,
+            id: true, name: true, type: true, avatar: true,
             profession: true, bio: true, gender: true, birthDate: true,
             idVerifyStatus: true, sellerVerified: true,
             city: true, address: true, latitude: true, longitude: true,
@@ -312,7 +312,7 @@ router.get('/listings/:id', async (req: Request, res: Response) => {
         // VÖEN (obyektə bağlı) elanlarda obyekt məlumatı göstərilir (şəxsin yox).
         businessObject: {
           select: {
-            id: true, name: true, phone: true, address: true, city: true,
+            id: true, name: true, address: true, city: true,
             latitude: true, longitude: true,
             business: { select: { id: true, name: true } },
           },
@@ -369,7 +369,8 @@ router.get('/listings/:id', async (req: Request, res: Response) => {
     }
     const businessObject = listing.businessObject ? { ...listing.businessObject, rating: objectRating } : listing.businessObject;
 
-    res.json({ ...listing, businessObject, canReview });
+    // Telefon nömrəsi ictimai göstərilmir — əlaqə yalnız sayt daxili chat ilə.
+    res.json({ ...listing, phone: null, businessObject, canReview });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }
