@@ -5,6 +5,7 @@ import { emitToUser } from '../services/callSignaling';
 import {
   isYangoConfigured, checkPrice, createClaim, acceptClaim, getClaimInfo,
   getPerformerPosition, getCancelInfo, cancelClaim, mapYangoStatus, YANGO_MAX_WEIGHT_KG, type Geo,
+  getTrackingLinks, getPointsEta, getDriverPhone, getConfirmationCode,
 } from '../services/yangoDelivery';
 
 const router = Router();
@@ -131,13 +132,37 @@ router.get('/orders/:id/yango/status', adminAuth, async (req: AuthRequest, res: 
     const status = info.data.status as string;
     const version = (info.data.version as number) ?? undefined;
 
-    // Kuryer aktiv mərhələdədirsə — canlı GPS mövqeyini al və sifarişdə saxla (xəritə üçün).
+    // Kuryer aktiv mərhələ? (Wolt-tipli canlı izləmə/ETA/təhvil kodu bu mərhələdə lazımdır.)
+    const ACTIVE = ['accepted', 'performer_found', 'performer_draft', 'pickup_arrived', 'ready_for_pickup_confirmation', 'pickuped', 'delivery_arrived', 'ready_for_delivery_confirmation'];
+    const active = ACTIVE.includes(status);
+
+    // Canlı GPS mövqeyi + izləmə linki + ETA-nı paralel al (aktiv mərhələdə).
     let courierPosition: any = null;
-    if (['accepted', 'performer_found', 'performer_draft', 'pickup_arrived', 'pickuped', 'delivery_arrived'].includes(status)) {
-      const pos = await getPerformerPosition(order.yangoClaimId);
-      if (pos.ok && pos.data?.position && pos.data.position.lat != null && pos.data.position.lon != null) {
-        courierPosition = pos.data.position;
-      }
+    let trackingUrl: string | null = null;
+    let etaExpected: string | null = null;
+    let etaSeconds: number | null = null;
+    if (active) {
+      const [pos, tl, eta] = await Promise.all([
+        getPerformerPosition(order.yangoClaimId),
+        getTrackingLinks(order.yangoClaimId),
+        getPointsEta(order.yangoClaimId),
+      ]);
+      if (pos.ok && pos.data?.position?.lat != null && pos.data.position.lon != null) courierPosition = pos.data.position;
+      // İzləmə linki — destination (təhvil) nöqtəsinin sharing_link-i.
+      const destTl = (tl.data?.route_points || []).find((p: any) => p.type === 'destination' && p.sharing_link);
+      trackingUrl = destTl?.sharing_link || null;
+      // ETA — sonuncu (təhvil) nöqtəsinin gözlənilən çatma vaxtı.
+      const pts = eta.data?.route_points || [];
+      const destEta = pts.length ? pts[pts.length - 1] : null;
+      etaExpected = destEta?.visited_at?.expected || null;
+      if (etaExpected) etaSeconds = Math.max(0, Math.round((new Date(etaExpected).getTime() - Date.now()) / 1000));
+    }
+
+    // Təhvil təsdiq kodu — YALNIZ alıcıya və çatdırılma mərhələsində (kuryerə deyir).
+    let confirmationCode: string | null = null;
+    if (order.buyerId === req.adminId && ['pickuped', 'delivery_arrived', 'ready_for_delivery_confirmation'].includes(status)) {
+      const cc = await getConfirmationCode(order.yangoClaimId);
+      confirmationCode = cc.data?.code || null;
     }
 
     await prisma.order.update({
@@ -157,7 +182,12 @@ router.get('/orders/:id/yango/status', adminAuth, async (req: AuthRequest, res: 
       emitToUser(order.sellerId, 'order:yango', payload);
     }
 
-    res.json({ success: true, dispatched: true, status, performer: info.data.performer_info || null, courierPosition, routePoints: info.data.route_points || [], pricing: info.data.pricing || null });
+    res.json({
+      success: true, dispatched: true, status,
+      performer: info.data.performer_info || null,
+      courierPosition, trackingUrl, etaExpected, etaSeconds, confirmationCode,
+      routePoints: info.data.route_points || [], pricing: info.data.pricing || null,
+    });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
 
@@ -178,6 +208,19 @@ router.post('/orders/:id/yango/cancel', adminAuth, async (req: AuthRequest, res:
     if (!cancel.ok) { res.status(502).json({ success: false, message: cancel.error || 'Yango ləğvi alınmadı' }); return; }
     await prisma.order.update({ where: { id: order.id }, data: { yangoStatus: cancel.data?.status || 'cancelled' } }).catch(() => {});
     res.json({ success: true, status: cancel.data?.status || 'cancelled', cancelState });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
+// ── Kuryerə zəng (proksi nömrə) — alıcı və ya satıcı, Wolt kimi ──────────────
+router.post('/orders/:id/yango/call', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const id = parseInt(String(req.params.id));
+    const order = await prisma.order.findUnique({ where: { id }, select: { id: true, buyerId: true, sellerId: true, yangoClaimId: true } });
+    if (!order || (order.buyerId !== req.adminId && order.sellerId !== req.adminId)) { res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return; }
+    if (!order.yangoClaimId) { res.status(400).json({ success: false, message: 'Bu sifariş Yango-ya göndərilməyib' }); return; }
+    const r = await getDriverPhone(order.yangoClaimId);
+    if (!r.ok || !r.data?.phone) { res.status(502).json({ success: false, message: r.error || 'Kuryer nömrəsi hələ əlçatan deyil (kuryer təyin olunmayıb ola bilər)' }); return; }
+    res.json({ success: true, phone: r.data.phone, ext: r.data.ext || null, ttlSeconds: r.data.ttl_seconds || null });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
 

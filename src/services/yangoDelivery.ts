@@ -153,6 +153,29 @@ export async function cancelClaim(claimId: string, version: number, cancelState:
   return yreq('/claims/cancel', { query: { claim_id: claimId }, body: { version, cancel_state: cancelState } });
 }
 
+// Wolt-tipli izləmə linki — alıcı bu linkdən kuryeri canlı izləyir (destination nöqtəsi).
+export async function getTrackingLinks(claimId: string) {
+  return yreq('/claims/tracking-links', { method: 'GET', query: { claim_id: claimId } });
+}
+
+// Nöqtələr üzrə ETA (çatma vaxtı) + kuryer mövqeyi.
+export async function getPointsEta(claimId: string) {
+  return yreq('/claims/points-eta', { query: { claim_id: claimId } });
+}
+
+// Kuryerə zəng — müvəqqəti proksi nömrə qaytarır (phone + ext + ttl_seconds).
+// point_id verilməzsə default (destination/təhvil nöqtəsi) götürülür.
+export async function getDriverPhone(claimId: string, pointId?: number) {
+  const body: any = { claim_id: claimId };
+  if (pointId != null) body.point_id = pointId;
+  return yreq('/driver-voiceforwarding', { body });
+}
+
+// Təhvil təsdiq kodu (Yango) — alıcı bunu kuryerə deyir.
+export async function getConfirmationCode(claimId: string) {
+  return yreq('/claims/confirmation_code', { body: { claim_id: claimId } });
+}
+
 // Yango statusunu bizim OrderStatus-a uyğunlaşdır (avtomatik sinxron üçün).
 export function mapYangoStatus(yango: string): 'CONFIRMED' | 'SHIPPED' | 'DELIVERED' | 'CANCELLED' | null {
   switch (yango) {
