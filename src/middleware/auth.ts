@@ -19,6 +19,13 @@ if (!JWT_SECRET || JWT_SECRET.length < 32) {
 const SIGNING_KEY = JWT_SECRET || 'dev-only-not-for-production-XXXXXXXXXXXX';
 const prisma = new PrismaClient();
 
+// Token mütləq müddəti — istifadə olunan sessiya bu müddət bitənə qədər logout OLMUR
+// (default 90 gün). Hərəkətsizlik yoxlaması (aşağıda) əsl "1 həftə logout" məntiqidir.
+const TOKEN_EXPIRY = Math.max(1, Number(process.env.JWT_EXPIRES_DAYS) || 90) * 24 * 60 * 60; // saniyə
+// Hərəkətsizlik: bu qədər gün heç bir istifadə/giriş olmasa sessiya bağlanır (default 7 gün).
+// İstifadə olunduqca lastSeenAt yenilənir → sürüşən müddət, active istifadəçi çıxarılmır.
+const SESSION_IDLE_MS = Math.max(1, Number(process.env.SESSION_IDLE_DAYS) || 7) * 24 * 60 * 60 * 1000;
+
 export interface AuthRequest extends Request {
   adminId?: number;
   userType?: UserType;
@@ -28,7 +35,7 @@ export interface AuthRequest extends Request {
 }
 
 export function generateToken(userId: number): string {
-  return jwt.sign({ userId }, SIGNING_KEY, { expiresIn: '24h' });
+  return jwt.sign({ userId }, SIGNING_KEY, { expiresIn: TOKEN_EXPIRY });
 }
 
 // İcazə verilmiş admin nömrələri — Railway env: ADMIN_PHONES="+99450...,+99451..."
@@ -88,7 +95,7 @@ export async function createSession(userId: number, req: Request): Promise<strin
     data: { userId, os, browser, deviceType, userAgent: ua ? String(ua).slice(0, 400) : null, ip: clientIp(req) },
     select: { id: true },
   });
-  return jwt.sign({ userId, sid: session.id }, SIGNING_KEY, { expiresIn: '24h' });
+  return jwt.sign({ userId, sid: session.id }, SIGNING_KEY, { expiresIn: TOKEN_EXPIRY });
 }
 
 // Sessiya aktivdirmi? (revoke olunmayıb və mövcuddur). Köhnə tokenlərdə `sid` yoxdur — icazə verilir.
@@ -98,8 +105,12 @@ export async function isSessionActive(sid: string | undefined): Promise<boolean>
     const s = await prisma.session.findUnique({ where: { id: sid }, select: { revokedAt: true, lastSeenAt: true } });
     if (!s) return false; // sessiya silinib
     if (s.revokedAt) return false; // uzaqdan bağlanıb
+    // Hərəkətsizlik: 7 gün (default) heç bir istifadə olmayıbsa → sessiya bağlanır.
+    // İstifadə olunduqda lastSeenAt yenilənir, ona görə active istifadəçi çıxarılmır.
+    const idleMs = Date.now() - new Date(s.lastSeenAt).getTime();
+    if (idleMs > SESSION_IDLE_MS) return false;
     // "Son aktiv" vaxtını yenilə — 5 dəqiqədə bir (yazı yükünü azaltmaq üçün throttle).
-    if (Date.now() - new Date(s.lastSeenAt).getTime() > 5 * 60 * 1000) {
+    if (idleMs > 5 * 60 * 1000) {
       prisma.session.update({ where: { id: sid }, data: { lastSeenAt: new Date() } }).catch(() => {});
     }
     return true;
