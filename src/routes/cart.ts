@@ -864,10 +864,10 @@ router.put('/orders/:id/status', adminAuth, async (req: AuthRequest, res: Respon
 
     // Aliciya bildirim
     const statusLabels: Record<string, string> = {
-      CONFIRMED: 'təsdiqləndi',
+      CONFIRMED: 'qəbul edildi',
       SHIPPED: 'yola çıxdı',
       DELIVERED: 'çatdırıldı',
-      CANCELLED: 'ləğv edildi',
+      CANCELLED: 'rədd/ləğv edildi',
     };
     const label = statusLabels[next];
     if (label) {
