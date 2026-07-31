@@ -135,9 +135,18 @@ router.get('/payment/yigim/callback', async (req: Request, res: Response) => {
 router.get('/payment/status/:orderId', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
     const orderId = parseInt(req.params.orderId);
-    const order = await prisma.order.findUnique({ where: { id: orderId } });
+    let order = await prisma.order.findUnique({ where: { id: orderId } });
     if (!order || order.buyerId !== req.adminId) {
       res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return;
+    }
+    // Hələ ödənilməyibsə və YIĞIM sifarişidirsə — birbaşa banka sorğu ilə yoxla və settle et.
+    // Beləcə webhook geciksə/gəlməsə də (sandbox), qayıtmada sifariş PAID olur.
+    if (order.paymentStatus !== 'PAID' && order.gatewayRef && order.gatewayProvider === 'yigim') {
+      try {
+        const { status } = await yigimStatus(order.gatewayRef);
+        await settleOrders({ gatewayRef: order.gatewayRef }, status, yigimPaid(status));
+        order = (await prisma.order.findUnique({ where: { id: orderId } })) || order;
+      } catch (e: any) { console.error('[payment/status verify]', e?.message); }
     }
     res.json({ success: true, paymentStatus: order.paymentStatus, gatewayStatus: order.gatewayStatus });
   } catch (error: any) {
