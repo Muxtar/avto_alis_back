@@ -622,8 +622,11 @@ router.post('/cart/checkout', requireType(BUYER_TYPES), async (req: AuthRequest,
         }
       }
 
-      // Yalnız checkout edilən (seçilmiş) məhsulları səbətdən sil — qalanları qalır.
-      await tx.cartItem.deleteMany({ where: { id: { in: cart.items.map((i) => i.id) } } });
+      // Səbətdən silmə: NAĞD/wallet dərhal (sifariş verildi). KART: ödəniş UĞURLU olanda
+      // (settleOrders-də) silinir — ödəniş uğursuz olsa məhsullar səbətdə qalıb təkrar alına bilər.
+      if (paymentMethod !== 'CARD') {
+        await tx.cartItem.deleteMany({ where: { id: { in: cart.items.map((i) => i.id) } } });
+      }
 
       return createdOrders;
     });
@@ -855,6 +858,20 @@ router.put('/orders/:id/status', adminAuth, async (req: AuthRequest, res: Respon
     // Satıcı təsdiqləyəndə Yango sifarişini avtomatik kuryerə göndər (best-effort).
     if (next === 'CONFIRMED' && order.deliveryType !== 'PICKUP' && order.deliveryMethod === 'COURIER' && !order.yangoClaimId && isYangoConfigured()) {
       dispatchOrderToYango(order.id).catch(() => {});
+    }
+
+    // ÖDƏNİLMİŞ sifariş ləğv edilirsə (satıcı fulfil edə bilmir) → alıcıya AVTOMATİK refund
+    // + stok bərpası. Pul artıq çəkilib, ona görə ləğvdə geri qaytarılmalıdır.
+    if (next === 'CANCELLED' && order.paymentStatus === 'PAID' && (order.gatewayRef || order.gatewayOrderId)) {
+      try {
+        await gatewayRefundOrder(order as any, order.total);
+        await prisma.order.update({ where: { id }, data: { paymentStatus: 'REFUNDED', gatewayStatus: 'Refunded' } });
+        if (order.stockCommitted) {
+          const its = await prisma.orderItem.findMany({ where: { orderId: id }, select: { listingId: true, quantity: true } });
+          for (const it of its) await prisma.listing.update({ where: { id: it.listingId }, data: { stock: { increment: it.quantity } } }).catch(() => {});
+        }
+        await prisma.notification.create({ data: { userId: order.buyerId, type: 'ORDER', title: `Sifariş #${order.id}`, body: 'Sifariş ləğv edildi — ödənişiniz geri qaytarıldı.', link: '/orders' } }).catch(() => {});
+      } catch (e: any) { console.error('[cancel refund]', e?.message); }
     }
 
     // Sifariş ləğv edildikdə referal komissiyasını ləğv et (ləğv olunan sifariş üçün komissiya ödənilmir).

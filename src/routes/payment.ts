@@ -38,6 +38,13 @@ async function settleOrders(where: { gatewayProvider?: string; gatewayRef?: stri
       for (const [buyerId, pts] of byBuyer) {
         try { await prisma.user.update({ where: { id: buyerId }, data: { loyaltyPoints: { increment: pts } } }); } catch { /* silinmiş */ }
       }
+      // Kart ödənişi uğurlu → alıcının səbətindən ödənilmiş məhsulları sil (uğurda təmizlənir).
+      for (const o of orders) {
+        try {
+          const c = await prisma.cart.findUnique({ where: { userId: o.buyerId }, select: { id: true } });
+          if (c) await prisma.cartItem.deleteMany({ where: { cartId: c.id, listingId: { in: o.items.map((it) => it.listingId) } } });
+        } catch { /* səbət yoxdur */ }
+      }
     }
   }
   // FAILED — kartda stok checkout-da azaldılmayıb, ona görə geri qaytarmağa ehtiyac
