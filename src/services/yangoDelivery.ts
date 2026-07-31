@@ -42,6 +42,9 @@ async function yreq<T = any>(
   const method = opts.method || 'POST';
   const qs = opts.query ? '?' + new URLSearchParams(opts.query).toString() : '';
   const url = `${BASE}${PATH}${endpoint}${qs}`;
+  // Timeout — Yango cavab verməzsə sorğu asılıb qalmasın (əks halda Railway 502 verir).
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15000);
   try {
     const res = await fetch(url, {
       method,
@@ -51,6 +54,7 @@ async function yreq<T = any>(
         'Accept-Language': LANG,
       },
       body: method === 'GET' ? undefined : JSON.stringify(opts.body ?? {}),
+      signal: controller.signal,
     });
     const text = await res.text();
     let data: any = null;
@@ -61,7 +65,10 @@ async function yreq<T = any>(
     }
     return { ok: true, status: res.status, data };
   } catch (e: any) {
-    return { ok: false, status: 0, data: null, error: e.message };
+    const error = e?.name === 'AbortError' ? 'Yango cavab vermədi (vaxt bitdi, 15s)' : (e?.message || 'Yango şəbəkə xətası');
+    return { ok: false, status: 0, data: null, error };
+  } finally {
+    clearTimeout(timer);
   }
 }
 
