@@ -29,7 +29,7 @@ const storage = multer.diskStorage({
 
 export const upload = multer({
   storage,
-  limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB to accommodate HEIC originals
+  limits: { fileSize: 25 * 1024 * 1024 }, // 25 MB — böyük/HEIC originalları qəbul et; server sharp ilə sıxır
   fileFilter: (_req, file, cb) => {
     // H21 fix: accept HEIC/HEIF (iPhone Camera Roll default format).
     // sharp can decode HEIC and processImages middleware will re-encode to JPEG.
