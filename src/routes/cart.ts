@@ -699,7 +699,7 @@ router.post('/cart/checkout', requireType(BUYER_TYPES), async (req: AuthRequest,
 router.get('/orders/buying', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
     const orders = await prisma.order.findMany({
-      where: { buyerId: req.adminId! },
+      where: { buyerId: req.adminId!, hiddenForBuyer: false },
       include: {
         items: true,
         seller: {
@@ -726,7 +726,7 @@ router.get('/orders/buying', adminAuth, async (req: AuthRequest, res: Response) 
 router.get('/orders/selling', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
     const orders = await prisma.order.findMany({
-      where: { sellerId: req.adminId! },
+      where: { sellerId: req.adminId!, hiddenForSeller: false },
       include: {
         items: true,
         buyer: { select: { id: true, name: true, phone: true } },
@@ -814,11 +814,15 @@ router.put('/orders/:id/status', adminAuth, async (req: AuthRequest, res: Respon
       res.status(400).json({ success: false, message: 'Yanlış status' }); return;
     }
     const order = await prisma.order.findUnique({ where: { id } });
-    if (!order || order.sellerId !== req.adminId) {
+    const isSeller = !!order && order.sellerId === req.adminId;
+    const isBuyer = !!order && order.buyerId === req.adminId;
+    if (!order || (!isSeller && !isBuyer)) {
       res.status(403).json({ success: false, message: 'İcazə yoxdur' });
       return;
     }
-    const allowed = ORDER_TRANSITIONS[order.status] || [];
+    // Satıcı bütün keçidləri edə bilər; alıcı yalnız: gözləyəni ləğv, göndərilən sifarişi "təhvil aldım".
+    const BUYER_TRANSITIONS: Record<string, string[]> = { PENDING: ['CANCELLED'], SHIPPED: ['DELIVERED'] };
+    const allowed = isSeller ? (ORDER_TRANSITIONS[order.status] || []) : (BUYER_TRANSITIONS[order.status] || []);
     if (!allowed.includes(next)) {
       res.status(400).json({
         success: false,
@@ -831,9 +835,9 @@ router.put('/orders/:id/status', adminAuth, async (req: AuthRequest, res: Respon
       res.status(400).json({ success: false, message: 'Ödəniş təsdiqlənməyib — sifarişi göndərmək olmaz' });
       return;
     }
-    // DELIVERED üçün təhvil kodu tələb olunur — alıcının verdiyi kod uyğun gəlməlidir
-    // (səhv adama / təkrar təhvilin qarşısını alır).
-    if (next === 'DELIVERED' && order.pickupCode) {
+    // DELIVERED üçün təhvil kodu YALNIZ satıcı təsdiqləyəndə tələb olunur (səhv adama təhvilin
+    // qarşısı). Alıcı özü "təhvil aldım" deyəndə kod lazım deyil — özü təsdiqləyir.
+    if (next === 'DELIVERED' && isSeller && order.pickupCode) {
       const provided = String(req.body?.code || '').trim().toUpperCase();
       if (provided !== order.pickupCode.toUpperCase()) {
         res.status(400).json({ success: false, message: 'Təhvil kodu yanlışdır. Alıcıdan kodu soruşun.' });
@@ -867,18 +871,39 @@ router.put('/orders/:id/status', adminAuth, async (req: AuthRequest, res: Respon
     };
     const label = statusLabels[next];
     if (label) {
+      // Statusu satıcı dəyişibsə alıcıya, alıcı dəyişibsə (təhvil aldım/ləğv) satıcıya bildir.
       await prisma.notification.create({
         data: {
-          userId: order.buyerId,
+          userId: isBuyer ? order.sellerId : order.buyerId,
           type: 'ORDER',
           title: `Sifariş #${order.id}`,
-          body: `Sifarişiniz ${label}.`,
+          body: isBuyer && next === 'DELIVERED' ? 'Alıcı sifarişi təhvil aldı.' : `Sifariş ${label}.`,
           link: '/orders',
         },
       });
     }
 
     res.json({ success: true, order: updated });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+// Sifarişi öz siyahından sil (soft-hide) — yalnız tamamlanmış/ləğv olunmuş sifarişlər.
+// Sifariş qarşı tərəf üçün qalır; yalnız silən şəxsin siyahısından gizlədilir.
+router.delete('/orders/:id', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (Number.isNaN(id)) { res.status(400).json({ success: false, message: 'Yanlış ID' }); return; }
+    const order = await prisma.order.findUnique({ where: { id }, select: { id: true, buyerId: true, sellerId: true, status: true } });
+    const isSeller = !!order && order.sellerId === req.adminId;
+    const isBuyer = !!order && order.buyerId === req.adminId;
+    if (!order || (!isSeller && !isBuyer)) { res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return; }
+    if (!['CANCELLED', 'DELIVERED'].includes(order.status)) {
+      res.status(400).json({ success: false, message: 'Yalnız tamamlanmış və ya ləğv olunmuş sifarişi silə bilərsiniz' }); return;
+    }
+    await prisma.order.update({ where: { id }, data: isBuyer ? { hiddenForBuyer: true } : { hiddenForSeller: true } });
+    res.json({ success: true });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }

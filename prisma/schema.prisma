@@ -597,6 +597,8 @@ model Order {
   referralAmount      Float? // hesablanmış komissiya məbləği
   referralVoided      Boolean         @default(false) // qaytarma/refund-da komissiya ləğv edilib
   stockRestored       Boolean         @default(false) // ödəniş uğursuz olduqda stok yalnız bir dəfə geri qaytarılır (idempotentlik)
+  hiddenForBuyer      Boolean         @default(false) // alıcı öz siyahısından gizlədib (sil)
+  hiddenForSeller     Boolean         @default(false) // satıcı öz siyahısından gizlədib (sil)
   stockCommitted      Boolean         @default(false) // KART: stok ödəniş təsdiqlənəndə (PAID) bir dəfə azaldılır (idempotentlik)
   // Canli takip icin
   latitude            Float?
