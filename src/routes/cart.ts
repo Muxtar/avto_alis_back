@@ -699,7 +699,9 @@ router.post('/cart/checkout', requireType(BUYER_TYPES), async (req: AuthRequest,
 router.get('/orders/buying', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
     const orders = await prisma.order.findMany({
-      where: { buyerId: req.adminId!, hiddenForBuyer: false },
+      // Ödənilməmiş KART sifarişi heç bir siyahıda görünmür — ödəniş uğursuzdursa sifariş
+      // sanki heç yaranmayıb (nə alıcı, nə satıcı görür). Nağd/wallet normal görünür.
+      where: { buyerId: req.adminId!, hiddenForBuyer: false, OR: [{ paymentMethod: { not: 'CARD' } }, { paymentStatus: 'PAID' }] },
       include: {
         items: true,
         seller: {
@@ -726,7 +728,8 @@ router.get('/orders/buying', adminAuth, async (req: AuthRequest, res: Response) 
 router.get('/orders/selling', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
     const orders = await prisma.order.findMany({
-      where: { sellerId: req.adminId!, hiddenForSeller: false },
+      // Ödənilməmiş KART sifarişi satıcıya da görünmür (uğursuz ödənişdə qəbul/rədd çıxmasın).
+      where: { sellerId: req.adminId!, hiddenForSeller: false, OR: [{ paymentMethod: { not: 'CARD' } }, { paymentStatus: 'PAID' }] },
       include: {
         items: true,
         buyer: { select: { id: true, name: true, phone: true } },

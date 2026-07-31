@@ -724,6 +724,8 @@ router.get('/me/businesses/:id/orders', adminAuth, async (req: AuthRequest, res:
     // Sifarişlər = içində bu biznesə/obyektə aid elan olan order-lər.
     const orders = await prisma.order.findMany({
       where: {
+        // Ödənilməmiş KART sifarişi görünmür (uğursuz ödənişdə sifariş yaranmamış sayılır).
+        OR: [{ paymentMethod: { not: 'CARD' } }, { paymentStatus: 'PAID' }],
         items: {
           some: {
             listing: objectId ? { businessObjectId: objectId } : { businessId },
