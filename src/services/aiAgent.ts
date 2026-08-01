@@ -13,7 +13,7 @@
 // Açar ANTHROPIC_API_KEY env-dən oxunur (kodda yoxdur).
 
 import Anthropic from '@anthropic-ai/sdk';
-import { PrismaClient } from '@prisma/client';
+import { PrismaClient, Prisma } from '@prisma/client';
 
 const prisma = new PrismaClient();
 
@@ -86,7 +86,7 @@ const TOOLS: Anthropic.Tool[] = [
   { name: 'my_referral_earnings', description: 'Referal qazancım.', input_schema: { type: 'object', properties: {} } },
   { name: 'my_profile', description: 'Profilim, təsdiq statusu, sadiqlik xalları.', input_schema: { type: 'object', properties: {} } },
   { name: 'object_reviews', description: 'Obyektin rəyləri + reytinq (5 ulduz, bəyən/bəyənmə %).', input_schema: { type: 'object', properties: { objectId: { type: 'number' } }, required: ['objectId'] } },
-  { name: 'find_user', description: 'Mesaj üçün istifadəçini ada görə tap (yalnız açıq: id, ad).', input_schema: { type: 'object', properties: { name: { type: 'string' } }, required: ['name'] } },
+  { name: 'find_user', description: 'Mesaj üçün istifadəçini tap — ƏVVƏLCƏ istifadəçinin öz KONTAKTLARINDA verdiyi ada görə (məs. "muxtar"), sonra profil adına görə. Nəticədə via=kontakt olan daha dəqiqdir.', input_schema: { type: 'object', properties: { name: { type: 'string' } }, required: ['name'] } },
 
   // ƏMƏL (təsdiq tələb edir)
   { name: 'send_message', description: 'İstifadəçiyə mesaj göndər (təsdiqli). Əvvəlcə find_user ilə toUserId tap.',
@@ -179,9 +179,30 @@ async function runReadTool(name: string, input: any, userId: number, token: stri
       return { count: items.length, items, total: items.reduce((s, i) => s + i.lineTotal, 0), currency: 'AZN' };
     }
     case 'find_user': {
-      const q = String(input.name || '').trim(); if (!q) return { count: 0, users: [] };
-      const rows = await prisma.user.findMany({ where: { name: { contains: q, mode: 'insensitive' }, id: { not: userId } }, select: { id: true, name: true, type: true }, take: 8 });
-      return { count: rows.length, users: rows };
+      const q = String(input.name || '').trim();
+      if (!q) return { count: 0, users: [] };
+      const results = new Map<number, { id: number; name: string; via: string }>();
+      // 1) İstifadəçinin öz KONTAKTLARINDA verdiyi ada görə tap (məs. "muxtar" kontaktda,
+      //    profil adı "muxtar bayramov" olsa belə). Kontakt son 9 rəqəmlə istifadəçiyə bağlanır.
+      const contacts = await prisma.contact.findMany({ where: { ownerId: userId, name: { contains: q, mode: 'insensitive' } }, take: 10 });
+      const keys = Array.from(new Set(contacts.map((c) => c.phoneDigits.replace(/\D/g, '').slice(-9)).filter((k) => k.length >= 7)));
+      if (keys.length) {
+        const matched = await prisma.$queryRaw<{ id: number; name: string; d9: string }[]>(
+          Prisma.sql`SELECT id, name, right(regexp_replace(phone, '[^0-9]', '', 'g'), 9) AS d9
+                     FROM "User"
+                     WHERE right(regexp_replace(phone, '[^0-9]', '', 'g'), 9) = ANY(${keys})
+                       AND type != 'COURIER' AND id != ${userId}`);
+        const byKey = new Map(matched.map((u) => [u.d9, u]));
+        for (const c of contacts) {
+          const u = byKey.get(c.phoneDigits.replace(/\D/g, '').slice(-9));
+          if (u) results.set(u.id, { id: u.id, name: c.name, via: 'kontakt' }); // istifadəçinin verdiyi ad
+        }
+      }
+      // 2) Profil adına görə (fallback).
+      const byName = await prisma.user.findMany({ where: { name: { contains: q, mode: 'insensitive' }, id: { not: userId } }, select: { id: true, name: true }, take: 8 });
+      for (const u of byName) if (!results.has(u.id)) results.set(u.id, { id: u.id, name: u.name, via: 'profil' });
+      const users = Array.from(results.values());
+      return { count: users.length, users };
     }
     // Mövcud GET endpoint-lərini daxili çağır (endpoint məntiqi təkrar yazılmır)
     case 'my_favorites': return getJson('/favorites', token);
