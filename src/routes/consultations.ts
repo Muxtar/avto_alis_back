@@ -184,6 +184,32 @@ router.get('/consultations/:id/messages', adminAuth, async (req: AuthRequest, re
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
 
+// Peşəkar sorğunu QƏBUL edir → alıcıya bildiriş, alıcı ödəyə bilər.
+router.post('/consultations/:id/accept', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const id = parseInt(String(req.params.id));
+    const s = await prisma.consultationSession.findUnique({ where: { id } });
+    if (!s || s.professionalId !== req.adminId) { res.status(404).json({ success: false, message: 'Tapılmadı' }); return; }
+    if (s.status !== 'REQUESTED') { res.status(400).json({ success: false, message: 'Yalnız yeni sorğunu qəbul etmək olar' }); return; }
+    const upd = await prisma.consultationSession.update({ where: { id }, data: { status: 'ACCEPTED' } });
+    await prisma.notification.create({ data: { userId: s.buyerId, type: 'CONSULTATION', title: 'Rəy sorğusu qəbul edildi ✓', body: `Peşəkar sorğunuzu qəbul etdi — ${s.price} AZN ödəyib başlaya bilərsiniz.`, link: `/consultations/${id}` } }).catch(() => {});
+    res.json({ success: true, session: publicSession(upd, req.adminId!) });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
+// Peşəkar sorğunu RƏDD edir → alıcıya bildiriş.
+router.post('/consultations/:id/reject', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const id = parseInt(String(req.params.id));
+    const s = await prisma.consultationSession.findUnique({ where: { id } });
+    if (!s || s.professionalId !== req.adminId) { res.status(404).json({ success: false, message: 'Tapılmadı' }); return; }
+    if (s.status !== 'REQUESTED') { res.status(400).json({ success: false, message: 'Yalnız yeni sorğunu rədd etmək olar' }); return; }
+    const upd = await prisma.consultationSession.update({ where: { id }, data: { status: 'REJECTED' } });
+    await prisma.notification.create({ data: { userId: s.buyerId, type: 'CONSULTATION', title: 'Rəy sorğusu rədd edildi', body: 'Peşəkar sorğunuzu qəbul etmədi.', link: `/consultations/${id}` } }).catch(() => {});
+    res.json({ success: true, session: publicSession(upd, req.adminId!) });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
 // Ödəniş başlat (alıcı) — seansı aktiv etmək üçün.
 router.post('/consultations/:id/pay', consultationLimiter, adminAuth, async (req: AuthRequest, res: Response) => {
   try {
@@ -193,6 +219,11 @@ router.post('/consultations/:id/pay', consultationLimiter, adminAuth, async (req
     const voen = await hasApprovedBusiness(s.professionalId);
     if (!voen) { res.status(400).json({ success: false, message: 'Peşəkar hələ VÖEN əlavə etməyib — ödəniş aktivləşə bilməz' }); return; }
     if (s.status === 'ACTIVE') { res.status(400).json({ success: false, message: 'Seans artıq aktivdir' }); return; }
+    // Ödəniş yalnız peşəkar sorğunu QƏBUL edəndən sonra (ACCEPTED) və ya vaxt artırmada (ENDED).
+    if (!['ACCEPTED', 'ENDED'].includes(s.status)) {
+      res.status(400).json({ success: false, message: s.status === 'REQUESTED' ? 'Peşəkar hələ sorğunu qəbul etməyib' : 'Bu mərhələdə ödəniş mümkün deyil' });
+      return;
+    }
 
     const reference = `RZ${s.id}-${Date.now()}`;
     const pay = await createGatewayPayment({

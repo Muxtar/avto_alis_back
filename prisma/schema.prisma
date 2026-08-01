@@ -1013,7 +1013,9 @@ model BusinessMember {
 
 // ── Rəy (peşəkar konsultasiyası) ──────────────────────────────────────────────
 enum ConsultationStatus {
-  REQUESTED // alıcı sorğu göndərib, ödəniş gözlənilir
+  REQUESTED // alıcı sorğu göndərib, peşəkarın QƏBULU gözlənilir
+  ACCEPTED // peşəkar qəbul etdi, alıcının ÖDƏNİŞİ gözlənilir
+  REJECTED // peşəkar rədd etdi
   PENDING_VOEN // peşəkarın VÖEN-i yoxdur → aktivləşə bilmir
   PAID // ödənilib, peşəkar başlatmağı gözləyir
   ACTIVE // sayğac işləyir
