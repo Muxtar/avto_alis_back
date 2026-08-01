@@ -230,6 +230,22 @@ export function initCallSignaling(httpServer: HttpServer, allowedOrigins: string
       socket.emit('groupcall:state', { conversationId: cid, active: ids.length > 0, count: ids.length, kind: groupCallKind.get(cid) || 'audio', participants });
     });
 
+    // Qrup zəngi zamanı bütün qrup üzvlərini (online/offline) göstərmək üçün roster.
+    // Üzvlərin hamısını qaytarır + hər birinin online vəziyyətini (isUserOnline).
+    socket.on('groupcall:roster', async (p: { conversationId: number }) => {
+      try {
+        const cid = parseInt(String(p?.conversationId));
+        if (!cid) return;
+        const members = await groupMemberIds(cid);
+        if (!members.includes(userId)) return;
+        const users = await prisma.user.findMany({ where: { id: { in: members } }, select: { id: true, name: true, avatar: true } });
+        socket.emit('groupcall:roster', {
+          conversationId: cid,
+          members: users.map((u) => ({ id: u.id, name: u.name, avatar: u.avatar, online: isUserOnline(u.id) })),
+        });
+      } catch { /* keç */ }
+    });
+
     // Qoşul — dəvəti (incoming) qəbul edən iştirakçı üçün: sadəcə mesh-ə qoşulur.
     socket.on('groupcall:join', async (p: { conversationId: number }) => {
       try {

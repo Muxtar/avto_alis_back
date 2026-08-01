@@ -214,6 +214,8 @@ model User {
   guestBookings Booking[]      @relation("GuestBookings")
   hostBookings  Booking[]      @relation("HostBookings")
   contacts      Contact[]      @relation("OwnContacts")
+  blockedUsers  BlockedUser[]  @relation("Blocker") // mənim bloklağım
+  blockedBy     BlockedUser[]  @relation("Blocked") // məni bloklayanlar
   notifications Notification[]
   sessions      Session[]      @relation("UserSessions")
 
@@ -1151,6 +1153,19 @@ model Contact {
 
   @@unique([ownerId, phoneDigits])
   @@index([ownerId])
+}
+
+// İstifadəçi blokları — blocker blocked-ı bloklayıb (mesaj göndərə bilməz).
+model BlockedUser {
+  id        Int      @id @default(autoincrement())
+  blockerId Int
+  blockedId Int
+  createdAt DateTime @default(now())
+  blocker   User     @relation("Blocker", fields: [blockerId], references: [id], onDelete: Cascade)
+  blocked   User     @relation("Blocked", fields: [blockedId], references: [id], onDelete: Cascade)
+
+  @@unique([blockerId, blockedId])
+  @@index([blockedId])
 }
 
 // Bağlı cihazlar — profilə daxil olan hər cihaz/sessiya (WhatsApp "linked devices" məntiqi).

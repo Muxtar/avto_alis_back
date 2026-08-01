@@ -114,6 +114,9 @@ router.post('/messages', messageLimiter, adminAuth, async (req: AuthRequest, res
         if (objContact && objContact !== req.adminId) receiver = objContact;
       }
     }
+    // Blok — hər hansı tərəf digərini bloklayıbsa mesaj göndərilə bilməz.
+    const blk = await prisma.blockedUser.findFirst({ where: { OR: [{ blockerId: receiver, blockedId: req.adminId! }, { blockerId: req.adminId!, blockedId: receiver }] }, select: { blockerId: true } });
+    if (blk) { res.status(403).json({ success: false, message: blk.blockerId === receiver ? 'Bu istifadəçi sizi bloklayıb' : 'Bu istifadəçini bloklamısınız — blokdan çıxarın' }); return; }
     const online = isUserOnline(receiver);
     const message = await prisma.message.create({
       data: {
@@ -453,6 +456,32 @@ router.get('/messages-unread', adminAuth, async (req: AuthRequest, res: Response
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }
+});
+
+// ── Blok ──────────────────────────────────────────────────────────────────
+// Bloklanmış istifadəçilərimin id-ləri.
+router.get('/me/blocked', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const rows = await prisma.blockedUser.findMany({ where: { blockerId: req.adminId! }, select: { blockedId: true } });
+    res.json({ success: true, blocked: rows.map((r) => r.blockedId) });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+// İstifadəçini blokla.
+router.post('/me/block/:userId', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const uid = parseInt(String(req.params.userId));
+    if (Number.isNaN(uid) || uid === req.adminId) { res.status(400).json({ success: false, message: 'Yanlış istifadəçi' }); return; }
+    await prisma.blockedUser.upsert({ where: { blockerId_blockedId: { blockerId: req.adminId!, blockedId: uid } }, create: { blockerId: req.adminId!, blockedId: uid }, update: {} });
+    res.json({ success: true });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+// Blokdan çıxar.
+router.delete('/me/block/:userId', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const uid = parseInt(String(req.params.userId));
+    await prisma.blockedUser.deleteMany({ where: { blockerId: req.adminId!, blockedId: uid } });
+    res.json({ success: true });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
 
 export default router;
