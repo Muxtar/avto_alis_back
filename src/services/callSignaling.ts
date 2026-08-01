@@ -13,11 +13,25 @@ const prisma = new PrismaClient();
 
 // Qrup zəngi iştirakçıları — conversationId -> aktiv userId dəsti (yaddaşda).
 const groupCalls = new Map<number, Set<number>>();
+// Aktiv qrup zənginin növü (audio/video) + tarixçə mesaj id-si — conversationId üzrə.
+const groupCallKind = new Map<number, 'audio' | 'video'>();
+const groupCallMsg = new Map<number, number>();
 // Bir qrup zəngində maksimum iştirakçı sayı (mesh WebRTC kiçik qruplar üçün).
 const MAX_GROUP_CALL = 5;
 async function groupMemberIds(conversationId: number): Promise<number[]> {
   const mems = await prisma.conversationMember.findMany({ where: { conversationId }, select: { userId: true } });
   return mems.map((m) => m.userId);
+}
+// Qrupun bütün üzvlərinə aktiv zəng vəziyyətini bildir (qrupu açan hər kəs "Qoşul" görsün).
+async function broadcastGroupCallState(cid: number) {
+  if (!ioRef) return;
+  const set = groupCalls.get(cid);
+  const ids = set ? Array.from(set) : [];
+  const kind = groupCallKind.get(cid) || 'audio';
+  const participants = ids.length ? await prisma.user.findMany({ where: { id: { in: ids } }, select: { id: true, name: true, avatar: true } }) : [];
+  const members = await groupMemberIds(cid);
+  const payload = { conversationId: cid, active: ids.length > 0, count: ids.length, kind, participants };
+  members.forEach((m) => ioRef!.to(`u:${m}`).emit('groupcall:state', payload));
 }
 
 // Routes-dan real-time push üçün ortaq io referansı (çat mesajları, oxundu və s.).
@@ -178,6 +192,7 @@ export function initCallSignaling(httpServer: HttpServer, allowedOrigins: string
       socket.emit('groupcall:participants', { conversationId: cid, participants: users });
       const me = await prisma.user.findUnique({ where: { id: userId }, select: { id: true, name: true, avatar: true } });
       existing.forEach((id) => io.to(`u:${id}`).emit('groupcall:peer-joined', { conversationId: cid, peer: me }));
+      await broadcastGroupCallState(cid); // qrupdakı hər kəs "Qoşul" bannerini görsün/yenilənsin
       return true;
     };
 
@@ -189,11 +204,30 @@ export function initCallSignaling(httpServer: HttpServer, allowedOrigins: string
         if (!cid) return;
         const members = await groupMemberIds(cid);
         if (!members.includes(userId)) return;
+        const wasEmpty = !(groupCalls.get(cid)?.size);
+        groupCallKind.set(cid, kind);
         if (!(await joinGroupRoom(cid))) return;
+        // Yeni zəng başlayanda tarixçə üçün CALL mesajı yarat (qrup söhbətində qalır).
+        if (wasEmpty) {
+          try {
+            const msg = await prisma.message.create({ data: { senderId: userId, conversationId: cid, type: 'CALL', callKind: kind, callStatus: 'ongoing', content: kind === 'video' ? 'Qrup görüntülü zəng' : 'Qrup səsli zəng' } as any });
+            groupCallMsg.set(cid, msg.id);
+          } catch { /* keç */ }
+        }
         const set = groupCalls.get(cid);
         const me = await prisma.user.findUnique({ where: { id: userId }, select: { id: true, name: true, avatar: true } });
         members.filter((m) => m !== userId && !set?.has(m)).forEach((m) => io.to(`u:${m}`).emit('groupcall:incoming', { conversationId: cid, kind, from: me }));
       } catch { /* keç */ }
+    });
+
+    // Status sorğusu — qrupu açan istifadəçi aktiv zəng olub-olmadığını öyrənir.
+    socket.on('groupcall:status', async (p: { conversationId: number }) => {
+      const cid = parseInt(String(p?.conversationId));
+      if (!cid) return;
+      const set = groupCalls.get(cid);
+      const ids = set ? Array.from(set) : [];
+      const participants = ids.length ? await prisma.user.findMany({ where: { id: { in: ids } }, select: { id: true, name: true, avatar: true } }) : [];
+      socket.emit('groupcall:state', { conversationId: cid, active: ids.length > 0, count: ids.length, kind: groupCallKind.get(cid) || 'audio', participants });
     });
 
     // Qoşul — dəvəti (incoming) qəbul edən iştirakçı üçün: sadəcə mesh-ə qoşulur.
@@ -214,20 +248,28 @@ export function initCallSignaling(httpServer: HttpServer, allowedOrigins: string
       if (to && p?.data) io.to(`u:${to}`).emit('groupcall:signal', { conversationId: cid, from: userId, data: p.data });
     });
 
-    // Çıx — digər iştirakçıları xəbərdar et.
-    const leaveGroupCall = (cid: number) => {
+    // Çıx — digər iştirakçıları xəbərdar et; zəng boşalanda tarixçəni bağla + broadcast.
+    const leaveGroupCall = async (cid: number) => {
       const set = groupCalls.get(cid);
       if (!set) return;
       if (set.delete(userId)) {
-        if (set.size === 0) groupCalls.delete(cid);
-        else set.forEach((id) => io.to(`u:${id}`).emit('groupcall:peer-left', { conversationId: cid, userId }));
+        if (set.size === 0) {
+          groupCalls.delete(cid);
+          groupCallKind.delete(cid);
+          // Tarixçə mesajını "bitdi" et.
+          const mid = groupCallMsg.get(cid);
+          if (mid) { groupCallMsg.delete(cid); await prisma.message.update({ where: { id: mid }, data: { callStatus: 'ended' } as any }).catch(() => {}); }
+        } else {
+          set.forEach((id) => io.to(`u:${id}`).emit('groupcall:peer-left', { conversationId: cid, userId }));
+        }
+        await broadcastGroupCallState(cid);
       }
     };
     socket.on('groupcall:leave', (p: { conversationId: number }) => { const cid = parseInt(String(p?.conversationId)); if (cid) leaveGroupCall(cid); });
 
     // Bağlantı kəsilsə bütün qrup zənglərindən çıxar.
     socket.on('disconnect', async () => {
-      for (const cid of Array.from(groupCalls.keys())) leaveGroupCall(cid);
+      for (const cid of Array.from(groupCalls.keys())) await leaveGroupCall(cid);
       // socket.io disconnect anında bu socket otaqdan çıxarılıb — başqa cihaz/tab
       // qalmayıbsa istifadəçi offline olur.
       if (isUserOnline(userId)) return;
