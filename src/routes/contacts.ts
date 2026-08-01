@@ -74,6 +74,26 @@ router.post('/me/contacts', contactLimiter, adminAuth, async (req: AuthRequest, 
   }
 });
 
+// Chat-dan kontakt əlavə et — söhbət etdiyin istifadəçini adı ilə saxla (WhatsApp üslubu).
+// Telefonu SERVER özü tapır (istifadəçi nömrəni bilməyə/görməyə ehtiyac yoxdur).
+router.post('/me/contacts/from-user', contactLimiter, adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const uid = parseInt(String(req.body.userId));
+    const name = String(req.body.name || '').trim().slice(0, 80);
+    if (Number.isNaN(uid)) { res.status(400).json({ success: false, message: 'userId tələb olunur' }); return; }
+    if (uid === req.adminId) { res.status(400).json({ success: false, message: 'Özünüzü əlavə edə bilməzsiniz' }); return; }
+    const target = await prisma.user.findUnique({ where: { id: uid }, select: { id: true, name: true, phone: true } });
+    if (!target) { res.status(404).json({ success: false, message: 'İstifadəçi tapılmadı' }); return; }
+    const pd = digits(target.phone);
+    if (pd.length < 7) { res.status(400).json({ success: false, message: 'Bu istifadəçini kontakta əlavə etmək mümkün deyil' }); return; }
+    const existing = await prisma.contact.findFirst({ where: { ownerId: req.adminId!, phoneDigits: pd } });
+    if (existing) { const [w] = await attachMatches([existing]); res.json({ success: true, contact: w, already: true }); return; }
+    const contact = await prisma.contact.create({ data: { ownerId: req.adminId!, name: name || target.name || 'Kontakt', phone: target.phone, phoneDigits: pd } });
+    const [withMatch] = await attachMatches([contact]);
+    res.status(201).json({ success: true, contact: withMatch });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
 // Toplu əlavə — gələcəkdə telefon kontaktlarının sinxronu üçün.
 // Mövcud nömrələr atlanır (idempotent), maksimum 500 kontakt / sorğu.
 router.post('/me/contacts/bulk', contactLimiter, adminAuth, async (req: AuthRequest, res: Response) => {
