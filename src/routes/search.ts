@@ -95,8 +95,8 @@ router.post('/search/web', webSearchLimiter, adminAuth, async (req: AuthRequest,
     if (!q) { res.status(400).json({ success: false, message: 'Axtarış mətni tələb olunur' }); return; }
 
     const data = await webSearch(q);
-    if (!data.ok) { res.status(422).json({ success: false, message: data.error || 'Nəticə tapılmadı' }); return; }
-    res.json({ success: true, summary: data.summary, results: data.results });
+    if (!data.ok) { res.status(422).json({ success: false, mode: data.mode, message: data.error || 'Nəticə tapılmadı' }); return; }
+    res.json({ success: true, mode: data.mode, summary: data.summary, results: data.results });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }

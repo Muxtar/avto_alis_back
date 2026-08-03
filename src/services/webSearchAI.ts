@@ -21,16 +21,20 @@ export interface WebResult {
   snippet: string;
   price: number | null;   // AZN — səhifədə görünürsə
   site: string;           // mənbə sayt (tap.az, turbo.az ...)
+  kind?: 'product' | 'social';  // məhsul elanı, yoxsa şəxsin sosial profili
+  platform?: string;      // social üçün: instagram/facebook/linkedin/tiktok/x/youtube/telegram
+  seller?: string | null; // məhsul üçün: satıcının adı (səhifədə görünürsə)
 }
 
 export interface WebSearchResponse {
   ok: boolean;
+  mode: 'product' | 'person';  // sorğu məhsul, yoxsa şəxs axtarışıdır
   summary: string;      // qısa Azərbaycanca xülasə
   results: WebResult[];
   error?: string;
 }
 
-const EMPTY: WebSearchResponse = { ok: false, summary: '', results: [] };
+const EMPTY: WebSearchResponse = { ok: false, mode: 'product', summary: '', results: [] };
 
 const AI_MODEL = process.env.WEB_SEARCH_MODEL || 'claude-opus-4-8';
 
@@ -103,6 +107,62 @@ export function isSocialResult(url: string): boolean {
   } catch {
     return false;
   }
+}
+
+// URL-dən sosial platformanın adını çıxarır (instagram, facebook, linkedin ...).
+export function socialPlatform(url: string): string {
+  try {
+    const host = new URL(url).hostname.toLowerCase().replace(/^www\./, '');
+    if (host.includes('instagram')) return 'instagram';
+    if (host.includes('facebook') || host === 'fb.com') return 'facebook';
+    if (host.includes('linkedin')) return 'linkedin';
+    if (host.includes('tiktok')) return 'tiktok';
+    if (host.includes('youtube')) return 'youtube';
+    if (host === 'x.com' || host.includes('twitter')) return 'x';
+    if (host.includes('t.me') || host.includes('telegram')) return 'telegram';
+    return host;
+  } catch { return ''; }
+}
+
+// ── Şəxs (ad-soyad) axtarışı tanıma ──────────────────────────────────────────
+// İstifadəçi "muxtar bayramov" kimi ad-soyad yazanda → şəxs axtarışı (public
+// sosial media profilləri). Məhsul/brend/kateqoriya sözü varsa → məhsul axtarışı.
+// Brend+model (məs. "toyota corolla") şəxs kimi qəbul olunmasın deyə brend/kateqoriya
+// stop-siyahısı saxlanır — hər hansı söz bu siyahıdadırsa, sorğu MƏHSULdur.
+const PRODUCT_STOPWORDS = new Set([
+  // Kateqoriya / ümumi sözlər
+  'telefon', 'noutbuk', 'notebook', 'kompüter', 'komputer', 'planşet', 'planset', 'televizor',
+  'maşın', 'masin', 'avtomobil', 'moto', 'motosiklet', 'velosiped', 'ev', 'mənzil', 'menzil',
+  'torpaq', 'bağ', 'bag', 'obyekt', 'ofis', 'kirayə', 'kiraye', 'satılır', 'satilir', 'alınır',
+  'çanta', 'canta', 'ayaqqabı', 'ayaqqabi', 'geyim', 'saat', 'qol', 'üzük', 'uzuk', 'sırğa',
+  'köynək', 'koynek', 'kostyum', 'palto', 'kurtka', 'şalvar', 'salvar', 'don', 'yubka',
+  'divan', 'çarpayı', 'carpayi', 'stol', 'stul', 'şkaf', 'skaf', 'soyuducu', 'paltaryuyan',
+  'kondisioner', 'qaz', 'plita', 'mikrodalğa', 'tozsoran', 'ütü', 'utu', 'qulaqlıq', 'qulaqlıq',
+  'kamera', 'obyektiv', 'dron', 'konsol', 'oyun', 'kitab', 'velosped', 'skuter', 'təkər', 'teker',
+  'ehtiyat', 'hissə', 'hisse', 'disk', 'akkumulyator', 'şin', 'sin', 'yağ', 'yag',
+  // Elektronika brendləri
+  'iphone', 'ipad', 'macbook', 'samsung', 'galaxy', 'xiaomi', 'redmi', 'huawei', 'honor', 'oppo',
+  'vivo', 'realme', 'nokia', 'sony', 'lg', 'apple', 'lenovo', 'asus', 'acer', 'hp', 'dell', 'msi',
+  'playstation', 'xbox', 'nintendo', 'canon', 'nikon', 'gopro', 'dji', 'bose', 'jbl', 'beats',
+  // Avtomobil brendləri
+  'bmw', 'mercedes', 'benz', 'audi', 'toyota', 'lexus', 'honda', 'nissan', 'hyundai', 'kia',
+  'ford', 'chevrolet', 'opel', 'volkswagen', 'vw', 'skoda', 'renault', 'peugeot', 'fiat', 'mazda',
+  'mitsubishi', 'subaru', 'volvo', 'jeep', 'land', 'range', 'rover', 'porsche', 'jaguar', 'tesla',
+  'lada', 'vaz', 'gaz', 'uaz', 'chery', 'geely', 'byd', 'infiniti', 'acura', 'cadillac', 'dodge',
+]);
+
+// Sorğu şəxs adına bənzəyirsə true. 2-3 sözlük, yalnız hərflərdən ibarət,
+// rəqəmsiz, məhsul/brend sözü olmayan sorğular şəxs sayılır.
+export function looksLikePerson(query: string): boolean {
+  const q = query.trim().toLowerCase();
+  if (/\d/.test(q)) return false;                       // rəqəm varsa məhsuldur (model, il)
+  const words = q.split(/\s+/).filter(Boolean);
+  if (words.length < 2 || words.length > 3) return false;
+  // Yalnız Azərbaycan/Latın hərfləri (defis, apostrof olar).
+  const onlyLetters = words.every((w) => /^[a-zâçəğıöşüi̇'’-]{2,}$/i.test(w));
+  if (!onlyLetters) return false;
+  if (words.some((w) => PRODUCT_STOPWORDS.has(w))) return false;  // brend/kateqoriya → məhsul
+  return true;
 }
 
 // Azərbaycanla əlaqəsi olmayan qlobal pazarlar — alət səviyyəsində bağlanır.
@@ -228,11 +288,82 @@ export async function webSearch(query: string): Promise<WebSearchResponse> {
   return data;
 }
 
-// Keşsiz əsl axtarış — TAVILY_API_KEY varsa Tavily, yoxsa köhnə Claude yolu.
+// Keşsiz əsl axtarış — əvvəlcə sorğu tipini müəyyən edirik (şəxs, yoxsa məhsul).
 async function webSearchUncached(q: string): Promise<WebSearchResponse> {
+  // Şəxs adına bənzəyirsə → sosial media profilləri axtar (yalnız Tavily ilə;
+  // Claude web_search yolu şəxs axtarışını dəstəkləmir, məhsul üçün qalır).
+  if (looksLikePerson(q) && process.env.TAVILY_API_KEY) return webSearchPerson(q);
   if (process.env.TAVILY_API_KEY) return webSearchTavily(q);
   if (process.env.ANTHROPIC_API_KEY) return webSearchClaude(q);
   return { ...EMPTY, error: 'İnternet axtarışı konfiqurasiya edilməyib.' };
+}
+
+// ── Şəxs axtarışı (public sosial media profilləri) ───────────────────────────
+// "muxtar bayramov" kimi ad yazılanda Google-vari — həmin şəxsə aid AÇIQ sosial
+// media hesablarını (instagram/facebook/linkedin/tiktok/x/youtube/telegram) tapır.
+// YALNIZ public profil LİNKİ göstərilir — telefon/email/ünvan SCRAPE OLUNMUR.
+async function webSearchPerson(q: string): Promise<WebSearchResponse> {
+  console.log('[webSearch] şəxs axtarışı — sorğu:', q);
+  let data: any;
+  try {
+    const resp = await fetch(TAVILY_URL, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${process.env.TAVILY_API_KEY}` },
+      body: JSON.stringify({
+        // Sosial platformalarda adı axtar — profil linkləri gəlsin.
+        query: `${q} Azərbaycan instagram OR facebook OR linkedin OR tiktok`,
+        search_depth: 'basic',
+        topic: 'general',
+        max_results: 12,
+        include_answer: false,
+        include_domains: SOCIAL_DOMAINS,   // yalnız sosial media nəticələri
+      }),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!resp.ok) {
+      const body = await resp.text().catch(() => '');
+      console.error('[webSearch] şəxs Tavily HTTP', resp.status, body.slice(0, 200));
+      const msg = resp.status === 401 || resp.status === 403 ? 'Axtarış açarı etibarsızdır.'
+        : resp.status === 429 ? 'Axtarış limiti doldu, bir azdan yenidən cəhd edin.'
+        : 'İnternet axtarışı alınmadı. Yenidən cəhd edin.';
+      return { ...EMPTY, mode: 'person', error: msg };
+    }
+    data = await resp.json();
+  } catch (e: any) {
+    console.error('[webSearch] şəxs Tavily xəta:', e?.name, e?.message);
+    return { ...EMPTY, mode: 'person', error: 'İnternet axtarışı alınmadı. Yenidən cəhd edin.' };
+  }
+
+  const raw: any[] = Array.isArray(data?.results) ? data.results : [];
+  // Yalnız sosial profil linkləri. Hər platformadan ilk (ən uyğun) nəticə —
+  // eyni platformadan çoxlu link göstərmirik (profil + postlar qarışmasın).
+  const seen = new Set<string>();
+  const results: WebResult[] = [];
+  for (const r of raw) {
+    if (!r || typeof r.url !== 'string' || !/^https?:\/\//i.test(r.url) || !isSocialResult(r.url)) continue;
+    const platform = socialPlatform(r.url);
+    if (!platform || seen.has(platform)) continue;
+    seen.add(platform);
+    let site = '';
+    try { site = new URL(r.url).hostname.replace(/^www\./, ''); } catch {}
+    results.push({
+      title: String(r.title || q).slice(0, 120),
+      url: String(r.url),
+      snippet: String(r.content || '').slice(0, 120),
+      price: null,
+      site: site.slice(0, 60),
+      kind: 'social',
+      platform,
+    });
+  }
+
+  console.log('[webSearch] şəxs sorğu:', q, '| xam:', raw.length, '| profil:', results.length);
+  return {
+    ok: true,
+    mode: 'person',
+    summary: results.length ? '' : `"${q}" üçün açıq sosial media hesabı tapılmadı.`,
+    results,
+  };
 }
 
 // ── Tavily yolu (əsas) ───────────────────────────────────────────────────────
@@ -249,6 +380,16 @@ function extractPriceAzn(text: string): number | null {
     m[1].replace(/[^\d.,]/g, '').replace(/[.\s](?=\d{3}\b)/g, '').replace(',', '.'),
   );
   return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+// Snippet/məzmundan satıcı adını çıxaran ehtiyat regex (səhifədə açıq yazılıbsa).
+// Tapılmasa null — uydurmuruq. Yalnız "Satıcı: X" / "Seller: X" formatları.
+function extractSeller(text: string): string | null {
+  if (!text) return null;
+  const m = text.match(/(?:satıcı|satici|seller|elan[çc]ı|elanci|müəllif|muellif)\s*[:\-–]\s*([A-Za-zÂÇƏĞIİÖŞÜâçəğıöşü.\s]{2,40})/i);
+  if (!m) return null;
+  const name = m[1].trim().replace(/\s{2,}/g, ' ').replace(/[.,;]+$/, '');
+  return name.length >= 2 ? name.slice(0, 40) : null;
 }
 
 async function webSearchTavily(q: string): Promise<WebSearchResponse> {
@@ -299,14 +440,16 @@ async function webSearchTavily(q: string): Promise<WebSearchResponse> {
     console.warn('[webSearch] Tavily: nəticələr AZ filtrindən keçmədi — sorğu:', q);
     return {
       ok: true,
+      mode: 'product',
       summary: 'Nəticələr tapıldı, amma Azərbaycana aid olmadığı üçün göstərilmədi.',
       results: [],
     };
   }
-  if (azResults.length === 0) return { ok: true, summary: '', results: [] };
+  if (azResults.length === 0) return { ok: true, mode: 'product', summary: '', results: [] };
 
-  // Yalnız linklər (title + url + site + varsa qiymət). Xülasə/AI təmizləmə YOXDUR
-  // — istifadəçi sadəcə ən uyğun linkləri istəyir, kredit qənaəti üçün Haiku çağırılmır.
+  // Yalnız linklər (title + url + site + varsa qiymət + varsa satıcı). Xülasə/AI
+  // təmizləmə YOXDUR — istifadəçi ən uyğun linkləri istəyir, kredit qənaəti üçün
+  // Haiku çağırılmır.
   let items: WebResult[] = azResults.slice(0, 8).map((r) => {
     let site = '';
     try { site = new URL(r.url).hostname.replace(/^www\./, ''); } catch {}
@@ -317,6 +460,8 @@ async function webSearchTavily(q: string): Promise<WebSearchResponse> {
       snippet: content.slice(0, 120),   // qısa izah (1 sətir)
       price: extractPriceAzn(`${content} ${r.title || ''}`),
       site: site.slice(0, 60),
+      kind: 'product' as const,
+      seller: extractSeller(`${content} ${r.title || ''}`),
     };
   });
 
@@ -331,7 +476,7 @@ async function webSearchTavily(q: string): Promise<WebSearchResponse> {
 
   console.log('[webSearch] Tavily sorğu:', q, '| xam:', rawResults.length,
     '| AZ:', azResults.length, '| göstərilən:', items.length);
-  return { ok: true, summary: '', results: items };
+  return { ok: true, mode: 'product', summary: '', results: items };
 }
 
 // ── Claude yolu (ehtiyat — Tavily açarı yoxdursa) ─────────────────────────────
@@ -465,6 +610,7 @@ async function webSearchClaude(q: string): Promise<WebSearchResponse> {
       '| atılan:', raw.map((r: any) => r?.url).filter(Boolean).join(', ').slice(0, 300));
     return {
       ok: true,
+      mode: 'product',
       summary: 'Nəticələr tapıldı, amma Azərbaycana aid olmadığı üçün göstərilmədi.',
       results: [],
     };
@@ -474,10 +620,11 @@ async function webSearchClaude(q: string): Promise<WebSearchResponse> {
 
   // Nəticə yoxdursa modelin öz izahını (məs. "limit aşıldı") istifadəçiyə
   // göstərmirik — qarışıq və narahatedicidir. Sadə mesaj kifayətdir.
-  if (results.length === 0) return { ok: true, summary: '', results: [] };
+  if (results.length === 0) return { ok: true, mode: 'product', summary: '', results: [] };
 
   return {
     ok: true,
+    mode: 'product',
     summary: typeof parsed.summary === 'string' ? parsed.summary.slice(0, 400) : '',
     results,
   };
