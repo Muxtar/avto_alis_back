@@ -29,6 +29,12 @@ router.post('/search/image', imageSearchLimiter, adminAuth, upload.single('image
       res.status(400).json({ success: false, message: 'Şəkil tələb olunur' });
       return;
     }
+    // Admin "şəkillə axtarış" AI flag-ı deaktivdirsə xüsusiyyət bağlıdır.
+    if (!(await resolveFlag('ai_vision_search'))) {
+      fs.promises.unlink(file.path).catch(() => undefined);
+      res.status(503).json({ success: false, message: 'Şəkillə axtarış hazırda deaktivdir' });
+      return;
+    }
     // After processImages middleware, the file has been re-encoded to JPEG
     // at max 1280px. Read it back and base64-encode for the vision model.
     const buffer = await fs.promises.readFile(file.path);

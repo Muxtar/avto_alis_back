@@ -14,6 +14,7 @@
 //   WEB_SEARCH_REFINE_MODEL — default 'claude-haiku-4-5'
 
 import Anthropic from '@anthropic-ai/sdk';
+import { resolveFlag } from './settings';
 
 export interface WebResult {
   title: string;
@@ -289,13 +290,29 @@ export async function webSearch(query: string): Promise<WebSearchResponse> {
 }
 
 // Keşsiz əsl axtarış — əvvəlcə sorğu tipini müəyyən edirik (şəxs, yoxsa məhsul).
+// Hər motor ayrıca admin flag-ı ilə idarə olunur (admin/ai panelindən aç/söndür):
+//   ai_websearch_tavily  — məhsul üçün əsas Tavily motoru
+//   ai_websearch_claude  — məhsul üçün Claude ehtiyat motoru
+//   ai_person_search     — şəxs (sosial media) axtarışı (Tavily)
 async function webSearchUncached(q: string): Promise<WebSearchResponse> {
-  // Şəxs adına bənzəyirsə → sosial media profilləri axtar (yalnız Tavily ilə;
-  // Claude web_search yolu şəxs axtarışını dəstəkləmir, məhsul üçün qalır).
-  if (looksLikePerson(q) && process.env.TAVILY_API_KEY) return webSearchPerson(q);
-  if (process.env.TAVILY_API_KEY) return webSearchTavily(q);
-  if (process.env.ANTHROPIC_API_KEY) return webSearchClaude(q);
-  return { ...EMPTY, error: 'İnternet axtarışı konfiqurasiya edilməyib.' };
+  const [tavilyOn, claudeOn, personOn] = await Promise.all([
+    resolveFlag('ai_websearch_tavily'),
+    resolveFlag('ai_websearch_claude'),
+    resolveFlag('ai_person_search'),
+  ]);
+  const hasTavily = !!process.env.TAVILY_API_KEY;
+  const hasClaude = !!process.env.ANTHROPIC_API_KEY;
+
+  // ── Şəxs axtarışı — yalnız flag aktiv + Tavily açarı + Tavily motoru aktiv ──
+  if (looksLikePerson(q)) {
+    if (personOn && tavilyOn && hasTavily) return webSearchPerson(q);
+    return { ok: true, mode: 'person', summary: '', results: [] };  // deaktiv → boş
+  }
+
+  // ── Məhsul — əvvəlcə Tavily (aktivsə), sonra Claude ehtiyat (aktivsə) ──
+  if (tavilyOn && hasTavily) return webSearchTavily(q);
+  if (claudeOn && hasClaude) return webSearchClaude(q);
+  return { ...EMPTY, error: 'İnternet axtarışı hazırda deaktivdir.' };
 }
 
 // ── Şəxs axtarışı (public sosial media profilləri) ───────────────────────────

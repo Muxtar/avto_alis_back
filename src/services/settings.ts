@@ -7,7 +7,7 @@ const prisma = new PrismaClient();
 
 // ── Flag kataloqu ──
 // Admin paneldə göstərilən açarlar. Hər biri gerçək olaraq kodda tətbiq olunur.
-export type FlagSection = 'production' | 'developer';
+export type FlagSection = 'production' | 'developer' | 'ai';
 export interface FlagDef {
   key: string;
   section: FlagSection;
@@ -35,9 +35,66 @@ export const FLAGS: FlagDef[] = [
   },
   {
     key: 'internet_search',
-    section: 'production',
-    label: 'İnternet axtarışı (Claude)',
-    description: 'Saytda nəticə tapılmayanda internetdən (Claude web search) axtarış. Deaktiv edilsə internet nəticələri göstərilmir.',
+    section: 'ai',
+    label: 'İnternet axtarışı — ƏSAS açar',
+    description: 'Bütün internet axtarışının master açarı. Deaktiv edilsə heç bir internet nəticəsi göstərilmir (aşağıdakı motorlardan asılı olmayaraq). İstifadə: başlıqdakı axtarış çubuğu.',
+    default: true,
+  },
+  // ── Süni intellekt motorları — hər biri ayrıca söndürülə bilər ──
+  {
+    key: 'ai_websearch_tavily',
+    section: 'ai',
+    label: 'İnternet axtarışı — Tavily motoru',
+    description: 'Məhsul axtarışının ƏSAS motoru (Tavily). Deaktiv edilsə məhsul üçün internet axtarışı Claude ehtiyat motoruna keçir (o da deaktivdirsə heç nə). İstifadə: başlıqdakı axtarış — məhsul.',
+    default: true,
+  },
+  {
+    key: 'ai_websearch_claude',
+    section: 'ai',
+    label: 'İnternet axtarışı — Claude ehtiyat motoru',
+    description: 'Tavily olmadıqda/deaktiv olduqda işə düşən ehtiyat motor (Claude web_search). Deaktiv edilsə ehtiyat motor işləmir. İstifadə: başlıqdakı axtarış — məhsul.',
+    default: true,
+  },
+  {
+    key: 'ai_person_search',
+    section: 'ai',
+    label: 'Şəxs axtarışı (sosial media)',
+    description: 'Ad-soyad yazılanda həmin şəxsin açıq sosial media hesablarını tapır (Tavily). Deaktiv edilsə şəxs axtarışı işləmir. İstifadə: başlıqdakı axtarış — ad-soyad.',
+    default: true,
+  },
+  {
+    key: 'ai_assistant',
+    section: 'ai',
+    label: 'AI köməkçi (söhbət botu)',
+    description: 'Saytdakı süni intellekt köməkçisi (Claude — Sonnet/Opus). Deaktiv edilsə köməkçi cavab vermir. İstifadə: AI söhbət pəncərəsi.',
+    default: true,
+  },
+  {
+    key: 'ai_assistant_opus',
+    section: 'ai',
+    label: 'AI köməkçi — mürəkkəb suallarda Opus',
+    description: 'Aktiv: mürəkkəb suallarda daha güclü (bahalı) Opus modeli. Deaktiv: həmişə daha ucuz Sonnet. İstifadə: AI köməkçi.',
+    default: true,
+  },
+  {
+    key: 'ai_vision_search',
+    section: 'ai',
+    label: 'Şəkillə axtarış (görüntü AI)',
+    description: 'Şəkil yüklənəndə məhsulu tanıyıb axtarış sorğusuna çevirir (Claude vision). Deaktiv edilsə şəkillə axtarış işləmir. İstifadə: axtarış çubuğundakı kamera düyməsi.',
+    default: true,
+  },
+  {
+    key: 'ai_identity',
+    section: 'ai',
+    label: 'Kimlik doğrulaması (KYC — Claude)',
+    description: 'Şəxsiyyət vəsiqəsi + selfi ilə avtomatik kimlik yoxlaması (Claude vision). Deaktiv edilsə admin əl ilə yoxlayır. İstifadə: profil təsdiqi / KYC.',
+    default: true,
+  },
+  {
+    key: 'ai_business_docs',
+    section: 'ai',
+    label: 'Biznes/VÖEN sənəd analizi (Claude)',
+    description: 'VÖEN/etibarnamə/bank sənədlərini avtomatik yoxlayıb məlumat çıxarır (Claude). Deaktiv edilsə admin əl ilə yoxlayır. İstifadə: biznes təsdiqi.',
     default: true,
   },
 ];

@@ -8,6 +8,7 @@
 
 import Anthropic from '@anthropic-ai/sdk';
 import fs from 'fs';
+import { resolveFlag } from './settings';
 
 export interface CredentialAnalysis {
   ok: boolean;                 // analiz uğurla tamamlandı?
@@ -93,6 +94,7 @@ export async function extractBusinessInfo(docPath: string): Promise<BusinessInfo
   const EMPTY: BusinessInfoResult = { ok: false, companyName: null, voen: null, ownerName: null, founderName: null };
   const ai = getClient();
   if (!ai) return { ...EMPTY, error: 'AI açarı qoyulmayıb.' };
+  if (!(await resolveFlag('ai_business_docs'))) return { ...EMPTY, error: 'Biznes sənəd AI-ı deaktivdir — admin əl ilə yoxlayacaq.' };
 
   let block: any;
   try { block = await fileToContentBlock(docPath); }
@@ -141,6 +143,7 @@ export async function analyzeCredential(
   if (!ai) {
     return { ...EMPTY, error: 'AI açarı (ANTHROPIC_API_KEY) qoyulmayıb — admin əl ilə yoxlayacaq.' };
   }
+  if (!(await resolveFlag('ai_identity'))) return { ...EMPTY, error: 'Kimlik/ixtisas AI-ı deaktivdir — admin əl ilə yoxlayacaq.' };
 
   let base64: string;
   try {
@@ -253,6 +256,7 @@ export async function extractIdName(idCardPath: string): Promise<IdNameResult> {
   const EMPTY: IdNameResult = { ok: false, fullName: null, firstName: null, lastName: null, birthDate: null, gender: null, idNumber: null };
   const ai = getClient();
   if (!ai) return { ...EMPTY, error: 'AI açarı qoyulmayıb.' };
+  if (!(await resolveFlag('ai_identity'))) return { ...EMPTY, error: 'Kimlik AI-ı deaktivdir — admin əl ilə yoxlayacaq.' };
 
   let b64: string;
   try { b64 = (await fs.promises.readFile(idCardPath)).toString('base64'); }
@@ -343,6 +347,7 @@ export async function verifyIdentityAI(
 ): Promise<IdentityAnalysis> {
   const ai = getClient();
   if (!ai) return { ...EMPTY_ID, error: 'AI açarı (ANTHROPIC_API_KEY) qoyulmayıb — admin əl ilə yoxlayacaq.' };
+  if (!(await resolveFlag('ai_identity'))) return { ...EMPTY_ID, error: 'Kimlik AI-ı deaktivdir — admin əl ilə yoxlayacaq.' };
 
   let idB64: string, selfieB64: string;
   try {
@@ -482,6 +487,7 @@ export async function verifyBusinessAI(
 ): Promise<BusinessAnalysis> {
   const ai = getClient();
   if (!ai) return { ...EMPTY_BIZ, error: 'AI açarı (ANTHROPIC_API_KEY) qoyulmayıb — admin əl ilə yoxlayacaq.' };
+  if (!(await resolveFlag('ai_business_docs'))) return { ...EMPTY_BIZ, error: 'Biznes sənəd AI-ı deaktivdir — admin əl ilə yoxlayacaq.' };
   if (!docs.length) return { ...EMPTY_BIZ, error: 'Yoxlanacaq sənəd yoxdur.' };
 
   let blocks: any[];
@@ -579,6 +585,7 @@ function normalizeIban(s: string): string | null {
 export async function extractBankAccounts(bankDocPath: string): Promise<BankDocAnalysis> {
   const ai = getClient();
   if (!ai) return { ok: false, accounts: [], documentValid: false, reason: '', error: 'AI açarı qoyulmayıb — admin əl ilə yoxlayacaq.' };
+  if (!(await resolveFlag('ai_business_docs'))) return { ok: false, accounts: [], documentValid: false, reason: '', error: 'Biznes sənəd AI-ı deaktivdir — admin əl ilə yoxlayacaq.' };
 
   let block: any;
   try { block = await fileToContentBlock(bankDocPath); }

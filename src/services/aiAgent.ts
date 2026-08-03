@@ -14,6 +14,7 @@
 
 import Anthropic from '@anthropic-ai/sdk';
 import { PrismaClient, Prisma } from '@prisma/client';
+import { resolveFlag } from './settings';
 
 const prisma = new PrismaClient();
 
@@ -40,15 +41,16 @@ export interface PendingAction { type: string; endpoint: string; method: string;
 
 // Sadə/mürəkkəb model seçimi (hibrid). Mürəkkəb əlamətləri: uzun mətn, çox sual,
 // müqayisə/analiz/planlama sözləri.
-function pickModel(history: ChatTurn[]): string {
+// allowOpus=false olduqda (admin flag deaktiv) mürəkkəb sual olsa belə Sonnet işlədilir.
+function pickModel(history: ChatTurn[], allowOpus: boolean): string {
   const last = [...history].reverse().find((t) => t.role === 'user')?.content || '';
   // Mürəkkəb əlamətlər → Opus; əks halda (sadə əmr/sadə API) → Sonnet.
   const kw = /(müqayis|analiz|hesabla|ən yaxşı|ən uyğun|planla|strategiya|optimal|niyə|izah et|tövsiyə|həm .*həm|ucuzdan bahaya|bahadan ucuza|sonra|əvvəlcə|hamısını|bütün .*(elan|sifariş|məhsul)|filtr|analitik|hesabat)/i;
   // Çox əməl/çox söz (məs. "tap VƏ səbətə at VƏ mesaj yaz") da mürəkkəbdir.
   const multiStep = ((last.match(/\b(və|sonra|həmçinin|then|and)\b/gi) || []).length >= 2);
-  const complex = last.length > 200 || (last.match(/\?/g) || []).length >= 2 || multiStep || kw.test(last);
+  const complex = allowOpus && (last.length > 200 || (last.match(/\?/g) || []).length >= 2 || multiStep || kw.test(last));
   const model = complex ? MODEL_COMPLEX : MODEL_SIMPLE;
-  console.log(`[aiAgent] model=${model} (${complex ? 'mürəkkəb→Opus' : 'sadə→Sonnet'})`);
+  console.log(`[aiAgent] model=${model} (${complex ? 'mürəkkəb→Opus' : 'sadə→Sonnet'}${allowOpus ? '' : ', Opus flag deaktiv'})`);
   return model;
 }
 
@@ -291,7 +293,9 @@ export async function runAgent(userId: number, token: string, history: ChatTurn[
   const ai = getClient();
   if (!ai) return { reply: 'AI köməkçi hazırda əlçatan deyil (konfiqurasiya yoxdur).', pendingAction: null };
 
-  let model = pickModel(history);
+  // Admin "mürəkkəb suallarda Opus" flag-ı deaktivdirsə həmişə Sonnet.
+  const allowOpus = await resolveFlag('ai_assistant_opus');
+  let model = pickModel(history, allowOpus);
   const messages: Anthropic.MessageParam[] = history.filter((t) => t.content?.trim()).map((t) => ({ role: t.role, content: t.content }));
   let pendingAction: PendingAction | null = null;
   let triedFallback = false;

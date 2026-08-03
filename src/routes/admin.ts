@@ -167,6 +167,39 @@ router.get('/admin/dashboard', requireAdmin, async (_req: AuthRequest, res: Resp
   }
 });
 
+// ── Süni intellekt idarəetməsi — hansı AI harada aktivdir + ayrıca aç/söndür ──
+// Bütün AI motorları 'ai' bölməsindəki flag-larla idarə olunur (settings.ts).
+// Ayrıca 'ai' icazə moduluna bağlıdır (super-admin və ya icazə verilən admin).
+router.get('/admin/ai', requirePermission('ai'), async (_req: AuthRequest, res: Response) => {
+  try {
+    const flags = (await listFlags()).filter((f) => f.section === 'ai');
+    // Env açarlarının mövcudluğu — açar yoxdursa flag aktiv olsa belə işləməz;
+    // panel bunu göstərsin ki, "aça bilmirəm" qarışıqlığı olmasın.
+    const env = {
+      anthropic: !!process.env.ANTHROPIC_API_KEY,   // Claude (köməkçi, vision, KYC, ehtiyat axtarış)
+      tavily: !!process.env.TAVILY_API_KEY,          // Tavily (məhsul + şəxs axtarışı)
+    };
+    res.json({ success: true, flags, env });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+router.patch('/admin/ai', requirePermission('ai'), async (req: AuthRequest, res: Response) => {
+  try {
+    const key = String(req.body?.key || '');
+    const value = req.body?.value === true || req.body?.value === 'true';
+    if (!key) { res.status(400).json({ success: false, message: 'key tələb olunur' }); return; }
+    // Yalnız 'ai' bölməsindəki açarlar bu endpointdən dəyişdirilə bilər.
+    const flag = (await listFlags()).find((f) => f.key === key);
+    if (!flag || flag.section !== 'ai') { res.status(400).json({ success: false, message: 'Bu açar AI bölməsinə aid deyil' }); return; }
+    await setFlag(key, value);
+    res.json({ success: true, key, value });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
 // Cari admin haqqında — frontend sidebar-ı icazələrə görə süzsün deyə.
 // isSuperAdmin=true olan hər modula girə bilir; digərləri yalnız permissions-a.
 router.get('/admin/me', requireAdmin, async (req: AuthRequest, res: Response) => {

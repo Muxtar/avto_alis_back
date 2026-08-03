@@ -4,6 +4,7 @@ import { Router, Response } from 'express';
 import { adminAuth, AuthRequest } from '../middleware/auth';
 import { aiChatLimiter } from '../middleware/rateLimiter';
 import { runAgent, aiAgentEnabled, ChatTurn } from '../services/aiAgent';
+import { resolveFlag } from '../services/settings';
 
 const router = Router();
 
@@ -11,7 +12,8 @@ const router = Router();
 // pendingAction varsa (məs. mesaj göndər), frontend onu təsdiq üçün göstərir.
 router.post('/ai/chat', aiChatLimiter, adminAuth, async (req: AuthRequest, res: Response) => {
   try {
-    if (!aiAgentEnabled()) {
+    // Env açarı VƏ admin flag-ı — biri belə yoxdursa köməkçi işləmir.
+    if (!aiAgentEnabled() || !(await resolveFlag('ai_assistant'))) {
       res.status(503).json({ success: false, message: 'AI köməkçi hazırda əlçatan deyil' });
       return;
     }
