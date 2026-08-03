@@ -1,6 +1,6 @@
 import { Router, Response } from 'express';
 import { PrismaClient, UserType } from '@prisma/client';
-import { adminAuth, requireAdmin, AuthRequest } from '../middleware/auth';
+import { adminAuth, requirePermission, AuthRequest } from '../middleware/auth';
 import { upload } from '../middleware/upload';
 import { processImages } from '../middleware/imageProcess';
 
@@ -79,7 +79,7 @@ router.get('/seller/status', adminAuth, async (req: AuthRequest, res: Response) 
 });
 
 // Admin: list all applications (with filter)
-router.get('/admin/seller-applications', requireAdmin, async (req: AuthRequest, res: Response) => {
+router.get('/admin/seller-applications', requirePermission('kyc'), async (req: AuthRequest, res: Response) => {
   try {
     const status = req.query.status as string | undefined;
     const where = status ? { status: status as any } : {};
@@ -95,7 +95,7 @@ router.get('/admin/seller-applications', requireAdmin, async (req: AuthRequest, 
 });
 
 // Admin: approve
-router.put('/admin/seller-applications/:id/approve', requireAdmin, async (req: AuthRequest, res: Response) => {
+router.put('/admin/seller-applications/:id/approve', requirePermission('kyc'), async (req: AuthRequest, res: Response) => {
   try {
     const id = parseInt(req.params.id);
     const app = await prisma.sellerVerification.findUnique({ where: { id } });
@@ -127,7 +127,7 @@ router.put('/admin/seller-applications/:id/approve', requireAdmin, async (req: A
 });
 
 // Admin: reject
-router.put('/admin/seller-applications/:id/reject', requireAdmin, async (req: AuthRequest, res: Response) => {
+router.put('/admin/seller-applications/:id/reject', requirePermission('kyc'), async (req: AuthRequest, res: Response) => {
   try {
     const id = parseInt(req.params.id);
     const { reason } = req.body;

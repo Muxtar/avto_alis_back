@@ -1,6 +1,6 @@
 import { Router, Response } from 'express';
 import { PrismaClient } from '@prisma/client';
-import { adminAuth, requireAdmin, AuthRequest } from '../middleware/auth';
+import { adminAuth, requirePermission, AuthRequest } from '../middleware/auth';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -64,7 +64,7 @@ router.post('/promo/validate', adminAuth, async (req: AuthRequest, res: Response
 });
 
 // Admin: promo kod olustur
-router.post('/admin/promo', requireAdmin, async (req: AuthRequest, res: Response) => {
+router.post('/admin/promo', requirePermission('promo'), async (req: AuthRequest, res: Response) => {
   try {
     const { code, description, discountType, discountValue, minOrderAmount, maxDiscount, usageLimit, validUntil } = req.body;
     if (!code || !discountType || !discountValue) {
@@ -90,7 +90,7 @@ router.post('/admin/promo', requireAdmin, async (req: AuthRequest, res: Response
 });
 
 // Admin: promo kod listesi
-router.get('/admin/promo', requireAdmin, async (_req: AuthRequest, res: Response) => {
+router.get('/admin/promo', requirePermission('promo'), async (_req: AuthRequest, res: Response) => {
   try {
     const promos = await prisma.promoCode.findMany({ orderBy: { createdAt: 'desc' } });
     res.json({ promos });
@@ -100,7 +100,7 @@ router.get('/admin/promo', requireAdmin, async (_req: AuthRequest, res: Response
 });
 
 // Admin: promo kod redaktə et / aktiv-deaktiv (toggle)
-router.put('/admin/promo/:id', requireAdmin, async (req: AuthRequest, res: Response) => {
+router.put('/admin/promo/:id', requirePermission('promo'), async (req: AuthRequest, res: Response) => {
   try {
     const id = parseInt(req.params.id);
     if (Number.isNaN(id)) { res.status(400).json({ success: false, message: 'Yanlış ID' }); return; }
@@ -128,7 +128,7 @@ router.put('/admin/promo/:id', requireAdmin, async (req: AuthRequest, res: Respo
 });
 
 // Admin: promo kod sil
-router.delete('/admin/promo/:id', requireAdmin, async (req: AuthRequest, res: Response) => {
+router.delete('/admin/promo/:id', requirePermission('promo'), async (req: AuthRequest, res: Response) => {
   try {
     await prisma.promoCode.delete({ where: { id: parseInt(req.params.id) } });
     res.json({ success: true });

@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { PrismaClient } from '@prisma/client';
-import { adminAuth, requireAdmin, AuthRequest } from '../middleware/auth';
+import { adminAuth, requirePermission, AuthRequest } from '../middleware/auth';
 import { upload, docUpload, UPLOADS_DIR } from '../middleware/upload';
 import { processImages } from '../middleware/imageProcess';
 import { verifyBusinessAI, BusinessDoc, extractBankAccounts, extractBusinessInfo, nameOverlapScore } from '../services/credentialAI';
@@ -811,7 +811,7 @@ router.put('/me/business-orders/:orderId/status', adminAuth, async (req: AuthReq
 
 // ==================== ADMIN: BİZNES TƏSDİQİ ====================
 
-router.get('/admin/businesses', requireAdmin, async (req: AuthRequest, res: Response) => {
+router.get('/admin/businesses', requirePermission('businesses'), async (req: AuthRequest, res: Response) => {
   try {
     const { status } = req.query;
     const where: any = {};
@@ -837,7 +837,7 @@ router.get('/admin/businesses', requireAdmin, async (req: AuthRequest, res: Resp
   }
 });
 
-router.put('/admin/businesses/:id/approve', requireAdmin, async (req: AuthRequest, res: Response) => {
+router.put('/admin/businesses/:id/approve', requirePermission('businesses'), async (req: AuthRequest, res: Response) => {
   try {
     const id = parseInt(req.params.id);
     const biz = await prisma.business.update({
@@ -853,7 +853,7 @@ router.put('/admin/businesses/:id/approve', requireAdmin, async (req: AuthReques
   }
 });
 
-router.put('/admin/businesses/:id/reject', requireAdmin, async (req: AuthRequest, res: Response) => {
+router.put('/admin/businesses/:id/reject', requirePermission('businesses'), async (req: AuthRequest, res: Response) => {
   try {
     const id = parseInt(req.params.id);
     const { reason } = req.body;
@@ -874,7 +874,7 @@ router.put('/admin/businesses/:id/reject', requireAdmin, async (req: AuthRequest
 
 // ── ADMIN: biznesi AI ilə YENİDƏN yoxla (saxlanmış sənədlər üzərində) ──
 // AI bəzən işləmir/yanlış işləyir — admin istədiyi vaxt yenidən çağıra bilər.
-router.post('/admin/businesses/:id/ai-recheck', requireAdmin, async (req: AuthRequest, res: Response) => {
+router.post('/admin/businesses/:id/ai-recheck', requirePermission('businesses'), async (req: AuthRequest, res: Response) => {
   try {
     const id = parseInt(req.params.id);
     const biz = await prisma.business.findUnique({ where: { id }, include: { user: { select: { name: true } } } });
@@ -912,7 +912,7 @@ router.post('/admin/businesses/:id/ai-recheck', requireAdmin, async (req: AuthRe
 
 // ── ADMIN: sənəddən şirkət məlumatlarını AI ilə OXU (search) — saxlamır, qaytarır ──
 // Admin nəticəni görüb istəsə redaktə formasına tətbiq edir.
-router.post('/admin/businesses/:id/ai-extract', requireAdmin, async (req: AuthRequest, res: Response) => {
+router.post('/admin/businesses/:id/ai-extract', requirePermission('businesses'), async (req: AuthRequest, res: Response) => {
   try {
     const id = parseInt(req.params.id);
     const biz = await prisma.business.findUnique({ where: { id } });
@@ -935,7 +935,7 @@ router.post('/admin/businesses/:id/ai-extract', requireAdmin, async (req: AuthRe
 });
 
 // ── ADMIN: biznes məlumatlarını əl ilə redaktə et ──
-router.put('/admin/businesses/:id', requireAdmin, async (req: AuthRequest, res: Response) => {
+router.put('/admin/businesses/:id', requirePermission('businesses'), async (req: AuthRequest, res: Response) => {
   try {
     const id = parseInt(req.params.id);
     const b = req.body || {};
@@ -962,7 +962,7 @@ router.put('/admin/businesses/:id', requireAdmin, async (req: AuthRequest, res: 
 });
 
 // ── ADMIN: biznesə bank hesabı (IBAN) əlavə et — sənədə baxıb ──
-router.post('/admin/businesses/:id/banks', requireAdmin, async (req: AuthRequest, res: Response) => {
+router.post('/admin/businesses/:id/banks', requirePermission('businesses'), async (req: AuthRequest, res: Response) => {
   try {
     const businessId = parseInt(req.params.id);
     const iban = String(req.body?.iban || '').replace(/\s+/g, '').toUpperCase();
@@ -977,7 +977,7 @@ router.post('/admin/businesses/:id/banks', requireAdmin, async (req: AuthRequest
 });
 
 // ── ADMIN: bank hesabını redaktə et (IBAN/ad) ──
-router.put('/admin/banks/:id', requireAdmin, async (req: AuthRequest, res: Response) => {
+router.put('/admin/banks/:id', requirePermission('businesses'), async (req: AuthRequest, res: Response) => {
   try {
     const id = parseInt(req.params.id);
     const iban = String(req.body?.iban || '').replace(/\s+/g, '').toUpperCase();
@@ -991,7 +991,7 @@ router.put('/admin/banks/:id', requireAdmin, async (req: AuthRequest, res: Respo
 });
 
 // ── ADMIN: bank hesabını sil ──
-router.delete('/admin/banks/:id', requireAdmin, async (req: AuthRequest, res: Response) => {
+router.delete('/admin/banks/:id', requirePermission('businesses'), async (req: AuthRequest, res: Response) => {
   try {
     const id = parseInt(req.params.id);
     await prisma.bankAccount.delete({ where: { id } });
@@ -1004,7 +1004,7 @@ router.delete('/admin/banks/:id', requireAdmin, async (req: AuthRequest, res: Re
 // Biznesi sil — ona aid BÜTÜN obyektlər (FK Cascade) və elanlar (əl ilə) silinir.
 // Listing.businessId/businessObjectId FK-ları SetNull olduğu üçün elanlar avtomatik
 // silinmir; ona görə biznesə və onun obyektlərinə aid elanları əvvəlcə silirik.
-router.delete('/admin/businesses/:id', requireAdmin, async (req: AuthRequest, res: Response) => {
+router.delete('/admin/businesses/:id', requirePermission('businesses'), async (req: AuthRequest, res: Response) => {
   try {
     const id = parseInt(req.params.id);
     if (Number.isNaN(id)) { res.status(400).json({ success: false, message: 'Yanlış ID' }); return; }
@@ -1024,7 +1024,7 @@ router.delete('/admin/businesses/:id', requireAdmin, async (req: AuthRequest, re
 });
 
 // Obyekti sil — ona aid BÜTÜN elanlar (əl ilə) silinir.
-router.delete('/admin/objects/:id', requireAdmin, async (req: AuthRequest, res: Response) => {
+router.delete('/admin/objects/:id', requirePermission('businesses'), async (req: AuthRequest, res: Response) => {
   try {
     const id = parseInt(req.params.id);
     if (Number.isNaN(id)) { res.status(400).json({ success: false, message: 'Yanlış ID' }); return; }

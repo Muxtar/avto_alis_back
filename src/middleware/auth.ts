@@ -32,6 +32,8 @@ export interface AuthRequest extends Request {
   userSellerVerified?: boolean;
   userProfileComplete?: boolean;
   sessionId?: string; // cari cihaz sessiyası (JWT-dəki `sid`)
+  isSuperAdmin?: boolean;       // ADMIN_PHONES-dakı admin — hər modula icazəli
+  adminPermissions?: string[];  // adi adminin icazəli modulları
 }
 
 export function generateToken(userId: number): string {
@@ -217,31 +219,60 @@ export function requireSellerVerified(req: AuthRequest, res: Response, next: Nex
   }
 }
 
-// Admin-only auth - checks role is ADMIN
-export function requireAdmin(req: AuthRequest, res: Response, next: NextFunction) {
+// ── Admin RBAC (icazə modulları) ─────────────────────────────────────────────
+// Admin panelindəki bölmələrə uyğun modul açarları. Frontend sidebar və backend
+// icazə yoxlaması bu siyahıya söykənir. Yeni bölmə əlavə edəndə buranı yenilə.
+export const ADMIN_MODULES = [
+  'users', 'listings', 'orders', 'returns', 'finance', 'businesses', 'kyc',
+  'credentials', 'complaints', 'social', 'promo', 'comments', 'broadcast',
+  'banners', 'couriers', 'settings', 'admins',
+] as const;
+export type AdminModule = typeof ADMIN_MODULES[number];
+
+// Ortaq admin yoxlaması: token → user (role/phone/adminPermissions).
+// Qaytarır: null (icazə yox, cavab artıq göndərildi) və ya user məlumatı.
+async function loadAdmin(req: AuthRequest, res: Response): Promise<{ id: number; isSuper: boolean; perms: string[] } | null> {
   const token = req.headers.authorization?.replace('Bearer ', '');
-
-  if (!token) {
-    res.status(401).json({ success: false, message: 'Token tələb olunur' });
-    return;
+  if (!token) { res.status(401).json({ success: false, message: 'Token tələb olunur' }); return null; }
+  let decoded: { userId: number };
+  try { decoded = jwt.verify(token, SIGNING_KEY) as { userId: number }; }
+  catch { res.status(401).json({ success: false, message: 'Etibarsız token' }); return null; }
+  req.adminId = decoded.userId;
+  const user = await prisma.user.findUnique({ where: { id: decoded.userId }, select: { role: true, phone: true, adminPermissions: true, isBlocked: true } });
+  if (!user || user.role !== 'ADMIN' || user.isBlocked) {
+    res.status(403).json({ success: false, message: 'Admin icazəsi tələb olunur' }); return null;
   }
+  const isSuper = isAdminPhone(user.phone);           // ADMIN_PHONES → super-admin
+  req.isSuperAdmin = isSuper;
+  req.adminPermissions = user.adminPermissions || [];
+  return { id: decoded.userId, isSuper, perms: user.adminPermissions || [] };
+}
 
-  try {
-    const decoded = jwt.verify(token, SIGNING_KEY) as { userId: number };
-    req.adminId = decoded.userId;
+// Admin-only auth — yalnız role ADMIN yoxlanır (modul tələb olunmayan endpointlər:
+// dashboard, overview, axtarış). İcazə bölgüsündən asılı deyil.
+export function requireAdmin(req: AuthRequest, res: Response, next: NextFunction) {
+  loadAdmin(req, res).then((a) => { if (a) next(); }).catch(() => {
+    if (!res.headersSent) res.status(403).json({ success: false, message: 'İcazə yoxdur' });
+  });
+}
 
-    prisma.user.findUnique({ where: { id: decoded.userId }, select: { role: true } })
-      .then((user) => {
-        if (!user || user.role !== 'ADMIN') {
-          res.status(403).json({ success: false, message: 'Admin icazəsi tələb olunur' });
-          return;
-        }
-        next();
-      })
-      .catch(() => {
-        res.status(403).json({ success: false, message: 'İcazə yoxdur' });
-      });
-  } catch {
-    res.status(401).json({ success: false, message: 'Etibarsız token' });
-  }
+// Modul-səviyyəli icazə: super-admin hər şeyə, adi admin yalnız təyin olunmuş
+// modula girə bilər. İstifadə: router.get('/admin/x', requirePermission('listings'), ...)
+export function requirePermission(module: AdminModule) {
+  return (req: AuthRequest, res: Response, next: NextFunction) => {
+    loadAdmin(req, res).then((a) => {
+      if (!a) return;
+      if (a.isSuper || a.perms.includes(module)) { next(); return; }
+      res.status(403).json({ success: false, message: 'Bu bölmə üçün icazəniz yoxdur' });
+    }).catch(() => { if (!res.headersSent) res.status(403).json({ success: false, message: 'İcazə yoxdur' }); });
+  };
+}
+
+// Yalnız super-admin (ADMIN_PHONES) — admin idarəetməsi/icazə paylaşımı üçün.
+export function requireSuperAdmin(req: AuthRequest, res: Response, next: NextFunction) {
+  loadAdmin(req, res).then((a) => {
+    if (!a) return;
+    if (a.isSuper) { next(); return; }
+    res.status(403).json({ success: false, message: 'Yalnız super-admin icazəlidir' });
+  }).catch(() => { if (!res.headersSent) res.status(403).json({ success: false, message: 'İcazə yoxdur' }); });
 }

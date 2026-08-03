@@ -1,7 +1,7 @@
 import { Router, Response } from 'express';
 import { PrismaClient, Prisma, UserType } from '@prisma/client';
 import bcrypt from 'bcryptjs';
-import { adminAuth, requireAdmin, AuthRequest, generateToken, isAdminPhone } from '../middleware/auth';
+import { adminAuth, requireAdmin, requirePermission, requireSuperAdmin, AuthRequest, generateToken, isAdminPhone, ADMIN_MODULES } from '../middleware/auth';
 import { authLimiter } from '../middleware/rateLimiter';
 import { createOtp } from '../services/otp';
 import { refund as kapitalRefund } from '../services/kapital';
@@ -18,7 +18,7 @@ const prisma = new PrismaClient();
 // ── Tənzimləmələr (feature-flags) ──
 // Admin paneldəki "Tənzimləmələr" səhifəsi üçün. Bütün flag-lar meta + cari
 // dəyər ilə qaytarılır; PATCH ilə tək açar aktiv/deaktiv edilir.
-router.get('/admin/settings', requireAdmin, async (_req: AuthRequest, res: Response) => {
+router.get('/admin/settings', requirePermission('settings'), async (_req: AuthRequest, res: Response) => {
   try {
     const flags = await listFlags();
     res.json({ success: true, settings: flags });
@@ -27,7 +27,7 @@ router.get('/admin/settings', requireAdmin, async (_req: AuthRequest, res: Respo
   }
 });
 
-router.patch('/admin/settings', requireAdmin, async (req: AuthRequest, res: Response) => {
+router.patch('/admin/settings', requirePermission('settings'), async (req: AuthRequest, res: Response) => {
   try {
     const key = String(req.body?.key || '');
     const value = req.body?.value === true || req.body?.value === 'true';
@@ -40,7 +40,7 @@ router.patch('/admin/settings', requireAdmin, async (req: AuthRequest, res: Resp
 });
 
 // OTP konfiqurasiya vəziyyəti — aktiv kanal + Infobip SMS/WhatsApp env-ləri.
-router.get('/admin/whatsapp-status', requireAdmin, async (_req: AuthRequest, res: Response) => {
+router.get('/admin/whatsapp-status', requirePermission('settings'), async (_req: AuthRequest, res: Response) => {
   try {
     res.json({ success: true, channel: otpChannel(), sms: smsStatus(), whatsapp: infobipStatus() });
   } catch (error: any) {
@@ -50,7 +50,7 @@ router.get('/admin/whatsapp-status', requireAdmin, async (_req: AuthRequest, res
 
 // Test OTP mesajı göndər — WhatsApp və/və ya SMS ayrıca sınanır (channel:
 // 'whatsapp' | 'sms' | 'both'). Provayderin real cavabını/xətasını qaytarır.
-router.post('/admin/whatsapp-test', requireAdmin, async (req: AuthRequest, res: Response) => {
+router.post('/admin/whatsapp-test', requirePermission('settings'), async (req: AuthRequest, res: Response) => {
   try {
     const phone = String(req.body?.phone || '').trim();
     if (!phone) { res.status(400).json({ success: false, message: 'phone tələb olunur' }); return; }
@@ -167,8 +167,26 @@ router.get('/admin/dashboard', requireAdmin, async (_req: AuthRequest, res: Resp
   }
 });
 
+// Cari admin haqqında — frontend sidebar-ı icazələrə görə süzsün deyə.
+// isSuperAdmin=true olan hər modula girə bilir; digərləri yalnız permissions-a.
+router.get('/admin/me', requireAdmin, async (req: AuthRequest, res: Response) => {
+  try {
+    const me = await prisma.user.findUnique({ where: { id: req.adminId! }, select: { id: true, name: true, avatar: true, adminPermissions: true } });
+    res.json({
+      success: true,
+      id: me?.id, name: me?.name, avatar: me?.avatar,
+      isSuperAdmin: !!req.isSuperAdmin,
+      // Super-admin bütün modullara icazəli sayılır (UI-də hamısı görünsün).
+      permissions: req.isSuperAdmin ? [...ADMIN_MODULES] : (me?.adminPermissions || []),
+      modules: [...ADMIN_MODULES],
+    });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
 // Get All Users
-router.get('/admin/users', requireAdmin, async (req: AuthRequest, res: Response) => {
+router.get('/admin/users', requirePermission('users'), async (req: AuthRequest, res: Response) => {
   try {
     const { search, type, page = '1', limit = '20' } = req.query;
     const skip = (parseInt(page as string) - 1) * parseInt(limit as string);
@@ -201,7 +219,7 @@ router.get('/admin/users', requireAdmin, async (req: AuthRequest, res: Response)
 });
 
 // Create User (admin əl ilə istifadəçi əlavə edir)
-router.post('/admin/users', requireAdmin, async (req: AuthRequest, res: Response) => {
+router.post('/admin/users', requirePermission('users'), async (req: AuthRequest, res: Response) => {
   try {
     const name = String(req.body.name || '').trim();
     const phone = String(req.body.phone || '').trim();
@@ -229,7 +247,7 @@ router.post('/admin/users', requireAdmin, async (req: AuthRequest, res: Response
 });
 
 // Update User
-router.put('/admin/users/:id', requireAdmin, async (req: AuthRequest, res: Response) => {
+router.put('/admin/users/:id', requirePermission('users'), async (req: AuthRequest, res: Response) => {
   try {
     const { name, phone, type, verified, role } = req.body;
 
@@ -267,7 +285,7 @@ router.put('/admin/users/:id', requireAdmin, async (req: AuthRequest, res: Respo
 });
 
 // Delete User
-router.delete('/admin/users/:id', requireAdmin, async (req: AuthRequest, res: Response) => {
+router.delete('/admin/users/:id', requirePermission('users'), async (req: AuthRequest, res: Response) => {
   try {
     const targetId = parseInt(req.params.id);
     if (Number.isNaN(targetId)) {
@@ -331,7 +349,7 @@ router.delete('/admin/users/:id', requireAdmin, async (req: AuthRequest, res: Re
 });
 
 // Get All Listings
-router.get('/admin/listings', requireAdmin, async (req: AuthRequest, res: Response) => {
+router.get('/admin/listings', requirePermission('listings'), async (req: AuthRequest, res: Response) => {
   try {
     const { search, category, type, status, page = '1', limit = '20' } = req.query;
     const skip = (parseInt(page as string) - 1) * parseInt(limit as string);
@@ -375,7 +393,7 @@ router.get('/admin/listings', requireAdmin, async (req: AuthRequest, res: Respon
 // GET /admin/listing-owners — elanları SAHİBİNƏ görə qruplaşdırır.
 // VÖEN-li elan biznes obyektinə, digərləri şəxsə aid sayılır.
 // Cavab: hər sahib üçün ad, VÖEN/şirkət və elan sayları (ümumi/gözləmədə/...).
-router.get('/admin/listing-owners', requireAdmin, async (req: AuthRequest, res: Response) => {
+router.get('/admin/listing-owners', requirePermission('listings'), async (req: AuthRequest, res: Response) => {
   try {
     const { status, search } = req.query;
     const base: Prisma.ListingWhereInput = {};
@@ -473,7 +491,7 @@ router.get('/admin/listing-owners', requireAdmin, async (req: AuthRequest, res: 
 
 // Elan moderasiyası — təsdiqlə / rədd et.
 // body: { status: 'APPROVED' | 'REJECTED' | 'PENDING', rejectReason?: string }
-router.patch('/admin/listings/:id/status', requireAdmin, async (req: AuthRequest, res: Response) => {
+router.patch('/admin/listings/:id/status', requirePermission('listings'), async (req: AuthRequest, res: Response) => {
   try {
     const id = parseInt(req.params.id);
     const status = String(req.body?.status || '').toUpperCase();
@@ -497,7 +515,7 @@ router.patch('/admin/listings/:id/status', requireAdmin, async (req: AuthRequest
 });
 
 // Update Listing
-router.put('/admin/listings/:id', requireAdmin, async (req: AuthRequest, res: Response) => {
+router.put('/admin/listings/:id', requirePermission('listings'), async (req: AuthRequest, res: Response) => {
   try {
     const { title, description, price, category, type } = req.body;
     const listing = await prisma.listing.update({
@@ -517,7 +535,7 @@ router.put('/admin/listings/:id', requireAdmin, async (req: AuthRequest, res: Re
 });
 
 // Delete Listing
-router.delete('/admin/listings/:id', requireAdmin, async (req: AuthRequest, res: Response) => {
+router.delete('/admin/listings/:id', requirePermission('listings'), async (req: AuthRequest, res: Response) => {
   try {
     const listing = await prisma.listing.findUnique({ where: { id: parseInt(req.params.id) } });
     if (!listing) { res.status(404).json({ success: false, message: 'Elan tapılmadı' }); return; }
@@ -540,7 +558,7 @@ router.delete('/admin/listings/:id', requireAdmin, async (req: AuthRequest, res:
 // Bulk reactivate — bütün vaxtı bitmiş (və ya expiresAt = null) elanların
 // müddətini indidən 30 gün uzadır. Bir dəfəlik admin əməliyyatı: marketplace-də
 // köhnə elanlar yenidən görünsün.
-router.post('/admin/listings/reactivate-expired', requireAdmin, async (_req: AuthRequest, res: Response) => {
+router.post('/admin/listings/reactivate-expired', requirePermission('listings'), async (_req: AuthRequest, res: Response) => {
   try {
     const now = new Date();
     const newExpiresAt = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
@@ -569,7 +587,7 @@ router.post('/admin/listings/reactivate-expired', requireAdmin, async (_req: Aut
 // ===================== COURIER MANAGEMENT =====================
 
 // Create Courier
-router.post('/admin/couriers', requireAdmin, async (req: AuthRequest, res: Response) => {
+router.post('/admin/couriers', requirePermission('couriers'), async (req: AuthRequest, res: Response) => {
   try {
     const { name, phone, password } = req.body;
     const hashedPassword = await bcrypt.hash(password, 10);
@@ -583,7 +601,7 @@ router.post('/admin/couriers', requireAdmin, async (req: AuthRequest, res: Respo
 });
 
 // Get All Couriers
-router.get('/admin/couriers', requireAdmin, async (_req: AuthRequest, res: Response) => {
+router.get('/admin/couriers', requirePermission('couriers'), async (_req: AuthRequest, res: Response) => {
   try {
     const couriers = await prisma.user.findMany({
       where: { type: 'COURIER' },
@@ -597,7 +615,7 @@ router.get('/admin/couriers', requireAdmin, async (_req: AuthRequest, res: Respo
 });
 
 // Update Courier
-router.put('/admin/couriers/:id', requireAdmin, async (req: AuthRequest, res: Response) => {
+router.put('/admin/couriers/:id', requirePermission('couriers'), async (req: AuthRequest, res: Response) => {
   try {
     const { name, phone, password } = req.body;
     const data: any = {};
@@ -616,7 +634,7 @@ router.put('/admin/couriers/:id', requireAdmin, async (req: AuthRequest, res: Re
 });
 
 // Delete Courier
-router.delete('/admin/couriers/:id', requireAdmin, async (req: AuthRequest, res: Response) => {
+router.delete('/admin/couriers/:id', requirePermission('couriers'), async (req: AuthRequest, res: Response) => {
   try {
     await prisma.user.delete({ where: { id: parseInt(req.params.id) } });
     res.json({ success: true });
@@ -628,7 +646,7 @@ router.delete('/admin/couriers/:id', requireAdmin, async (req: AuthRequest, res:
 // ===================== ORDER MANAGEMENT =====================
 
 // Get All Orders (admin)
-router.get('/admin/orders', requireAdmin, async (req: AuthRequest, res: Response) => {
+router.get('/admin/orders', requirePermission('orders'), async (req: AuthRequest, res: Response) => {
   try {
     const { status, page = '1', limit = '20' } = req.query;
     const skip = (parseInt(page as string) - 1) * parseInt(limit as string);
@@ -663,7 +681,7 @@ router.get('/admin/orders', requireAdmin, async (req: AuthRequest, res: Response
 // Kim kimdən aldı, nə qədər ödədi, platformaya (bizə) nə qədər pul gəldi.
 // "Bizə gələn pul" = KART ödənişləri (PAID) — YIĞIM/Kapital merchant hesabımıza
 // düşür. NAĞD ödənişlər alıcı→satıcı birbaşa gedir (bizə gəlmir).
-router.get('/admin/finance', requireAdmin, async (req: AuthRequest, res: Response) => {
+router.get('/admin/finance', requirePermission('finance'), async (req: AuthRequest, res: Response) => {
   try {
     const page = parseInt(String(req.query.page || '1')) || 1;
     const take = Math.min(parseInt(String(req.query.limit || '25')) || 25, 100);
@@ -735,7 +753,7 @@ router.get('/admin/finance', requireAdmin, async (req: AuthRequest, res: Respons
 });
 
 // Assign Courier to Order
-router.put('/admin/orders/:id/assign-courier', requireAdmin, async (req: AuthRequest, res: Response) => {
+router.put('/admin/orders/:id/assign-courier', requirePermission('orders'), async (req: AuthRequest, res: Response) => {
   try {
     const orderId = parseInt(req.params.id);
     if (Number.isNaN(orderId)) {
@@ -769,7 +787,7 @@ router.put('/admin/orders/:id/assign-courier', requireAdmin, async (req: AuthReq
 // ===================== RETURN MANAGEMENT =====================
 
 // Get All Returns
-router.get('/admin/returns', requireAdmin, async (req: AuthRequest, res: Response) => {
+router.get('/admin/returns', requirePermission('returns'), async (req: AuthRequest, res: Response) => {
   try {
     const { status, page = '1', limit = '20' } = req.query;
     const skip = (parseInt(page as string) - 1) * parseInt(limit as string);
@@ -801,7 +819,7 @@ router.get('/admin/returns', requireAdmin, async (req: AuthRequest, res: Respons
 });
 
 // Admin override return status
-router.put('/admin/returns/:id/override', requireAdmin, async (req: AuthRequest, res: Response) => {
+router.put('/admin/returns/:id/override', requirePermission('returns'), async (req: AuthRequest, res: Response) => {
   try {
     const { status, adminNote, refundAmount } = req.body;
     if (!['APPROVED', 'REJECTED', 'REFUNDED'].includes(status)) {
@@ -869,7 +887,7 @@ router.put('/admin/returns/:id/override', requireAdmin, async (req: AuthRequest,
 const ORDER_STATUSES = ['PENDING', 'CONFIRMED', 'SHIPPED', 'DELIVERED', 'CANCELLED'] as const;
 
 // Admin sifariş statusunu dəyişir. CANCELLED olduqda stok geri qaytarılır.
-router.put('/admin/orders/:id/status', requireAdmin, async (req: AuthRequest, res: Response) => {
+router.put('/admin/orders/:id/status', requirePermission('orders'), async (req: AuthRequest, res: Response) => {
   try {
     const orderId = parseInt(req.params.id);
     if (Number.isNaN(orderId)) { res.status(400).json({ success: false, message: 'Yanlış sifariş ID' }); return; }
@@ -903,7 +921,7 @@ router.put('/admin/orders/:id/status', requireAdmin, async (req: AuthRequest, re
 
 // ===================== USER BLOCK / UNBLOCK =====================
 
-router.put('/admin/users/:id/block', requireAdmin, async (req: AuthRequest, res: Response) => {
+router.put('/admin/users/:id/block', requirePermission('users'), async (req: AuthRequest, res: Response) => {
   try {
     const targetId = parseInt(req.params.id);
     if (Number.isNaN(targetId)) { res.status(400).json({ success: false, message: 'Yanlış ID' }); return; }
@@ -925,7 +943,7 @@ router.put('/admin/users/:id/block', requireAdmin, async (req: AuthRequest, res:
 
 // ===================== COMMENT / RATING MODERATION =====================
 
-router.get('/admin/comments', requireAdmin, async (req: AuthRequest, res: Response) => {
+router.get('/admin/comments', requirePermission('comments'), async (req: AuthRequest, res: Response) => {
   try {
     const { page = '1', limit = '20' } = req.query;
     const skip = (parseInt(page as string) - 1) * parseInt(limit as string);
@@ -947,7 +965,7 @@ router.get('/admin/comments', requireAdmin, async (req: AuthRequest, res: Respon
   }
 });
 
-router.delete('/admin/comments/:id', requireAdmin, async (req: AuthRequest, res: Response) => {
+router.delete('/admin/comments/:id', requirePermission('comments'), async (req: AuthRequest, res: Response) => {
   try {
     const id = parseInt(req.params.id);
     if (Number.isNaN(id)) { res.status(400).json({ success: false, message: 'Yanlış ID' }); return; }
@@ -961,7 +979,7 @@ router.delete('/admin/comments/:id', requireAdmin, async (req: AuthRequest, res:
 // ===================== BROADCAST NOTIFICATIONS =====================
 
 // Bütün (və ya tipə görə) istifadəçilərə bildiriş göndər.
-router.post('/admin/broadcast', requireAdmin, async (req: AuthRequest, res: Response) => {
+router.post('/admin/broadcast', requirePermission('broadcast'), async (req: AuthRequest, res: Response) => {
   try {
     const { title, body, link, userType } = req.body;
     if (!title || !body) { res.status(400).json({ success: false, message: 'Başlıq və mətn tələb olunur' }); return; }
@@ -1031,7 +1049,7 @@ router.get('/admin/analytics', requireAdmin, async (_req: AuthRequest, res: Resp
 // təsdiq/rədd endpoint-lərinə ehtiyac yoxdur, ona görə silindi.
 
 // ==================== PEŞƏ SƏNƏDLƏRİ (AI ad-soyad yoxlaması) ====================
-router.get('/admin/credentials', requireAdmin, async (req: AuthRequest, res: Response) => {
+router.get('/admin/credentials', requirePermission('credentials'), async (req: AuthRequest, res: Response) => {
   try {
     const status = String(req.query.status || 'PENDING').toUpperCase();
     const where: Prisma.ProfessionDocumentWhereInput = status === 'ALL' ? {} : { status: status as any };
@@ -1050,7 +1068,7 @@ router.get('/admin/credentials', requireAdmin, async (req: AuthRequest, res: Res
   }
 });
 
-router.post('/admin/credentials/:id/:action', requireAdmin, async (req: AuthRequest, res: Response) => {
+router.post('/admin/credentials/:id/:action', requirePermission('credentials'), async (req: AuthRequest, res: Response) => {
   try {
     const id = parseInt(req.params.id);
     const action = String(req.params.action);
@@ -1076,7 +1094,7 @@ router.post('/admin/credentials/:id/:action', requireAdmin, async (req: AuthRequ
 });
 
 // ==================== SOSIAL MEDIA TƏSDİQİ ====================
-router.get('/admin/social-links', requireAdmin, async (req: AuthRequest, res: Response) => {
+router.get('/admin/social-links', requirePermission('social'), async (req: AuthRequest, res: Response) => {
   try {
     const status = String(req.query.status || 'PENDING').toUpperCase();
     const where: Prisma.SocialLinkWhereInput = status === 'VERIFIED' ? { verified: true } : status === 'ALL' ? {} : { verified: false };
@@ -1090,7 +1108,7 @@ router.get('/admin/social-links', requireAdmin, async (req: AuthRequest, res: Re
   }
 });
 
-router.post('/admin/social-links/:id/:action', requireAdmin, async (req: AuthRequest, res: Response) => {
+router.post('/admin/social-links/:id/:action', requirePermission('social'), async (req: AuthRequest, res: Response) => {
   try {
     const id = parseInt(req.params.id);
     const action = String(req.params.action);
@@ -1178,6 +1196,95 @@ router.get('/admin/search', requireAdmin, async (req: AuthRequest, res: Response
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }
+});
+
+// ══════════════════════════════════════════════════════════════════════════
+// ADMİN İDARƏETMƏSİ (RBAC) — yalnız super-admin (ADMIN_PHONES).
+// İstifadəçiləri admin edir, icazə modullarını (adminPermissions) təyin edir.
+// ══════════════════════════════════════════════════════════════════════════
+
+function cleanPermissions(input: any): string[] {
+  const arr = Array.isArray(input) ? input : [];
+  const allowed = new Set<string>(ADMIN_MODULES as readonly string[]);
+  // 'admins' modulunu adi adminə vermək olmaz — yalnız super-admin idarə edir.
+  return Array.from(new Set(arr.map((x) => String(x)))).filter((m) => allowed.has(m) && m !== 'admins');
+}
+
+// Bütün adminləri (role ADMIN) siyahıla — super-admin işarəsi + icazələri ilə.
+router.get('/admin/admins', requireSuperAdmin, async (_req: AuthRequest, res: Response) => {
+  try {
+    const admins = await prisma.user.findMany({
+      where: { role: 'ADMIN' },
+      select: { id: true, name: true, phone: true, avatar: true, adminPermissions: true, isBlocked: true, createdAt: true },
+      orderBy: { createdAt: 'asc' },
+    });
+    res.json({
+      success: true,
+      modules: [...ADMIN_MODULES],
+      admins: admins.map((a) => ({
+        id: a.id, name: a.name, phone: a.phone, avatar: a.avatar, isBlocked: a.isBlocked,
+        isSuperAdmin: isAdminPhone(a.phone),
+        permissions: isAdminPhone(a.phone) ? [...ADMIN_MODULES] : (a.adminPermissions || []),
+      })),
+    });
+  } catch (error: any) { res.status(400).json({ success: false, message: error.message }); }
+});
+
+// Admin etmək üçün namizəd istifadəçi axtar (ad/telefon). Mövcud adminlər xaric.
+router.get('/admin/admins/candidates', requireSuperAdmin, async (req: AuthRequest, res: Response) => {
+  try {
+    const q = String(req.query.q || '').trim();
+    if (q.length < 2) { res.json({ success: true, users: [] }); return; }
+    const users = await prisma.user.findMany({
+      where: { role: 'USER', OR: [{ name: { contains: q, mode: 'insensitive' } }, { phone: { contains: q } }] },
+      select: { id: true, name: true, phone: true, avatar: true },
+      take: 10,
+    });
+    res.json({ success: true, users });
+  } catch (error: any) { res.status(400).json({ success: false, message: error.message }); }
+});
+
+// İstifadəçini admin et (və ya mövcud admini yenilə) — icazə modulları ilə.
+router.post('/admin/admins', requireSuperAdmin, async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = parseInt(String(req.body?.userId));
+    if (Number.isNaN(userId)) { res.status(400).json({ success: false, message: 'userId tələb olunur' }); return; }
+    const target = await prisma.user.findUnique({ where: { id: userId }, select: { id: true, phone: true } });
+    if (!target) { res.status(404).json({ success: false, message: 'İstifadəçi tapılmadı' }); return; }
+    const perms = cleanPermissions(req.body?.permissions);
+    const updated = await prisma.user.update({
+      where: { id: userId },
+      data: { role: 'ADMIN', adminPermissions: perms },
+      select: { id: true, name: true, phone: true, adminPermissions: true },
+    });
+    res.json({ success: true, admin: { ...updated, isSuperAdmin: isAdminPhone(updated.phone) } });
+  } catch (error: any) { res.status(400).json({ success: false, message: error.message }); }
+});
+
+// Admin icazələrini yenilə. Super-adminin (ADMIN_PHONES) icazələri dəyişdirilə bilməz.
+router.put('/admin/admins/:id/permissions', requireSuperAdmin, async (req: AuthRequest, res: Response) => {
+  try {
+    const id = parseInt(String(req.params.id));
+    const target = await prisma.user.findUnique({ where: { id }, select: { id: true, phone: true, role: true } });
+    if (!target || target.role !== 'ADMIN') { res.status(404).json({ success: false, message: 'Admin tapılmadı' }); return; }
+    if (isAdminPhone(target.phone)) { res.status(400).json({ success: false, message: 'Super-adminin icazələri dəyişdirilə bilməz' }); return; }
+    const perms = cleanPermissions(req.body?.permissions);
+    const updated = await prisma.user.update({ where: { id }, data: { adminPermissions: perms }, select: { id: true, name: true, phone: true, adminPermissions: true } });
+    res.json({ success: true, admin: { ...updated, isSuperAdmin: false } });
+  } catch (error: any) { res.status(400).json({ success: false, message: error.message }); }
+});
+
+// Admin səlahiyyətini götür (role USER) — super-admini götürmək olmaz.
+router.delete('/admin/admins/:id', requireSuperAdmin, async (req: AuthRequest, res: Response) => {
+  try {
+    const id = parseInt(String(req.params.id));
+    if (id === req.adminId) { res.status(400).json({ success: false, message: 'Özünüzü admindən çıxara bilməzsiniz' }); return; }
+    const target = await prisma.user.findUnique({ where: { id }, select: { id: true, phone: true, role: true } });
+    if (!target || target.role !== 'ADMIN') { res.status(404).json({ success: false, message: 'Admin tapılmadı' }); return; }
+    if (isAdminPhone(target.phone)) { res.status(400).json({ success: false, message: 'Super-admin (ADMIN_PHONES) səlahiyyəti panel üzərindən götürülə bilməz' }); return; }
+    await prisma.user.update({ where: { id }, data: { role: 'USER', adminPermissions: [] } });
+    res.json({ success: true });
+  } catch (error: any) { res.status(400).json({ success: false, message: error.message }); }
 });
 
 export default router;

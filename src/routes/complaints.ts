@@ -1,6 +1,6 @@
 import { Router, Response } from 'express';
 import { PrismaClient } from '@prisma/client';
-import { adminAuth, requireAdmin, AuthRequest } from '../middleware/auth';
+import { adminAuth, requirePermission, AuthRequest } from '../middleware/auth';
 import { complaintLimiter } from '../middleware/rateLimiter';
 import { refundOrder } from '../services/paymentGateway';
 
@@ -55,7 +55,7 @@ router.get('/me/complaints', adminAuth, async (req: AuthRequest, res: Response) 
 });
 
 // ── Admin ─────────────────────────────────────────────────────────────────────
-router.get('/admin/complaints', requireAdmin, async (req: AuthRequest, res: Response) => {
+router.get('/admin/complaints', requirePermission('complaints'), async (req: AuthRequest, res: Response) => {
   try {
     const status = req.query.status ? String(req.query.status) : undefined;
     const complaints = await prisma.complaint.findMany({
@@ -71,7 +71,7 @@ router.get('/admin/complaints', requireAdmin, async (req: AuthRequest, res: Resp
 });
 
 // Şikayət detalı + DƏLİL siqnalları (söhbət + vaxt analizi).
-router.get('/admin/complaints/:id', requireAdmin, async (req: AuthRequest, res: Response) => {
+router.get('/admin/complaints/:id', requirePermission('complaints'), async (req: AuthRequest, res: Response) => {
   try {
     const id = parseInt(String(req.params.id));
     const complaint = await prisma.complaint.findUnique({
@@ -117,7 +117,7 @@ router.get('/admin/complaints/:id', requireAdmin, async (req: AuthRequest, res: 
 });
 
 // Şikayəti həll et — geri ödəniş / peşəkarı dayandır / rədd və s.
-router.post('/admin/complaints/:id/resolve', requireAdmin, async (req: AuthRequest, res: Response) => {
+router.post('/admin/complaints/:id/resolve', requirePermission('complaints'), async (req: AuthRequest, res: Response) => {
   try {
     const id = parseInt(String(req.params.id));
     const c = await prisma.complaint.findUnique({ where: { id }, include: { consultation: true } });

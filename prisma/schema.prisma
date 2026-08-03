@@ -133,6 +133,10 @@ model User {
   telegramId            String?               @unique
   type                  UserType              @default(CAR_OWNER)
   role                  UserRole              @default(USER)
+  // Admin icazə modulları (RBAC) — məs. ["listings","orders"]. Super-admin
+  // (ADMIN_PHONES) bu siyahıdan asılı olmadan hər şeyə girə bilir; adi adminlər
+  // yalnız burada sadalanan modullara. role=ADMIN olmayanlarda mənasızdır.
+  adminPermissions      String[]              @default([])
   password              String?
   verified              Boolean               @default(false)
   isBlocked             Boolean               @default(false) // admin tərəfindən bloklanıb

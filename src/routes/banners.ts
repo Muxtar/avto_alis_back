@@ -1,7 +1,7 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { PrismaClient } from '@prisma/client';
 import multer from 'multer';
-import { requireAdmin, AuthRequest } from '../middleware/auth';
+import { requirePermission, AuthRequest } from '../middleware/auth';
 import { processImages } from '../middleware/imageProcess';
 import fs from 'fs';
 import path from 'path';
@@ -55,7 +55,7 @@ router.get('/banners', async (_req: Request, res: Response) => {
 });
 
 // Admin — bütün bannerlər.
-router.get('/admin/banners', requireAdmin, async (_req: AuthRequest, res: Response) => {
+router.get('/admin/banners', requirePermission('banners'), async (_req: AuthRequest, res: Response) => {
   try {
     const banners = await prisma.banner.findMany({ orderBy: [{ sortOrder: 'asc' }, { createdAt: 'desc' }] });
     res.json({ success: true, banners });
@@ -65,7 +65,7 @@ router.get('/admin/banners', requireAdmin, async (_req: AuthRequest, res: Respon
 });
 
 // Admin — banner yarat (şəkil yüklə).
-router.post('/admin/banners', requireAdmin, bannerImage, processImages, async (req: AuthRequest, res: Response) => {
+router.post('/admin/banners', requirePermission('banners'), bannerImage, processImages, async (req: AuthRequest, res: Response) => {
   try {
     const file = (req as any).file;
     if (!file) { res.status(400).json({ success: false, message: 'Şəkil tələb olunur' }); return; }
@@ -86,7 +86,7 @@ router.post('/admin/banners', requireAdmin, bannerImage, processImages, async (r
 });
 
 // Admin — banner yenilə (aktiv/link/başlıq/sıra).
-router.put('/admin/banners/:id', requireAdmin, async (req: AuthRequest, res: Response) => {
+router.put('/admin/banners/:id', requirePermission('banners'), async (req: AuthRequest, res: Response) => {
   try {
     const id = parseInt(String(req.params.id));
     const data: any = {};
@@ -103,7 +103,7 @@ router.put('/admin/banners/:id', requireAdmin, async (req: AuthRequest, res: Res
 });
 
 // Admin — banner sil (+ fayl).
-router.delete('/admin/banners/:id', requireAdmin, async (req: AuthRequest, res: Response) => {
+router.delete('/admin/banners/:id', requirePermission('banners'), async (req: AuthRequest, res: Response) => {
   try {
     const id = parseInt(String(req.params.id));
     const b = await prisma.banner.findUnique({ where: { id } });

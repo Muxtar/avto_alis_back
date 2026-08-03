@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { PrismaClient } from '@prisma/client';
-import { adminAuth, requireAdmin, AuthRequest } from '../middleware/auth';
+import { adminAuth, requirePermission, AuthRequest } from '../middleware/auth';
 import { getOrderStatus, isPaidStatus } from '../services/kapital';
 import { refundOrder } from '../services/paymentGateway';
 import { getPaymentStatus as yigimStatus, isPaidStatus as yigimPaid } from '../services/yigimPay';
@@ -162,7 +162,7 @@ router.get('/payment/status/:orderId', adminAuth, async (req: AuthRequest, res: 
 });
 
 // ====================== REFUND (admin) ======================
-router.post('/payment/refund/:orderId', requireAdmin, async (req: AuthRequest, res: Response) => {
+router.post('/payment/refund/:orderId', requirePermission('finance'), async (req: AuthRequest, res: Response) => {
   try {
     const orderId = parseInt(req.params.orderId);
     const { amount } = req.body;
