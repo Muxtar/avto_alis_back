@@ -262,7 +262,10 @@ export function requirePermission(module: AdminModule) {
   return (req: AuthRequest, res: Response, next: NextFunction) => {
     loadAdmin(req, res).then((a) => {
       if (!a) return;
-      if (a.isSuper || a.perms.includes(module)) { next(); return; }
+      // İcazəsi TƏYİN EDİLMƏMİŞ admin (boş siyahı) köhnə/konfiqurasiya olunmamış
+      // sayılır və hər şeyə icazəlidir — RBAC-dan əvvəlki adminlər bloklanmasın.
+      // Yalnız super-admin başqasına konkret modul verəndə (siyahı dolur) məhdudlaşır.
+      if (a.isSuper || a.perms.length === 0 || a.perms.includes(module)) { next(); return; }
       res.status(403).json({ success: false, message: 'Bu bölmə üçün icazəniz yoxdur' });
     }).catch(() => { if (!res.headersSent) res.status(403).json({ success: false, message: 'İcazə yoxdur' }); });
   };

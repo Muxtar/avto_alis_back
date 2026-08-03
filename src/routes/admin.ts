@@ -205,12 +205,19 @@ router.patch('/admin/ai', requirePermission('ai'), async (req: AuthRequest, res:
 router.get('/admin/me', requireAdmin, async (req: AuthRequest, res: Response) => {
   try {
     const me = await prisma.user.findUnique({ where: { id: req.adminId! }, select: { id: true, name: true, avatar: true, adminPermissions: true } });
+    const perms = me?.adminPermissions || [];
+    // İcazəsi təyin edilməmiş (boş) admin köhnə/konfiqurasiya olunmamış sayılır —
+    // 'admins' (yalnız super-admin) xaric hər modula girişi var (kimsə bloklanmasın).
+    const unconfigured = !req.isSuperAdmin && perms.length === 0;
+    const effective = req.isSuperAdmin
+      ? [...ADMIN_MODULES]
+      : unconfigured ? ADMIN_MODULES.filter((m) => m !== 'admins') : perms;
     res.json({
       success: true,
       id: me?.id, name: me?.name, avatar: me?.avatar,
       isSuperAdmin: !!req.isSuperAdmin,
-      // Super-admin bütün modullara icazəli sayılır (UI-də hamısı görünsün).
-      permissions: req.isSuperAdmin ? [...ADMIN_MODULES] : (me?.adminPermissions || []),
+      unconfigured,
+      permissions: effective,
       modules: [...ADMIN_MODULES],
     });
   } catch (error: any) {
@@ -1257,6 +1264,8 @@ router.get('/admin/admins', requireSuperAdmin, async (_req: AuthRequest, res: Re
       admins: admins.map((a) => ({
         id: a.id, name: a.name, phone: a.phone, avatar: a.avatar, isBlocked: a.isBlocked,
         isSuperAdmin: isAdminPhone(a.phone),
+        // Boş icazə + super deyil → köhnə/konfiqurasiya olunmamış (tam giriş).
+        unconfigured: !isAdminPhone(a.phone) && (a.adminPermissions || []).length === 0,
         permissions: isAdminPhone(a.phone) ? [...ADMIN_MODULES] : (a.adminPermissions || []),
       })),
     });
