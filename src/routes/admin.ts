@@ -6,6 +6,7 @@ import { authLimiter } from '../middleware/rateLimiter';
 import { createOtp } from '../services/otp';
 import { refund as kapitalRefund } from '../services/kapital';
 import { listFlags, setFlag } from '../services/settings';
+import { checkAllServices } from '../services/serviceHealth';
 import { infobipStatus, testWhatsApp } from '../services/infobipWhatsApp';
 import { smsStatus, testSms } from '../services/infobipSms';
 import { otpChannel } from '../services/otp';
@@ -195,6 +196,18 @@ router.patch('/admin/ai', requirePermission('ai'), async (req: AuthRequest, res:
     if (!flag || flag.section !== 'ai') { res.status(400).json({ success: false, message: 'Bu açar AI bölməsinə aid deyil' }); return; }
     await setFlag(key, value);
     res.json({ success: true, key, value });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+// Xarici servislərin canlı sağlamlıq yoxlaması — hansı işləyir, hansı yox
+// (Claude kredit vəziyyəti, Tavily, Infobip balans və s.). Canlı sınaq az
+// token/kredit xərcləyə bilər — ona görə yalnız bu endpoint çağırılanda işləyir.
+router.get('/admin/service-health', requirePermission('ai'), async (_req: AuthRequest, res: Response) => {
+  try {
+    const services = await checkAllServices();
+    res.json({ success: true, services });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }
