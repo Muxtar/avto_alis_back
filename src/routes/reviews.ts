@@ -36,7 +36,7 @@ router.post('/objects/:id/comments', adminAuth, async (req: AuthRequest, res: Re
     if (already) { res.status(400).json({ success: false, message: 'Bu obyektə artıq rəy yazmısınız — mövcud rəyinizi dəyişə bilərsiniz' }); return; }
     const comment = await prisma.comment.create({
       data: { userId: req.adminId!, objectId, content, rating: rating as number | null },
-      include: { user: { select: { id: true, name: true, type: true } } },
+      include: { user: { select: { id: true, name: true, type: true, avatar: true } } },
     });
     res.status(201).json({ success: true, comment });
   } catch (error: any) {
@@ -50,7 +50,7 @@ router.get('/objects/:id/reviews', async (req: Request, res: Response) => {
     const objectId = parseInt(String(req.params.id));
     const comments = await prisma.comment.findMany({
       where: { objectId },
-      include: { user: { select: { id: true, name: true, type: true } } },
+      include: { user: { select: { id: true, name: true, type: true, avatar: true } } },
       orderBy: { createdAt: 'desc' },
       take: 100,
     });
@@ -79,7 +79,7 @@ router.post('/professionals/:id/comments', adminAuth, async (req: AuthRequest, r
     if (already) { res.status(400).json({ success: false, message: 'Bu profilə artıq rəy yazmısınız — mövcud rəyinizi dəyişə bilərsiniz' }); return; }
     const comment = await prisma.comment.create({
       data: { userId: req.adminId!, professionalUserId: proId, content, rating: rating as number | null },
-      include: { user: { select: { id: true, name: true, type: true } } },
+      include: { user: { select: { id: true, name: true, type: true, avatar: true } } },
     });
     res.status(201).json({ success: true, comment });
   } catch (error: any) {
@@ -93,7 +93,7 @@ router.get('/professionals/:id/reviews', async (req: Request, res: Response) => 
     const proId = parseInt(String(req.params.id));
     const comments = await prisma.comment.findMany({
       where: { professionalUserId: proId },
-      include: { user: { select: { id: true, name: true, type: true } } },
+      include: { user: { select: { id: true, name: true, type: true, avatar: true } } },
       orderBy: { createdAt: 'desc' },
       take: 100,
     });

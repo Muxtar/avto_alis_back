@@ -191,7 +191,7 @@ router.get('/search/by-city/:city', async (req: Request, res: Response) => {
       prisma.user.findMany({
         where: { city, profileComplete: true },
         select: {
-          id: true, name: true, type: true, avgRating: true, ratingCount: true,
+          id: true, name: true, type: true, avatar: true, avgRating: true, ratingCount: true,
           city: true, address: true, latitude: true, longitude: true,
           workplaces: { select: { name: true, address: true, latitude: true, longitude: true } },
           _count: { select: { listings: true } },

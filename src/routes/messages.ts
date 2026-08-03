@@ -389,8 +389,8 @@ router.get('/messages/conversations', adminAuth, async (req: AuthRequest, res: R
     const messages = await prisma.message.findMany({
       where: { conversationId: null, OR: [{ senderId: userId }, { receiverId: userId }], NOT: { deletedForIds: { has: userId } } },
       include: {
-        sender: { select: { id: true, name: true, type: true } },
-        receiver: { select: { id: true, name: true, type: true } },
+        sender: { select: { id: true, name: true, type: true, avatar: true } },
+        receiver: { select: { id: true, name: true, type: true, avatar: true } },
         listing: { select: { id: true, title: true } },
       },
       orderBy: { createdAt: 'desc' },
@@ -441,7 +441,7 @@ router.get('/messages/:partnerId', adminAuth, async (req: AuthRequest, res: Resp
     });
     if (upd.count > 0) emitToUser(partnerId, 'chat:read', { by: userId });
 
-    const partner = await prisma.user.findUnique({ where: { id: partnerId }, select: { id: true, name: true, phone: true, type: true } });
+    const partner = await prisma.user.findUnique({ where: { id: partnerId }, select: { id: true, name: true, phone: true, type: true, avatar: true } });
     res.json({ messages, partner, total, hasMore: total > (before ? messages.length : limit) });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });

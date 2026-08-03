@@ -318,7 +318,7 @@ router.get('/listings/:id', async (req: Request, res: Response) => {
           },
         },
         comments: {
-          include: { user: { select: { id: true, name: true, type: true } } },
+          include: { user: { select: { id: true, name: true, type: true, avatar: true } } },
           orderBy: { createdAt: 'desc' },
         },
         _count: { select: { comments: true, favorites: true } },
