@@ -3,46 +3,87 @@ import { PrismaClient } from '@prisma/client';
 import { adminAuth, requirePermission, AuthRequest } from '../middleware/auth';
 import { complaintLimiter } from '../middleware/rateLimiter';
 import { refundOrder } from '../services/paymentGateway';
+import { upload } from '../middleware/upload';
+import { processImages } from '../middleware/imageProcess';
 
 const router = Router();
 const prisma = new PrismaClient();
 
-const CATEGORIES = ['TIME_WASTED', 'FRAUD', 'RUDE', 'FAKE_INFO', 'OTHER'];
+// Şikayət növləri — şəxs/seans (əvvəlki) + eBay üslubu məhsul qüsuru növləri.
+const CATEGORIES = [
+  'TIME_WASTED', 'FRAUD', 'RUDE', 'FAKE_INFO', 'OTHER',
+  'DEFECTIVE', 'DAMAGED', 'NOT_AS_DESCRIBED', 'WRONG_ITEM',
+];
 const COMPLAINT_WINDOW_DAYS = 7;
+const MAX_EVIDENCE = 6;
 
-// ── İstifadəçi: şikayət göndər ────────────────────────────────────────────────
-router.post('/complaints', complaintLimiter, adminAuth, async (req: AuthRequest, res: Response) => {
+// ── İstifadəçi: şikayət göndər (foto sübutlu — eBay üslubu) ───────────────────
+// multipart: description, category, + hədəf (consultationId | orderId | listingId |
+// targetUserId) + images[] (qüsurlu məhsulun şəkilləri). JSON da qəbul edilir
+// (şəkilsiz şəxs/seans şikayətləri üçün geriyə uyğunluq).
+router.post('/complaints', complaintLimiter, adminAuth, upload.array('images', MAX_EVIDENCE), processImages, async (req: AuthRequest, res: Response) => {
   try {
     const category = String(req.body.category || '').trim();
     const description = String(req.body.description || '').trim();
     if (!CATEGORIES.includes(category)) { res.status(400).json({ success: false, message: 'Şikayət növü yanlışdır' }); return; }
     if (description.length < 5) { res.status(400).json({ success: false, message: 'Şikayətin təsvirini yazın' }); return; }
 
-    const consultationId = req.body.consultationId !== undefined ? parseInt(String(req.body.consultationId)) : null;
+    const files = req.files as Express.Multer.File[] | undefined;
+    const images = files?.map((f) => f.filename) || [];
+
+    const consultationId = req.body.consultationId ? parseInt(String(req.body.consultationId)) : null;
+    const orderId = req.body.orderId ? parseInt(String(req.body.orderId)) : null;
+    let listingId = req.body.listingId ? parseInt(String(req.body.listingId)) : null;
     let targetUserId = req.body.targetUserId !== undefined ? parseInt(String(req.body.targetUserId)) : NaN;
 
     if (consultationId) {
       const s = await prisma.consultationSession.findUnique({ where: { id: consultationId } });
       if (!s || s.buyerId !== req.adminId) { res.status(403).json({ success: false, message: 'Bu seansdan şikayət edə bilməzsiniz' }); return; }
       targetUserId = s.professionalId;
-      // 7 gün pəncərə (seansın yaranmasından).
       const ageDays = (Date.now() - new Date(s.createdAt).getTime()) / 86400000;
       if (ageDays > COMPLAINT_WINDOW_DAYS) { res.status(400).json({ success: false, message: 'Şikayət müddəti bitib (7 gün)' }); return; }
-      // Hər seansa bir şikayət.
       const dup = await prisma.complaint.findFirst({ where: { complainantId: req.adminId!, consultationId } });
       if (dup) { res.status(400).json({ success: false, message: 'Bu seans üçün artıq şikayət göndərmisiniz' }); return; }
+    } else if (orderId) {
+      // Sifariş şikayəti — yalnız alıcı, satıcıya qarşı.
+      const o = await prisma.order.findUnique({ where: { id: orderId }, select: { buyerId: true, sellerId: true } });
+      if (!o || o.buyerId !== req.adminId) { res.status(403).json({ success: false, message: 'Bu sifarişdən şikayət edə bilməzsiniz' }); return; }
+      targetUserId = o.sellerId;
+    } else if (listingId) {
+      // Məhsul/elan şikayəti — hədəf elan sahibidir.
+      const l = await prisma.listing.findUnique({ where: { id: listingId }, select: { userId: true } });
+      if (!l) { res.status(404).json({ success: false, message: 'Elan tapılmadı' }); return; }
+      targetUserId = l.userId;
     }
-    if (Number.isNaN(targetUserId)) { res.status(400).json({ success: false, message: 'Şikayət ediləcək şəxs göstərilməyib' }); return; }
+
+    if (Number.isNaN(targetUserId)) { res.status(400).json({ success: false, message: 'Şikayət ediləcək şəxs/məhsul göstərilməyib' }); return; }
     if (targetUserId === req.adminId) { res.status(400).json({ success: false, message: 'Özünüzdən şikayət edə bilməzsiniz' }); return; }
 
     const complaint = await prisma.complaint.create({
-      data: { complainantId: req.adminId!, targetUserId, consultationId, category, description },
+      data: { complainantId: req.adminId!, targetUserId, consultationId, orderId, listingId, category, description, images },
     });
     res.json({ success: true, complaint });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
 
-// Mənim göndərdiyim şikayətlər.
+// İstifadəçi: mövcud şikayətə əlavə foto/sübut əlavə et (admin istəyəndən sonra).
+router.post('/complaints/:id/evidence', complaintLimiter, adminAuth, upload.array('images', MAX_EVIDENCE), processImages, async (req: AuthRequest, res: Response) => {
+  try {
+    const id = parseInt(String(req.params.id));
+    const c = await prisma.complaint.findUnique({ where: { id }, select: { complainantId: true, images: true, status: true } });
+    if (!c || c.complainantId !== req.adminId) { res.status(404).json({ success: false, message: 'Şikayət tapılmadı' }); return; }
+    if (c.status === 'RESOLVED' || c.status === 'REJECTED') { res.status(400).json({ success: false, message: 'Bağlanmış şikayətə sübut əlavə edilə bilməz' }); return; }
+    const files = req.files as Express.Multer.File[] | undefined;
+    const add = files?.map((f) => f.filename) || [];
+    if (!add.length) { res.status(400).json({ success: false, message: 'Şəkil əlavə edin' }); return; }
+    const images = [...(c.images || []), ...add].slice(0, MAX_EVIDENCE);
+    // Sübut əlavə olundu → yenidən baxış üçün REVIEWING-ə qaytar.
+    const updated = await prisma.complaint.update({ where: { id }, data: { images, status: 'REVIEWING' } });
+    res.json({ success: true, complaint: updated });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
+// Mənim göndərdiyim şikayətlər (sübut vəziyyəti ilə — admin foto istəyibsə görünsün).
 router.get('/me/complaints', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
     const complaints = await prisma.complaint.findMany({
@@ -84,6 +125,22 @@ router.get('/admin/complaints/:id', requirePermission('complaints'), async (req:
     });
     if (!complaint) { res.status(404).json({ success: false, message: 'Tapılmadı' }); return; }
 
+    // Məhsul/sifariş şikayətidirsə əlaqəli obyektləri gətir (admin analiz üçün).
+    let listing: any = null, order: any = null;
+    if (complaint.listingId) {
+      listing = await prisma.listing.findUnique({
+        where: { id: complaint.listingId },
+        select: { id: true, title: true, price: true, images: true, condition: true, user: { select: { id: true, name: true } } },
+      });
+    }
+    if (complaint.orderId) {
+      order = await prisma.order.findUnique({
+        where: { id: complaint.orderId },
+        select: { id: true, status: true, total: true, paymentStatus: true, paymentMethod: true,
+          items: { select: { listingId: true, title: true, price: true, quantity: true, listing: { select: { images: true } } } } },
+      });
+    }
+
     let evidence: any = null;
     if (complaint.consultationId) {
       const s = complaint.consultation!;
@@ -112,7 +169,29 @@ router.get('/admin/complaints/:id', requirePermission('complaints'), async (req:
         messages: msgs.map((m) => ({ ...m, who: m.senderId === s.professionalId ? 'professional' : 'buyer' })),
       };
     }
-    res.json({ success: true, complaint, evidence });
+    res.json({ success: true, complaint, evidence, listing, order });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
+// Admin: şikayətçidən əlavə foto/sübut istə (eBay üslubu — "daha çox məlumat").
+// Status EVIDENCE_REQUESTED olur və şikayətçiyə bildiriş gedir.
+router.post('/admin/complaints/:id/request-evidence', requirePermission('complaints'), async (req: AuthRequest, res: Response) => {
+  try {
+    const id = parseInt(String(req.params.id));
+    const note = String(req.body?.note || '').trim().slice(0, 300);
+    const c = await prisma.complaint.findUnique({ where: { id }, select: { id: true, complainantId: true, status: true } });
+    if (!c) { res.status(404).json({ success: false, message: 'Tapılmadı' }); return; }
+    if (c.status === 'RESOLVED' || c.status === 'REJECTED') { res.status(400).json({ success: false, message: 'Bağlanmış şikayət' }); return; }
+    await prisma.complaint.update({ where: { id }, data: { status: 'EVIDENCE_REQUESTED', adminNote: note || undefined } });
+    await prisma.notification.create({
+      data: {
+        userId: c.complainantId, type: 'SYSTEM',
+        title: 'Şikayətiniz üçün əlavə sübut istənir',
+        body: note ? `Admin: ${note}` : 'Zəhmət olmasa qüsurun foto/sübutlarını əlavə edin ki, araşdırma tamamlansın.',
+        link: '/complaints',
+      },
+    }).catch(() => {});
+    res.json({ success: true });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
 

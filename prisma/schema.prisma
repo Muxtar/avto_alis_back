@@ -1086,6 +1086,7 @@ model ConsultationSession {
 enum ComplaintStatus {
   OPEN
   REVIEWING
+  EVIDENCE_REQUESTED
   RESOLVED
   REJECTED
 }
@@ -1095,8 +1096,11 @@ model Complaint {
   complainantId  Int
   targetUserId   Int
   consultationId Int? // dolu olarsa konkret seansa bağlıdır
-  category       String // TIME_WASTED / FRAUD / RUDE / FAKE_INFO / OTHER
+  listingId      Int? // dolu olarsa məhsul/elan şikayəti (eBay üslubu — foto sübutlu)
+  orderId        Int? // dolu olarsa konkret alış-sifariş şikayəti
+  category       String // TIME_WASTED / FRAUD / RUDE / FAKE_INFO / DEFECTIVE / DAMAGED / NOT_AS_DESCRIBED / WRONG_ITEM / OTHER
   description    String
+  images         String[]             @default([]) // sübut şəkilləri (qüsurlu məhsul və s.)
   status         ComplaintStatus      @default(OPEN)
   resolution     String? // REFUNDED / WARNED / SUSPENDED / NO_ACTION / REJECTED
   adminNote      String?
