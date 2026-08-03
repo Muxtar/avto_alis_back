@@ -34,6 +34,7 @@ export interface AuthRequest extends Request {
   sessionId?: string; // cari cihaz sessiyası (JWT-dəki `sid`)
   isSuperAdmin?: boolean;       // ADMIN_PHONES-dakı admin — hər modula icazəli
   adminPermissions?: string[];  // adi adminin icazəli modulları
+  adminName?: string;           // audit jurnalı üçün admin adı (surət)
 }
 
 export function generateToken(userId: number): string {
@@ -225,7 +226,7 @@ export function requireSellerVerified(req: AuthRequest, res: Response, next: Nex
 export const ADMIN_MODULES = [
   'users', 'listings', 'orders', 'returns', 'finance', 'businesses', 'kyc',
   'credentials', 'complaints', 'social', 'promo', 'comments', 'broadcast',
-  'banners', 'couriers', 'settings', 'ai', 'admins',
+  'banners', 'couriers', 'settings', 'ai', 'finance_payouts', 'audit', 'admins',
 ] as const;
 export type AdminModule = typeof ADMIN_MODULES[number];
 
@@ -238,13 +239,14 @@ async function loadAdmin(req: AuthRequest, res: Response): Promise<{ id: number;
   try { decoded = jwt.verify(token, SIGNING_KEY) as { userId: number }; }
   catch { res.status(401).json({ success: false, message: 'Etibarsız token' }); return null; }
   req.adminId = decoded.userId;
-  const user = await prisma.user.findUnique({ where: { id: decoded.userId }, select: { role: true, phone: true, adminPermissions: true, isBlocked: true } });
+  const user = await prisma.user.findUnique({ where: { id: decoded.userId }, select: { role: true, phone: true, name: true, adminPermissions: true, isBlocked: true } });
   if (!user || user.role !== 'ADMIN' || user.isBlocked) {
     res.status(403).json({ success: false, message: 'Admin icazəsi tələb olunur' }); return null;
   }
   const isSuper = isAdminPhone(user.phone);           // ADMIN_PHONES → super-admin
   req.isSuperAdmin = isSuper;
   req.adminPermissions = user.adminPermissions || [];
+  req.adminName = user.name || 'Admin';
   return { id: decoded.userId, isSuper, perms: user.adminPermissions || [] };
 }
 

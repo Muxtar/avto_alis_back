@@ -37,6 +37,7 @@ import veriffRoutes from './routes/veriff';
 import contactsRoutes from './routes/contacts';
 import bannersRoutes from './routes/banners';
 import aiRoutes from './routes/ai';
+import { auditMiddleware } from './services/auditLog';
 
 const app = express();
 const PORT = process.env.PORT || 5001;
@@ -91,6 +92,9 @@ const uploadsDir =
   (process.env.RAILWAY_VOLUME_MOUNT_PATH ? path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH, 'uploads') : path.join(__dirname, '../uploads'));
 fs.mkdirSync(uploadsDir, { recursive: true });
 app.use('/uploads', express.static(uploadsDir));
+
+// Admin audit jurnalı — bütün admin mutasiyalarını avtomatik qeyd edir.
+app.use(auditMiddleware);
 
 app.use('/api', authRoutes);
 app.use('/api', verifyRoutes);

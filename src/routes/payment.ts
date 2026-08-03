@@ -5,6 +5,7 @@ import { getOrderStatus, isPaidStatus } from '../services/kapital';
 import { refundOrder } from '../services/paymentGateway';
 import { getPaymentStatus as yigimStatus, isPaidStatus as yigimPaid } from '../services/yigimPay';
 import { settleConsultation } from './consultations';
+import { recordSettlement, recordSettlementMany } from '../services/settlement';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -49,6 +50,9 @@ async function settleOrders(where: { gatewayProvider?: string; gatewayRef?: stri
   }
   // FAILED — kartda stok checkout-da azaldılmayıb, ona görə geri qaytarmağa ehtiyac
   // yoxdur (heç azalmayıb). Order PENDING+FAILED qalır; alıcı yenidən cəhd edə bilər.
+
+  // Satıcı hesablaşması — ödənilmiş sifarişlər üçün ledger yarat/yenilə.
+  await recordSettlementMany(orders.map((o) => o.id)).catch(() => {});
 }
 
 // ====================== CALLBACK ======================
@@ -185,6 +189,7 @@ router.post('/payment/refund/:orderId', requirePermission('finance'), async (req
       where: { id: order.id },
       data: { paymentStatus: 'REFUNDED', gatewayStatus: 'Refunded' },
     });
+    await recordSettlement(order.id).catch(() => {});   // ledger geri al
     res.json({ success: true });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });

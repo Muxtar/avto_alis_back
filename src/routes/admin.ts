@@ -9,6 +9,8 @@ import { listFlags, setFlag } from '../services/settings';
 import { checkAllServices } from '../services/serviceHealth';
 import { runWebSearchTest } from '../services/webSearchAI';
 import { runAgent } from '../services/aiAgent';
+import { getCommissionPercent, setCommissionPercent, createPayout, sellerBalance } from '../services/settlement';
+import { recordSettlement } from '../services/settlement';
 import { infobipStatus, testWhatsApp } from '../services/infobipWhatsApp';
 import { smsStatus, testSms } from '../services/infobipSms';
 import { otpChannel } from '../services/otp';
@@ -254,6 +256,189 @@ router.get('/admin/service-health', requirePermission('ai'), async (_req: AuthRe
   try {
     const services = await checkAllServices();
     res.json({ success: true, services });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+// ══════════════════════════════════════════════════════════════════════════
+// CSV EXPORT — sifariş/istifadəçi/maliyyə/payout/audit cədvəllərini yüklə
+// ══════════════════════════════════════════════════════════════════════════
+function toCsv(rows: any[], columns: { key: string; label: string }[]): string {
+  const esc = (v: any) => {
+    if (v === null || v === undefined) return '';
+    let s = typeof v === 'object' ? JSON.stringify(v) : String(v);
+    if (/[",\n;]/.test(s)) s = '"' + s.replace(/"/g, '""') + '"';
+    return s;
+  };
+  const header = columns.map((c) => esc(c.label)).join(',');
+  const body = rows.map((r) => columns.map((c) => esc(r[c.key])).join(',')).join('\n');
+  return '﻿' + header + '\n' + body;   // BOM — Excel Azərbaycan hərflərini düz göstərsin
+}
+function sendCsv(res: Response, name: string, csv: string) {
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="${name}"`);
+  res.send(csv);
+}
+
+router.get('/admin/export/orders.csv', requirePermission('orders'), async (_req: AuthRequest, res: Response) => {
+  try {
+    const orders = await prisma.order.findMany({ orderBy: { createdAt: 'desc' }, take: 5000, include: { buyer: { select: { name: true } }, seller: { select: { name: true } } } });
+    const rows = orders.map((o) => ({ id: o.id, buyer: o.buyer?.name, seller: o.seller?.name, total: o.total, status: o.status, paymentMethod: o.paymentMethod, paymentStatus: o.paymentStatus, createdAt: o.createdAt.toISOString() }));
+    sendCsv(res, 'orders.csv', toCsv(rows, [
+      { key: 'id', label: 'Sifariş' }, { key: 'buyer', label: 'Alıcı' }, { key: 'seller', label: 'Satıcı' },
+      { key: 'total', label: 'Məbləğ' }, { key: 'status', label: 'Status' }, { key: 'paymentMethod', label: 'Ödəniş üsulu' },
+      { key: 'paymentStatus', label: 'Ödəniş statusu' }, { key: 'createdAt', label: 'Tarix' },
+    ]));
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
+router.get('/admin/export/users.csv', requirePermission('users'), async (_req: AuthRequest, res: Response) => {
+  try {
+    const users = await prisma.user.findMany({ orderBy: { createdAt: 'desc' }, take: 10000, select: { id: true, name: true, phone: true, email: true, type: true, role: true, isBlocked: true, sellerVerified: true, createdAt: true } });
+    const rows = users.map((u) => ({ ...u, createdAt: u.createdAt.toISOString() }));
+    sendCsv(res, 'users.csv', toCsv(rows, [
+      { key: 'id', label: 'ID' }, { key: 'name', label: 'Ad' }, { key: 'phone', label: 'Telefon' }, { key: 'email', label: 'Email' },
+      { key: 'type', label: 'Tip' }, { key: 'role', label: 'Rol' }, { key: 'isBlocked', label: 'Bloklu' }, { key: 'sellerVerified', label: 'Satıcı təsdiqli' }, { key: 'createdAt', label: 'Qeydiyyat' },
+    ]));
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
+router.get('/admin/export/payouts.csv', requirePermission('finance_payouts'), async (_req: AuthRequest, res: Response) => {
+  try {
+    const payouts = await prisma.payout.findMany({ orderBy: { createdAt: 'desc' }, take: 10000 });
+    const ids = Array.from(new Set(payouts.map((p) => p.sellerId)));
+    const users = ids.length ? await prisma.user.findMany({ where: { id: { in: ids } }, select: { id: true, name: true } }) : [];
+    const uById = new Map(users.map((u) => [u.id, u.name]));
+    const rows = payouts.map((p) => ({ id: p.id, seller: uById.get(p.sellerId) || p.sellerId, amount: p.amount, method: p.method, reference: p.reference, admin: p.createdName, createdAt: p.createdAt.toISOString() }));
+    sendCsv(res, 'payouts.csv', toCsv(rows, [
+      { key: 'id', label: 'Payout' }, { key: 'seller', label: 'Satıcı' }, { key: 'amount', label: 'Məbləğ' },
+      { key: 'method', label: 'Üsul' }, { key: 'reference', label: 'Referans' }, { key: 'admin', label: 'Admin' }, { key: 'createdAt', label: 'Tarix' },
+    ]));
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
+router.get('/admin/export/audit.csv', requirePermission('audit'), async (_req: AuthRequest, res: Response) => {
+  try {
+    const logs = await prisma.adminAuditLog.findMany({ orderBy: { createdAt: 'desc' }, take: 10000 });
+    const rows = logs.map((l) => ({ id: l.id, admin: l.adminName, action: l.action, method: l.method, path: l.path, target: l.targetType ? `${l.targetType}${l.targetId ? '#' + l.targetId : ''}` : '', status: l.status, ip: l.ip, createdAt: l.createdAt.toISOString() }));
+    sendCsv(res, 'audit.csv', toCsv(rows, [
+      { key: 'id', label: 'ID' }, { key: 'admin', label: 'Admin' }, { key: 'action', label: 'Əməliyyat' }, { key: 'method', label: 'Metod' },
+      { key: 'path', label: 'Path' }, { key: 'target', label: 'Hədəf' }, { key: 'status', label: 'Status' }, { key: 'ip', label: 'IP' }, { key: 'createdAt', label: 'Tarix' },
+    ]));
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
+// ══════════════════════════════════════════════════════════════════════════
+// SATICI ÖDƏNİŞLƏRİ (PAYOUTS) + PLATFORMA KOMİSSİYASI
+// ══════════════════════════════════════════════════════════════════════════
+
+// Komissiya faizini oxu/yaz.
+router.get('/admin/payouts/commission', requirePermission('finance_payouts'), async (_req: AuthRequest, res: Response) => {
+  try { res.json({ success: true, percent: await getCommissionPercent() }); }
+  catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+router.patch('/admin/payouts/commission', requirePermission('finance_payouts'), async (req: AuthRequest, res: Response) => {
+  try {
+    const percent = parseFloat(String(req.body?.percent));
+    if (!Number.isFinite(percent) || percent < 0 || percent > 100) { res.status(400).json({ success: false, message: 'Faiz 0-100 aralığında olmalıdır' }); return; }
+    res.json({ success: true, percent: await setCommissionPercent(percent) });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
+// Satıcıların balans siyahısı (ödəniləcək / gözləyən / ödənilmiş + nağd komissiya borcu).
+router.get('/admin/payouts/sellers', requirePermission('finance_payouts'), async (req: AuthRequest, res: Response) => {
+  try {
+    const q = String(req.query.q || '').trim();
+    const ledgers = await prisma.sellerLedger.findMany({ select: { sellerId: true, status: true, netAmount: true, commission: true, heldByPlatform: true } });
+    const map = new Map<number, { sellerId: number; available: number; pending: number; paidOut: number; commissionDueCash: number }>();
+    for (const l of ledgers) {
+      const cur = map.get(l.sellerId) || { sellerId: l.sellerId, available: 0, pending: 0, paidOut: 0, commissionDueCash: 0 };
+      if (!l.heldByPlatform) { if (l.status !== 'REVERSED') cur.commissionDueCash += l.commission; }
+      else if (l.status === 'AVAILABLE') cur.available += l.netAmount;
+      else if (l.status === 'PENDING') cur.pending += l.netAmount;
+      else if (l.status === 'PAID_OUT') cur.paidOut += l.netAmount;
+      map.set(l.sellerId, cur);
+    }
+    const ids = Array.from(map.keys());
+    const users = ids.length ? await prisma.user.findMany({ where: { id: { in: ids } }, select: { id: true, name: true, phone: true } }) : [];
+    const uById = new Map(users.map((u) => [u.id, u]));
+    const r2 = (n: number) => Math.round(n * 100) / 100;
+    let rows = Array.from(map.values()).map((s) => ({
+      ...s, available: r2(s.available), pending: r2(s.pending), paidOut: r2(s.paidOut), commissionDueCash: r2(s.commissionDueCash),
+      name: uById.get(s.sellerId)?.name || '—', phone: uById.get(s.sellerId)?.phone || '',
+    }));
+    if (q) rows = rows.filter((r) => r.name.toLowerCase().includes(q.toLowerCase()) || r.phone.includes(q));
+    rows.sort((a, b) => b.available - a.available);
+    res.json({ success: true, sellers: rows });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
+// Bir satıcının detalı — ledger + payout tarixçəsi.
+router.get('/admin/payouts/sellers/:id', requirePermission('finance_payouts'), async (req: AuthRequest, res: Response) => {
+  try {
+    const sellerId = parseInt(String(req.params.id));
+    const [balance, ledgers, payouts, seller] = await Promise.all([
+      sellerBalance(sellerId),
+      prisma.sellerLedger.findMany({ where: { sellerId }, orderBy: { createdAt: 'desc' }, take: 100 }),
+      prisma.payout.findMany({ where: { sellerId }, orderBy: { createdAt: 'desc' }, take: 50 }),
+      prisma.user.findUnique({ where: { id: sellerId }, select: { id: true, name: true, phone: true } }),
+    ]);
+    res.json({ success: true, seller, balance, ledgers, payouts });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
+// Payout yarat — satıcının mövcud (AVAILABLE) balansını ödə.
+router.post('/admin/payouts', requirePermission('finance_payouts'), async (req: AuthRequest, res: Response) => {
+  try {
+    const sellerId = parseInt(String(req.body?.sellerId));
+    if (Number.isNaN(sellerId)) { res.status(400).json({ success: false, message: 'sellerId tələb olunur' }); return; }
+    const method = req.body?.method ? String(req.body.method).slice(0, 40) : undefined;
+    const reference = req.body?.reference ? String(req.body.reference).slice(0, 200) : undefined;
+    const payout = await createPayout(sellerId, req.adminId!, req.adminName || 'Admin', method, reference);
+    await prisma.notification.create({
+      data: { userId: sellerId, type: 'SYSTEM', title: 'Ödəniş edildi', body: `Hesabınıza ${payout.amount} AZN ödəniş edildi.`, link: '/earnings' },
+    }).catch(() => {});
+    res.json({ success: true, payout });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
+// Bütün payout tarixçəsi.
+router.get('/admin/payouts', requirePermission('finance_payouts'), async (req: AuthRequest, res: Response) => {
+  try {
+    const page = Math.max(1, parseInt(String(req.query.page || '1')) || 1);
+    const take = 50;
+    const [payouts, total] = await Promise.all([
+      prisma.payout.findMany({ orderBy: { createdAt: 'desc' }, skip: (page - 1) * take, take }),
+      prisma.payout.count(),
+    ]);
+    const ids = Array.from(new Set(payouts.map((p) => p.sellerId)));
+    const users = ids.length ? await prisma.user.findMany({ where: { id: { in: ids } }, select: { id: true, name: true } }) : [];
+    const uById = new Map(users.map((u) => [u.id, u.name]));
+    res.json({ success: true, payouts: payouts.map((p) => ({ ...p, sellerName: uById.get(p.sellerId) || '—' })), total, page, totalPages: Math.ceil(total / take) });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
+// Audit jurnalı — admin əməliyyatları tarixçəsi (filtr: admin, action, tarix).
+router.get('/admin/audit', requirePermission('audit'), async (req: AuthRequest, res: Response) => {
+  try {
+    const page = Math.max(1, parseInt(String(req.query.page || '1')) || 1);
+    const take = Math.min(100, Math.max(1, parseInt(String(req.query.limit || '50')) || 50));
+    const where: any = {};
+    if (req.query.adminId) where.adminId = parseInt(String(req.query.adminId));
+    if (req.query.action) where.action = { contains: String(req.query.action) };
+    if (req.query.targetType) where.targetType = String(req.query.targetType);
+    if (req.query.q) {
+      const q = String(req.query.q);
+      where.OR = [{ adminName: { contains: q, mode: 'insensitive' } }, { path: { contains: q } }, { action: { contains: q } }];
+    }
+    const [logs, total] = await Promise.all([
+      prisma.adminAuditLog.findMany({ where, orderBy: { createdAt: 'desc' }, skip: (page - 1) * take, take }),
+      prisma.adminAuditLog.count({ where }),
+    ]);
+    // Filtr üçün fərqli əməliyyat növləri + adminlər.
+    const admins = await prisma.user.findMany({ where: { role: 'ADMIN' }, select: { id: true, name: true } });
+    res.json({ success: true, logs, total, page, totalPages: Math.ceil(total / take), admins });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }
@@ -1006,6 +1191,7 @@ router.put('/admin/orders/:id/status', requirePermission('orders'), async (req: 
       }
     }
     const updated = await prisma.order.update({ where: { id: orderId }, data: { status } });
+    await recordSettlement(orderId).catch(() => {});   // satıcı ledger yenilə
     // Alıcıya bildiriş
     try {
       await prisma.notification.create({

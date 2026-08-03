@@ -2,6 +2,7 @@ import { Router, Response } from 'express';
 import { PrismaClient, UserType } from '@prisma/client';
 import { adminAuth, requireType, AuthRequest } from '../middleware/auth';
 import { createPayment as createGatewayPayment, refundOrder as gatewayRefundOrder } from '../services/paymentGateway';
+import { recordSettlement, recordSettlementMany, sellerBalance } from '../services/settlement';
 import { checkPrice as yangoCheckPrice, isYangoConfigured, YANGO_MAX_WEIGHT_KG } from '../services/yangoDelivery';
 import { dispatchOrderToYango } from './yango';
 
@@ -640,6 +641,7 @@ router.post('/cart/checkout', requireType(BUYER_TYPES), async (req: AuthRequest,
       if (grandTotal <= 0) {
         // Tamamilə endirimlə örtülüb — ödənişə ehtiyac yoxdur.
         await prisma.order.updateMany({ where: { id: { in: orders.map((o) => o.id) } }, data: { paymentStatus: 'PAID' } });
+        await recordSettlementMany(orders.map((o) => o.id)).catch(() => {});
       } else {
         try {
           // Şlüz facade YIĞIM (MAGNET) və ya Kapital-ı seçir (PAYMENT_GATEWAY env).
@@ -883,6 +885,9 @@ router.put('/orders/:id/status', adminAuth, async (req: AuthRequest, res: Respon
         data: { userId: order.referrerId, type: 'REFERRAL', title: 'Referal komissiyası ləğv edildi', body: `Sifariş #${order.id} ləğv edildiyi üçün komissiya ləğv olundu.`, link: '/referral-earnings' },
       }).catch(() => {});
     }
+
+    // Satıcı hesablaşması — status/ödəniş dəyişdi (DELIVERED→AVAILABLE, CANCELLED/REFUND→REVERSED).
+    await recordSettlement(id).catch(() => {});
 
     // Aliciya bildirim
     const statusLabels: Record<string, string> = {
@@ -1193,6 +1198,19 @@ router.put('/returns/:id/refund', adminAuth, async (req: AuthRequest, res: Respo
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }
+});
+
+// Satıcının öz qazancı — balans + son əməliyyatlar + payout tarixçəsi.
+router.get('/me/earnings', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const sellerId = req.adminId!;
+    const [balance, ledgers, payouts] = await Promise.all([
+      sellerBalance(sellerId),
+      prisma.sellerLedger.findMany({ where: { sellerId }, orderBy: { createdAt: 'desc' }, take: 50, select: { id: true, orderId: true, grossAmount: true, commission: true, commissionRate: true, netAmount: true, heldByPlatform: true, status: true, createdAt: true } }),
+      prisma.payout.findMany({ where: { sellerId }, orderBy: { createdAt: 'desc' }, take: 30, select: { id: true, amount: true, method: true, reference: true, createdAt: true } }),
+    ]);
+    res.json({ success: true, balance, ledgers, payouts });
+  } catch (error: any) { res.status(400).json({ success: false, message: error.message }); }
 });
 
 export default router;

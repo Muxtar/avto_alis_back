@@ -1217,3 +1217,66 @@ model Setting {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
+
+// ── Admin audit jurnalı — hər admin əməliyyatı (kim, nə, nə vaxt) ──────────────
+model AdminAuditLog {
+  id         Int      @id @default(autoincrement())
+  adminId    Int
+  adminName  String   // anlıq surət (admin sonradan silinsə/adı dəyişsə də qalır)
+  method     String   // POST/PUT/PATCH/DELETE
+  path       String   // /api/admin/...
+  action     String   // törədilmiş etiket, məs. "listing.status"
+  targetType String?  // listing/user/order/...
+  targetId   String?
+  status     Int      // HTTP status kodu
+  summary    String   // oxunaqlı izah
+  meta       Json?    // əlavə (redaktə olunmuş body və s.)
+  ip         String?
+  createdAt  DateTime @default(now())
+
+  @@index([adminId, createdAt])
+  @@index([action])
+  @@index([targetType, targetId])
+  @@index([createdAt])
+}
+
+// ── Satıcı hesablaşması (ledger) — hər ödənilmiş sifariş üçün qazanc qeydi ─────
+enum LedgerStatus {
+  PENDING   // ödənilib, amma hələ çatdırılmayıb (buyer protection pəncərəsi)
+  AVAILABLE // çatdırılıb — satıcıya ödənilə bilər
+  PAID_OUT  // satıcıya ödənilib
+  REVERSED  // qaytarma/ləğv — geri alınıb
+}
+
+model SellerLedger {
+  id             Int          @id @default(autoincrement())
+  sellerId       Int
+  orderId        Int          @unique
+  buyerId        Int
+  grossAmount    Float        // sifarişin ümumi məbləği
+  commissionRate Float        // tətbiq olunan komissiya faizi (surət)
+  commission     Float        // platforma komissiyası
+  netAmount      Float        // satıcının qazancı (gross - commission)
+  heldByPlatform Boolean      @default(true) // KART: platforma pulu saxlayır. NAĞD: satıcı özü alıb (komissiya borcu)
+  status         LedgerStatus @default(PENDING)
+  payoutId       Int?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  @@index([sellerId, status])
+  @@index([payoutId])
+}
+
+// ── Payout — satıcıya edilmiş ödəniş (bir neçə ledger-i əhatə edir) ────────────
+model Payout {
+  id          Int      @id @default(autoincrement())
+  sellerId    Int
+  amount      Float
+  method      String?  // bank köçürməsi / nağd / digər
+  reference   String?  // köçürmə referansı / admin qeydi
+  createdById Int      // əməliyyatı edən admin
+  createdName String
+  createdAt   DateTime @default(now())
+
+  @@index([sellerId, createdAt])
+}
