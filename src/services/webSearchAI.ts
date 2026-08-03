@@ -650,3 +650,11 @@ async function webSearchClaude(q: string): Promise<WebSearchResponse> {
 export function webSearchEnabled(): boolean {
   return !!(process.env.TAVILY_API_KEY || process.env.ANTHROPIC_API_KEY);
 }
+
+// Admin test — konkret axtarış motorunu (flag-dan asılı olmadan) sınaqdan keçirir.
+// Nəticəni birbaşa qaytarır ki, admin motorun işlədiyini gözlə görsün.
+export async function runWebSearchTest(engine: 'tavily' | 'claude' | 'person', q: string): Promise<WebSearchResponse> {
+  if (engine === 'person') return webSearchPerson(q);
+  if (engine === 'claude') return webSearchClaude(q);
+  return webSearchTavily(q);
+}

@@ -7,6 +7,8 @@ import { createOtp } from '../services/otp';
 import { refund as kapitalRefund } from '../services/kapital';
 import { listFlags, setFlag } from '../services/settings';
 import { checkAllServices } from '../services/serviceHealth';
+import { runWebSearchTest } from '../services/webSearchAI';
+import { runAgent } from '../services/aiAgent';
 import { infobipStatus, testWhatsApp } from '../services/infobipWhatsApp';
 import { smsStatus, testSms } from '../services/infobipSms';
 import { otpChannel } from '../services/otp';
@@ -198,6 +200,50 @@ router.patch('/admin/ai', requirePermission('ai'), async (req: AuthRequest, res:
     res.json({ success: true, key, value });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+// Konkret AI-ı canlı SINAQDAN keçir — real nümunə giriş verib nəticəni qaytarır
+// (admin AI-ın həqiqətən işlədiyini gözlə görsün). Az miqdar token/kredit xərcləyir.
+router.post('/admin/ai/test', requirePermission('ai'), async (req: AuthRequest, res: Response) => {
+  try {
+    const id = String(req.body?.id || '');
+    const token = (req.headers.authorization || '').replace('Bearer ', '');
+    const trim = (s: string, n = 400) => (s || '').slice(0, n);
+
+    if (id === 'ai_websearch_tavily' || id === 'ai_websearch_claude' || id === 'ai_person_search') {
+      if (!process.env.TAVILY_API_KEY && !process.env.ANTHROPIC_API_KEY) { res.json({ success: true, ok: false, output: 'Açar yoxdur (TAVILY/ANTHROPIC).' }); return; }
+      const engine = id === 'ai_person_search' ? 'person' : id === 'ai_websearch_claude' ? 'claude' : 'tavily';
+      const q = engine === 'person' ? 'İlham Əliyev' : 'iPhone 15';
+      const r = await runWebSearchTest(engine as any, q);
+      const lines = (r.results || []).slice(0, 3).map((x) => `• ${trim(x.title, 70)}${x.price ? ` — ${x.price} AZN` : ''}${x.platform ? ` (${x.platform})` : ''} [${x.site}]`);
+      res.json({
+        success: true, ok: r.ok && (r.results?.length ?? 0) > 0,
+        query: q,
+        output: r.results?.length ? `${r.results.length} nəticə tapıldı:\n${lines.join('\n')}` : (r.error || 'Nəticə tapılmadı'),
+      });
+      return;
+    }
+
+    if (id === 'ai_assistant' || id === 'ai_assistant_opus') {
+      if (!process.env.ANTHROPIC_API_KEY) { res.json({ success: true, ok: false, output: 'ANTHROPIC_API_KEY yoxdur.' }); return; }
+      const prompt = id === 'ai_assistant_opus'
+        ? 'İki fərqli məhsulu qiymət və keyfiyyət baxımından müqayisə et və hansının daha sərfəli olduğunu izah et (nümunə).'
+        : 'Salam! Bir qısa cümlə ilə özünü təqdim et.';
+      const { reply } = await runAgent(req.adminId!, token, [{ role: 'user', content: prompt }]);
+      res.json({ success: true, ok: !!reply, query: prompt, output: trim(reply || 'Cavab alınmadı', 600) });
+      return;
+    }
+
+    // Şəkil/sənəd tələb edən AI-lar avtomatik test oluna bilmir.
+    if (id === 'ai_vision_search') { res.json({ success: true, manual: true, output: 'Şəkillə axtarışı test etmək üçün saytdakı axtarış çubuğunun kamera düyməsi ilə şəkil yükləyin.' }); return; }
+    if (id === 'ai_identity') { res.json({ success: true, manual: true, output: 'Kimlik AI-ı real şəxsiyyət vəsiqəsi + selfi ilə (KYC axını) test olunur.' }); return; }
+    if (id === 'ai_business_docs') { res.json({ success: true, manual: true, output: 'Biznes AI-ı real VÖEN/etibarnamə sənədi yüklənərək (biznes təsdiqi) test olunur.' }); return; }
+    if (id === 'internet_search') { res.json({ success: true, manual: true, output: 'Bu master açardır — alt motorları (Tavily/Claude) ayrıca test edin.' }); return; }
+
+    res.status(400).json({ success: false, message: 'Bu AI üçün test yoxdur' });
+  } catch (error: any) {
+    res.json({ success: true, ok: false, output: 'Test xətası: ' + (error?.message || 'naməlum') });
   }
 });
 
