@@ -208,7 +208,7 @@ router.get('/sellers/:id', async (req: Request, res: Response) => {
       select: {
         id: true, name: true, type: true, createdAt: true, workplaces: true,
         serviceBrands: true, serviceAllBrands: true, serviceCategories: true,
-        sellerVerified: true, idVerifyStatus: true, avatar: true, profession: true, bio: true,
+        sellerVerified: true, idVerifyStatus: true, avatar: true, profession: true, professions: true, bio: true,
         birthDate: true, gender: true, // kimlik məlumatları — FIN və vəsiqə şəkli ictimai DEYİL
         cvFile: true, cvPublic: true,
         consultationOffers: { where: { active: true }, select: { id: true, title: true, description: true, durationMinutes: true, price: true }, orderBy: { createdAt: 'asc' } },

@@ -142,7 +142,8 @@ model User {
   isBlocked             Boolean               @default(false) // admin tərəfindən bloklanıb
   profileComplete       Boolean               @default(false)
   lastSeen              DateTime? // sonuncu onlayn olduğu vaxt (offline olanda "son görülmə")
-  profession            String? // ixtisas (qeydiyyatda soruşulur)
+  profession            String? // əsas ixtisas (professions[0] — geriyə uyğunluq üçün)
+  professions           String[]              @default([]) // 3-ə qədər ixtisas
   bio                   String? // istifadəçinin özü haqqında qeydi
   avatar                String? // profil şəkli
   cvFile                String? // istifadəçinin CV-si (PDF/şəkil)

@@ -22,7 +22,7 @@ router.get('/me', adminAuth, async (req: AuthRequest, res: Response) => {
       select: {
         id: true, name: true, phone: true, email: true, emailVerified: true, type: true, role: true, verified: true,
         profileComplete: true, sellerVerified: true, sellerVerifiedAt: true, createdAt: true,
-        idVerifyStatus: true, profession: true, bio: true, avatar: true, cvFile: true, cvPublic: true,
+        idVerifyStatus: true, profession: true, professions: true, bio: true, avatar: true, cvFile: true, cvPublic: true,
         idCardImage: true, idCardBackImage: true, selfieImage: true, selfieRightImage: true, selfieLeftImage: true,
         faceMatchScore: true, idNumber: true, birthDate: true, gender: true,
         idAiNameMatch: true, idAiNameScore: true, idAiFaceMatch: true, idAiFaceScore: true, idAiReason: true,
@@ -380,7 +380,17 @@ router.post('/me/avatar', adminAuth, upload.single('avatar'), processImages, asy
 // location used to auto-fill listings and power the /locations browser.
 router.put('/me', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
-    const { name, phone, city, address, latitude, longitude, profession, bio, idNumber, birthDate, gender } = req.body;
+    const { name, phone, city, address, latitude, longitude, profession, professions, bio, idNumber, birthDate, gender } = req.body;
+    // İxtisaslar — 3-ə qədər, təmizlənmiş və təkrarsız. Əsas `profession` = ilk element.
+    let profList: string[] | undefined;
+    if (professions !== undefined) {
+      profList = Array.from(new Set((Array.isArray(professions) ? professions : [])
+        .map((p: any) => String(p || '').trim()).filter(Boolean))).slice(0, 3);
+    } else if (profession !== undefined) {
+      // Geriyə uyğunluq: tək profession göndərilibsə onu massivə çevir.
+      const one = String(profession || '').trim();
+      profList = one ? [one] : [];
+    }
     const toFloat = (v: any) => {
       if (v === null || v === '' || v === undefined) return null;
       const n = typeof v === 'number' ? v : parseFloat(v);
@@ -397,7 +407,7 @@ router.put('/me', adminAuth, async (req: AuthRequest, res: Response) => {
         ...(!idLocked && birthDate !== undefined && { birthDate: /^\d{4}-\d{2}-\d{2}$/.test(String(birthDate)) ? new Date(birthDate) : null }),
         ...(!idLocked && gender !== undefined && { gender: (gender || '').trim() || null }),
         ...(phone !== undefined && { phone }),
-        ...(profession !== undefined && { profession: profession?.trim() || null }),
+        ...(profList !== undefined && { professions: profList, profession: profList[0] || null }),
         ...(bio !== undefined && { bio: (bio || '').trim() || null }),
         ...(city !== undefined && { city: city || null }),
         ...(address !== undefined && { address: address || null }),
@@ -406,7 +416,7 @@ router.put('/me', adminAuth, async (req: AuthRequest, res: Response) => {
       },
       select: {
         id: true, name: true, phone: true, email: true, type: true, role: true, verified: true, createdAt: true,
-        profession: true, bio: true, avatar: true, idNumber: true, birthDate: true, gender: true, idVerifyStatus: true,
+        profession: true, professions: true, bio: true, avatar: true, idNumber: true, birthDate: true, gender: true, idVerifyStatus: true,
         city: true, address: true, latitude: true, longitude: true,
       },
     });

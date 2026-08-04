@@ -119,14 +119,17 @@ router.get('/professionals', async (req: Request, res: Response) => {
     const where: any = { isBlocked: false };
     // Yalnız ixtisası olan istifadəçilər; q peşə VƏ YA ad ilə uyğun gəlir
     // (ad yalnız ixtisas sahibi üçün — istifadəçi tələbi).
+    // Ən azı bir ixtisası olanlar (əsas profession VƏ YA professions massivi).
+    const hasProfession = { OR: [{ profession: { not: null } }, { professions: { isEmpty: false } }] };
     if (q) {
       where.AND = [
-        { profession: { not: null } },
-        { profession: { not: '' } },
-        { OR: [{ profession: { contains: q, mode: 'insensitive' } }, { name: { contains: q, mode: 'insensitive' } }] },
+        hasProfession,
+        // q peşə (əsas/massiv) VƏ YA ad üzrə uyğun gəlir. Massivdə `has` dəqiq uyğunluq
+        // (sektor seçicisindən tam ad gəlir); əsas profession isə `contains` (sərbəst mətn).
+        { OR: [{ profession: { contains: q, mode: 'insensitive' } }, { professions: { has: q } }, { name: { contains: q, mode: 'insensitive' } }] },
       ];
     } else {
-      where.AND = [{ profession: { not: null } }, { profession: { not: '' } }];
+      where.AND = [hasProfession];
     }
     if (city) where.city = { contains: city, mode: 'insensitive' };
     const professionals = await prisma.user.findMany({
@@ -134,7 +137,7 @@ router.get('/professionals', async (req: Request, res: Response) => {
       take: 60,
       orderBy: [{ idVerifyStatus: 'asc' }, { avgRating: 'desc' }, { id: 'desc' }],
       select: {
-        id: true, name: true, profession: true, avatar: true, city: true, bio: true,
+        id: true, name: true, profession: true, professions: true, avatar: true, city: true, bio: true,
         publicId: true, idVerifyStatus: true, avgRating: true, ratingCount: true,
         _count: { select: { listings: true } },
         consultationOffers: { where: { active: true }, select: { price: true, durationMinutes: true }, orderBy: { price: 'asc' } },
