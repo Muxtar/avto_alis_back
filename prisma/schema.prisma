@@ -597,6 +597,7 @@ model Order {
   gatewayStatus       String?
   gatewayProvider     String? // 'kapital' | 'yigim'
   gatewayRef          String? // şlüz referansı (YIĞIM: reference; Kapital: order id)
+  gatewayCallbackAt   DateTime? // YIĞIM callback-inin gəldiyi an — get-payment YALNIZ bundan sonra çağırılır
   promoCodeId         Int?
   // Referal (komissiyalı) satış
   referrerId          Int? // sifarişi yönləndirən peşəkar

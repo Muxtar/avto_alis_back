@@ -135,6 +135,9 @@ router.get('/payment/yigim/callback', async (req: Request, res: Response) => {
     const order = await prisma.order.findFirst({ where: { gatewayRef: reference } });
     const consultCount = await prisma.consultationSession.count({ where: { gatewayRef: reference } });
     if (!order && consultCount === 0) return res.redirect(`${FRONTEND_URL}/payment/return?status=error`);
+    // YIĞIM callback-i GƏLDİ — bunu qeyd et. get-payment (yigimStatus) YALNIZ callback
+    // gəldikdən sonra çağırılmalıdır (YIĞIM tələbi). Bu andan status endpoint də icazəlidir.
+    if (order) await prisma.order.updateMany({ where: { gatewayRef: reference }, data: { gatewayCallbackAt: new Date() } });
     const { status } = await yigimStatus(reference);
     const paid = yigimPaid(status);
     if (order) await settleOrders({ gatewayRef: reference }, status, paid);
@@ -155,16 +158,23 @@ router.get('/payment/status/:orderId', adminAuth, async (req: AuthRequest, res: 
     if (!order || order.buyerId !== req.adminId) {
       res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return;
     }
-    // Hələ ödənilməyibsə və YIĞIM sifarişidirsə — birbaşa banka sorğu ilə yoxla və settle et.
-    // Beləcə webhook geciksə/gəlməsə də (sandbox), qayıtmada sifariş PAID olur.
-    if (order.paymentStatus !== 'PAID' && order.gatewayRef && order.gatewayProvider === 'yigim') {
+    // YIĞIM: get-payment (yigimStatus) YALNIZ callback gəldikdən SONRA çağırılmalıdır
+    // (YIĞIM tələbi: "callbackdan cavab gəlmədən get-payment çağırmayın"). Ona görə
+    // burada birbaşa sorğunu yalnız gatewayCallbackAt təyin olunubsa edirik. Callback
+    // hələ gəlməyibsə sadəcə DB statusunu qaytarırıq (frontend yenidən poll edir).
+    if (order.paymentStatus !== 'PAID' && order.gatewayRef && order.gatewayProvider === 'yigim' && order.gatewayCallbackAt) {
       try {
         const { status } = await yigimStatus(order.gatewayRef);
         await settleOrders({ gatewayRef: order.gatewayRef }, status, yigimPaid(status));
         order = (await prisma.order.findUnique({ where: { id: orderId } })) || order;
       } catch (e: any) { console.error('[payment/status verify]', e?.message); }
     }
-    res.json({ success: true, paymentStatus: order.paymentStatus, gatewayStatus: order.gatewayStatus });
+    res.json({
+      success: true,
+      paymentStatus: order.paymentStatus,
+      gatewayStatus: order.gatewayStatus,
+      callbackReceived: !!order.gatewayCallbackAt,  // frontend poll-u dayandırmaq üçün
+    });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }
