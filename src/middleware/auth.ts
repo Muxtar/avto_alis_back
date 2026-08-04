@@ -226,7 +226,8 @@ export function requireSellerVerified(req: AuthRequest, res: Response, next: Nex
 export const ADMIN_MODULES = [
   'users', 'listings', 'orders', 'returns', 'finance', 'businesses', 'kyc',
   'credentials', 'complaints', 'social', 'promo', 'comments', 'broadcast',
-  'banners', 'couriers', 'settings', 'ai', 'finance_payouts', 'audit', 'admins',
+  'banners', 'couriers', 'settings', 'ai', 'finance_payouts', 'audit',
+  'content', 'support', 'admins',
 ] as const;
 export type AdminModule = typeof ADMIN_MODULES[number];
 

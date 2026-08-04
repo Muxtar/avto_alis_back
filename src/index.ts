@@ -37,6 +37,8 @@ import veriffRoutes from './routes/veriff';
 import contactsRoutes from './routes/contacts';
 import bannersRoutes from './routes/banners';
 import aiRoutes from './routes/ai';
+import contentRoutes from './routes/content';
+import supportRoutes from './routes/support';
 import { auditMiddleware } from './services/auditLog';
 
 const app = express();
@@ -125,6 +127,8 @@ app.use('/api', veriffRoutes);
 app.use('/api', contactsRoutes);
 app.use('/api', bannersRoutes);
 app.use('/api', aiRoutes);
+app.use('/api', contentRoutes);
+app.use('/api', supportRoutes);
 
 app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok' });

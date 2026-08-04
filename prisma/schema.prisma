@@ -1280,3 +1280,51 @@ model Payout {
 
   @@index([sellerId, createdAt])
 }
+
+// ── CMS səhifələri — admin paneldən redaktə olunan statik məzmun (about/terms/faq) ──
+model Page {
+  id        Int      @id @default(autoincrement())
+  slug      String   @unique
+  title     String
+  content   String   // HTML / markdown mətn
+  published Boolean  @default(true)
+  updatedById Int?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// ── Dəstək ticket sistemi ────────────────────────────────────────────────────
+enum TicketStatus {
+  OPEN        // istifadəçi açdı, admin cavabı gözlənir
+  PENDING     // admin cavab verdi, istifadəçidən gözlənir
+  RESOLVED    // həll olundu
+  CLOSED      // bağlandı
+}
+
+model SupportTicket {
+  id         Int             @id @default(autoincrement())
+  userId     Int
+  subject    String
+  category   String          @default("OTHER") // ORDER/PAYMENT/ACCOUNT/LISTING/OTHER
+  status     TicketStatus    @default(OPEN)
+  lastReplyAt DateTime       @default(now())
+  createdAt  DateTime        @default(now())
+  messages   TicketMessage[]
+
+  @@index([userId, createdAt])
+  @@index([status, lastReplyAt])
+}
+
+model TicketMessage {
+  id        Int           @id @default(autoincrement())
+  ticketId  Int
+  senderId  Int
+  isAdmin   Boolean       @default(false)
+  senderName String
+  body      String
+  images    String[]      @default([])
+  createdAt DateTime      @default(now())
+  ticket    SupportTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+
+  @@index([ticketId, createdAt])
+}

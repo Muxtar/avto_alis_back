@@ -261,6 +261,99 @@ router.get('/admin/service-health', requirePermission('ai'), async (_req: AuthRe
   }
 });
 
+// Genişləndirilmiş analitika — ən çox satan satıcılar/məhsullar, konversiya, AOV.
+router.get('/admin/analytics/advanced', requireAdmin, async (_req: AuthRequest, res: Response) => {
+  try {
+    const [paidAgg, sellerGroups, totalUsers, buyerGroups, items] = await Promise.all([
+      prisma.order.aggregate({ _sum: { total: true }, _count: true, where: { paymentStatus: 'PAID' } }),
+      prisma.order.groupBy({ by: ['sellerId'], where: { paymentStatus: 'PAID' }, _sum: { total: true }, _count: true }),
+      prisma.user.count({ where: { role: 'USER' } }),
+      prisma.order.groupBy({ by: ['buyerId'], where: { paymentStatus: 'PAID' }, _count: true }),
+      // Satılan məhsullar (ödənilmiş sifarişlərdən) — məhdud, yaddaşda toplanır.
+      prisma.orderItem.findMany({ where: { order: { paymentStatus: 'PAID' } }, select: { listingId: true, title: true, quantity: true, price: true, listing: { select: { category: true } } }, take: 20000 }),
+    ]);
+
+    const r2 = (n: number) => Math.round((n || 0) * 100) / 100;
+    const paidTotal = paidAgg._sum.total || 0;
+    const paidCount = paidAgg._count || 0;
+
+    // Ən çox satan satıcılar (top 10).
+    const topSellerIds = sellerGroups.map((g) => g.sellerId);
+    const sellerUsers = topSellerIds.length ? await prisma.user.findMany({ where: { id: { in: topSellerIds } }, select: { id: true, name: true } }) : [];
+    const sNameById = new Map(sellerUsers.map((u) => [u.id, u.name]));
+    const topSellers = sellerGroups
+      .map((g) => ({ sellerId: g.sellerId, name: sNameById.get(g.sellerId) || '—', revenue: r2(g._sum.total || 0), orders: g._count }))
+      .sort((a, b) => b.revenue - a.revenue).slice(0, 10);
+
+    // Ən çox satan məhsullar (revenue = price*quantity, yaddaşda).
+    const prodMap = new Map<number, { listingId: number; title: string; units: number; revenue: number }>();
+    const catMap = new Map<string, number>();
+    for (const it of items) {
+      const cur = prodMap.get(it.listingId) || { listingId: it.listingId, title: it.title, units: 0, revenue: 0 };
+      cur.units += it.quantity; cur.revenue += it.price * it.quantity;
+      prodMap.set(it.listingId, cur);
+      const cat = it.listing?.category || 'Digər';
+      catMap.set(cat, (catMap.get(cat) || 0) + it.price * it.quantity);
+    }
+    const topProducts = Array.from(prodMap.values()).map((p) => ({ ...p, revenue: r2(p.revenue) })).sort((a, b) => b.revenue - a.revenue).slice(0, 10);
+    const categorySales = Array.from(catMap.entries()).map(([category, revenue]) => ({ category, revenue: r2(revenue) })).sort((a, b) => b.revenue - a.revenue).slice(0, 8);
+
+    // Konversiya + təkrar alıcı.
+    const buyersOrdered = buyerGroups.length;
+    const returningBuyers = buyerGroups.filter((g) => g._count > 1).length;
+
+    res.json({
+      success: true,
+      revenue: r2(paidTotal),
+      paidOrders: paidCount,
+      avgOrderValue: paidCount ? r2(paidTotal / paidCount) : 0,
+      totalUsers,
+      buyersOrdered,
+      conversionPercent: totalUsers ? Math.round((buyersOrdered / totalUsers) * 1000) / 10 : 0,
+      returningBuyers,
+      returningPercent: buyersOrdered ? Math.round((returningBuyers / buyersOrdered) * 1000) / 10 : 0,
+      topSellers, topProducts, categorySales,
+    });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+// ── Toplu əməliyyatlar (bulk) ────────────────────────────────────────────────
+router.post('/admin/listings/bulk', requirePermission('listings'), async (req: AuthRequest, res: Response) => {
+  try {
+    const ids = (Array.isArray(req.body?.ids) ? req.body.ids : []).map((x: any) => parseInt(String(x))).filter((n: number) => !Number.isNaN(n)).slice(0, 500);
+    const action = String(req.body?.action || '');
+    if (!ids.length) { res.status(400).json({ success: false, message: 'Elan seçilməyib' }); return; }
+    let count = 0;
+    if (action === 'approve') count = (await prisma.listing.updateMany({ where: { id: { in: ids } }, data: { status: 'APPROVED' } })).count;
+    else if (action === 'reject') count = (await prisma.listing.updateMany({ where: { id: { in: ids } }, data: { status: 'REJECTED' } })).count;
+    else if (action === 'delete') count = (await prisma.listing.deleteMany({ where: { id: { in: ids } } })).count;
+    else { res.status(400).json({ success: false, message: 'Yanlış əməliyyat' }); return; }
+    res.json({ success: true, count });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
+router.post('/admin/users/bulk', requirePermission('users'), async (req: AuthRequest, res: Response) => {
+  try {
+    const ids = (Array.isArray(req.body?.ids) ? req.body.ids : []).map((x: any) => parseInt(String(x))).filter((n: number) => !Number.isNaN(n)).slice(0, 500);
+    const action = String(req.body?.action || '');
+    if (!ids.length) { res.status(400).json({ success: false, message: 'İstifadəçi seçilməyib' }); return; }
+    // Özünü və adminləri toplu əməliyyatdan qoru.
+    const safeIds = ids.filter((id: number) => id !== req.adminId);
+    const admins = await prisma.user.findMany({ where: { id: { in: safeIds }, role: 'ADMIN' }, select: { id: true } });
+    const adminSet = new Set(admins.map((a) => a.id));
+    const targetIds = safeIds.filter((id: number) => !adminSet.has(id));
+    if (!targetIds.length) { res.status(400).json({ success: false, message: 'Uyğun istifadəçi yoxdur (admin/özünüz xaric)' }); return; }
+    let count = 0;
+    if (action === 'block') count = (await prisma.user.updateMany({ where: { id: { in: targetIds } }, data: { isBlocked: true } })).count;
+    else if (action === 'unblock') count = (await prisma.user.updateMany({ where: { id: { in: targetIds } }, data: { isBlocked: false } })).count;
+    else if (action === 'delete') count = (await prisma.user.deleteMany({ where: { id: { in: targetIds } } })).count;
+    else { res.status(400).json({ success: false, message: 'Yanlış əməliyyat' }); return; }
+    res.json({ success: true, count });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
 // ══════════════════════════════════════════════════════════════════════════
 // CSV EXPORT — sifariş/istifadəçi/maliyyə/payout/audit cədvəllərini yüklə
 // ══════════════════════════════════════════════════════════════════════════
