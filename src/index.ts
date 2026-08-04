@@ -40,6 +40,7 @@ import aiRoutes from './routes/ai';
 import contentRoutes from './routes/content';
 import supportRoutes from './routes/support';
 import { auditMiddleware } from './services/auditLog';
+import { startOrderExpiryJob } from './services/orderExpiry';
 
 const app = express();
 const PORT = process.env.PORT || 5001;
@@ -287,4 +288,5 @@ server.listen(PORT, () => {
   ensureAdminPhones();
   backfillListingExpiresAt();
   backfillOptimizeImages();
+  startOrderExpiryJob();   // satıcı təsdiqi timeout → avtomatik refund
 });

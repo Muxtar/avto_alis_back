@@ -607,6 +607,9 @@ model Order {
   hiddenForBuyer      Boolean         @default(false) // alıcı öz siyahısından gizlədib (sil)
   hiddenForSeller     Boolean         @default(false) // satıcı öz siyahısından gizlədib (sil)
   stockCommitted      Boolean         @default(false) // KART: stok ödəniş təsdiqlənəndə (PAID) bir dəfə azaldılır (idempotentlik)
+  paidAt              DateTime? // kartla ödənişin təsdiq olunduğu an
+  confirmDeadline     DateTime? // satıcının təsdiq etməli olduğu son vaxt (keçsə avtomatik refund)
+  autoRefunded        Boolean         @default(false) // satıcı vaxtında təsdiqləmədiyi üçün avtomatik geri ödənildi
   // Canli takip icin
   latitude            Float?
   longitude           Float?

@@ -6,6 +6,7 @@ import { refundOrder } from '../services/paymentGateway';
 import { getPaymentStatus as yigimStatus, isPaidStatus as yigimPaid } from '../services/yigimPay';
 import { settleConsultation } from './consultations';
 import { recordSettlement, recordSettlementMany } from '../services/settlement';
+import { markOrdersAwaitingConfirm } from '../services/orderExpiry';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -19,7 +20,9 @@ async function settleOrders(where: { gatewayProvider?: string; gatewayRef?: stri
   const wasPaid = orders.some((o) => o.paymentStatus === 'PAID');
   await prisma.order.updateMany({ where, data: { gatewayStatus: status || null, paymentStatus: paid ? 'PAID' : 'FAILED' } });
   if (paid) {
-    await prisma.order.updateMany({ where: { ...where, status: 'PENDING' }, data: { status: 'CONFIRMED' } });
+    // DİQQƏT: kartla ödəniş sifarişi AVTOMATİK təsdiqləmir. Sifariş PENDING qalır və
+    // SATICININ təsdiqini gözləyir; satıcı vaxtında təsdiqləməsə pul avtomatik geri
+    // qaytarılır (orderExpiry). Deadline aşağıda markOrdersAwaitingConfirm ilə qoyulur.
     // KART: stok yalnız İNDİ (ödəniş təsdiqi) azalır — bir dəfə (stockCommitted).
     // Beləliklə ödənilməmiş/tərk edilmiş kart sifarişi stoku bloklamır.
     for (const o of orders) {
@@ -53,6 +56,8 @@ async function settleOrders(where: { gatewayProvider?: string; gatewayRef?: stri
 
   // Satıcı hesablaşması — ödənilmiş sifarişlər üçün ledger yarat/yenilə.
   await recordSettlementMany(orders.map((o) => o.id)).catch(() => {});
+  // Kartla ödənilən sifarişlərə satıcı təsdiqi son vaxtını qoy (timeout refund üçün).
+  if (paid) await markOrdersAwaitingConfirm(orders.map((o) => o.id)).catch(() => {});
 }
 
 // ====================== CALLBACK ======================

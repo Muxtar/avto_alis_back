@@ -3,6 +3,7 @@ import { PrismaClient, UserType } from '@prisma/client';
 import { adminAuth, requireType, AuthRequest } from '../middleware/auth';
 import { createPayment as createGatewayPayment, refundOrder as gatewayRefundOrder } from '../services/paymentGateway';
 import { recordSettlement, recordSettlementMany, sellerBalance } from '../services/settlement';
+import { markOrdersAwaitingConfirm } from '../services/orderExpiry';
 import { checkPrice as yangoCheckPrice, isYangoConfigured, YANGO_MAX_WEIGHT_KG } from '../services/yangoDelivery';
 import { dispatchOrderToYango } from './yango';
 
@@ -639,9 +640,10 @@ router.post('/cart/checkout', requireType(BUYER_TYPES), async (req: AuthRequest,
     if (paymentMethod === 'CARD') {
       const grandTotal = orders.reduce((s, o) => s + o.total, 0);
       if (grandTotal <= 0) {
-        // Tamamilə endirimlə örtülüb — ödənişə ehtiyac yoxdur.
+        // Tamamilə endirimlə örtülüb — ödənişə ehtiyac yoxdur (amma yenə satıcı təsdiqi gözlənir).
         await prisma.order.updateMany({ where: { id: { in: orders.map((o) => o.id) } }, data: { paymentStatus: 'PAID' } });
         await recordSettlementMany(orders.map((o) => o.id)).catch(() => {});
+        await markOrdersAwaitingConfirm(orders.map((o) => o.id)).catch(() => {});
       } else {
         try {
           // Şlüz facade YIĞIM (MAGNET) və ya Kapital-ı seçir (PAYMENT_GATEWAY env).
@@ -856,7 +858,8 @@ router.put('/orders/:id/status', adminAuth, async (req: AuthRequest, res: Respon
     }
     const updated = await prisma.order.update({
       where: { id },
-      data: { status: next as any },
+      // Satıcı təsdiqləyəndə (CONFIRMED) təsdiq son vaxtını təmizlə — daha timeout refund olmaz.
+      data: { status: next as any, ...(next === 'CONFIRMED' ? { confirmDeadline: null } : {}) },
     });
 
     // Satıcı təsdiqləyəndə Yango sifarişini avtomatik kuryerə göndər (best-effort).
