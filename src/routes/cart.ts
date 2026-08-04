@@ -862,9 +862,11 @@ router.put('/orders/:id/status', adminAuth, async (req: AuthRequest, res: Respon
       data: { status: next as any, ...(next === 'CONFIRMED' ? { confirmDeadline: null } : {}) },
     });
 
-    // Satıcı təsdiqləyəndə Yango sifarişini avtomatik kuryerə göndər (best-effort).
-    if (next === 'CONFIRMED' && order.deliveryType !== 'PICKUP' && order.deliveryMethod === 'COURIER' && !order.yangoClaimId && isYangoConfigured()) {
-      dispatchOrderToYango(order.id).catch(() => {});
+    // Satıcı təsdiqləyəndə Yango kuryerinə göndər. isYangoConfigured() yoxlaması BURADA
+    // deyil — dispatchOrderToYango özü yoxlayır və uğursuzluq səbəbini (token yoxdur,
+    // koordinat yoxdur və s.) sifarişə yazır ki, satıcı NİYƏ işləmədiyini görsün.
+    if (next === 'CONFIRMED' && order.deliveryType !== 'PICKUP' && order.deliveryMethod === 'COURIER' && !order.yangoClaimId) {
+      dispatchOrderToYango(order.id).catch((e) => console.error('[cart] yango dispatch:', e?.message));
     }
 
     // ÖDƏNİLMİŞ sifariş ləğv edilirsə (satıcı fulfil edə bilmir) → alıcıya AVTOMATİK refund

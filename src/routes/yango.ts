@@ -31,18 +31,22 @@ async function syncOrderStatus(orderId: number, current: string, yangoStatus: st
 // ── Ortaq: sifarişi Yango-ya göndər (claim yarat + təsdiqlə). Həm route, həm
 //    avtomatik dispatch (satıcı təsdiqləyəndə) bunu çağırır. ──────────────────
 export async function dispatchOrderToYango(orderId: number): Promise<{ ok: boolean; message?: string; claimId?: string; status?: string }> {
-  if (!isYangoConfigured()) return { ok: false, message: 'Yango qoşulmayıb (YANGO_TOKEN yoxdur)' };
   const order = await prisma.order.findUnique({ where: { id: orderId }, include: orderInclude });
   if (!order) return { ok: false, message: 'Sifariş tapılmadı' };
   if (order.yangoClaimId) return { ok: true, claimId: order.yangoClaimId, status: order.yangoStatus || undefined };
+  // Bunlar əsl "Yango xətası" deyil — sifariş sadəcə Yango ilə deyil (səbəb yazılmır).
   if (order.deliveryType === 'PICKUP') return { ok: false, message: 'Götürmə sifarişi üçün kuryer lazım deyil' };
   if (order.deliveryMethod !== 'COURIER') return { ok: false, message: 'Bu sifariş Yango ilə deyil' };
 
   // Uğursuzluq səbəbini sifarişdə saxla (satıcıya göstərmək + təkrar cəhd üçün).
   const fail = async (message: string) => {
+    console.error(`[yango] sifariş #${order.id} dispatch xətası: ${message}`);
     await prisma.order.update({ where: { id: order.id }, data: { yangoError: message } }).catch(() => {});
     return { ok: false as const, message };
   };
+
+  // Token yoxdursa — COURIER sifariş üçün bunu ARTIQ səbəb kimi yaz (əvvəl səssiz idi).
+  if (!isYangoConfigured()) return fail('Yango qoşulmayıb — YANGO_TOKEN Railway-də təyin edilməlidir.');
 
   const obj = order.items.map((i) => i.listing?.businessObject).find((o) => o && o.latitude != null && o.longitude != null);
   const srcLat = obj?.latitude ?? order.seller.latitude;
