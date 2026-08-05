@@ -354,6 +354,44 @@ router.post('/admin/users/bulk', requirePermission('users'), async (req: AuthReq
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
 
+// Maliyyə — bir sifarişin TAM detalı (kim, kimdən, hansı məhsul, çatdı-çatmadı və s.).
+router.get('/admin/finance/:orderId', requirePermission('finance'), async (req: AuthRequest, res: Response) => {
+  try {
+    const id = parseInt(String(req.params.orderId));
+    const order = await prisma.order.findUnique({
+      where: { id },
+      include: {
+        items: { include: { listing: { select: { id: true, images: true, category: true } } } },
+        buyer: { select: { id: true, name: true, phone: true, email: true } },
+        seller: { select: { id: true, name: true, phone: true, email: true } },
+        courier: { select: { id: true, name: true, phone: true } },
+        buyerObject: { select: { id: true, name: true } },
+        returnRequests: { include: { orderItem: { select: { title: true } } } },
+      },
+    });
+    if (!order) { res.status(404).json({ success: false, message: 'Sifariş tapılmadı' }); return; }
+    // Satıcı hesablaşması (komissiya/net) — varsa.
+    const ledger = await prisma.sellerLedger.findUnique({ where: { orderId: id } }).catch(() => null);
+    res.json({ success: true, order, ledger });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+// Maliyyə — sifarişi tamamilə sil (admin təmizliyi). Əlaqəli ledger də silinir.
+router.delete('/admin/finance/:orderId', requirePermission('finance'), async (req: AuthRequest, res: Response) => {
+  try {
+    const id = parseInt(String(req.params.orderId));
+    const order = await prisma.order.findUnique({ where: { id }, select: { id: true } });
+    if (!order) { res.status(404).json({ success: false, message: 'Sifariş tapılmadı' }); return; }
+    await prisma.sellerLedger.deleteMany({ where: { orderId: id } }).catch(() => {});
+    await prisma.order.delete({ where: { id } });   // OrderItem/returnRequest cascade ilə silinir
+    res.json({ success: true });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
 // ══════════════════════════════════════════════════════════════════════════
 // CSV EXPORT — sifariş/istifadəçi/maliyyə/payout/audit cədvəllərini yüklə
 // ══════════════════════════════════════════════════════════════════════════
