@@ -24,6 +24,7 @@ export interface WebResult {
   site: string;           // mənbə sayt (tap.az, turbo.az ...)
   kind?: 'product' | 'social';  // məhsul elanı, yoxsa şəxsin sosial profili
   platform?: string;      // social üçün: instagram/facebook/linkedin/tiktok/x/youtube/telegram
+  handle?: string;        // social üçün: istifadəçi adı (profil şəkli üçün də lazımdır)
   seller?: string | null; // məhsul üçün: satıcının adı (səhifədə görünürsə)
 }
 
@@ -123,6 +124,29 @@ export function socialPlatform(url: string): string {
     if (host.includes('t.me') || host.includes('telegram')) return 'telegram';
     return host;
   } catch { return ''; }
+}
+
+// Sosial profil URL-indən istifadəçi adını çıxarır (profil şəkli və göstərim üçün).
+// Post/reel/video kimi profil olmayan linklərdə null qaytarır.
+const NON_PROFILE = new Set([
+  'p', 'reel', 'reels', 'tv', 'stories', 'explore', 'watch', 'groups', 'events',
+  'pages', 'photo', 'video', 'videos', 'posts', 'status', 'share', 'permalink.php',
+  'shorts', 'channel', 'c', 'playlist', 'results', 'hashtag', 'search', 'company',
+  'jobs', 'feed', 'pulse', 'story',
+]);
+export function socialHandle(url: string): string | null {
+  try {
+    const u = new URL(url);
+    const parts = u.pathname.split('/').filter(Boolean);
+    if (parts.length === 0) return null;
+    let first = decodeURIComponent(parts[0]).replace(/^@/, '');
+    // LinkedIn profilləri /in/<handle> formatındadır.
+    if (first === 'in' && parts[1]) first = decodeURIComponent(parts[1]);
+    else if (NON_PROFILE.has(first.toLowerCase())) return null;
+    // Yalnız profil adına oxşayanlar (post id-ləri deyil).
+    if (!/^[A-Za-z0-9._-]{2,40}$/.test(first)) return null;
+    return first;
+  } catch { return null; }
 }
 
 // ── Şəxs (ad-soyad) axtarışı tanıma ──────────────────────────────────────────
@@ -352,25 +376,31 @@ async function webSearchPerson(q: string): Promise<WebSearchResponse> {
   }
 
   const raw: any[] = Array.isArray(data?.results) ? data.results : [];
-  // Yalnız sosial profil linkləri. Hər platformadan ilk (ən uyğun) nəticə —
-  // eyni platformadan çoxlu link göstərmirik (profil + postlar qarışmasın).
-  const seen = new Set<string>();
+  // BÜTÜN tapılan profillər (eyni adlı fərqli şəxslər ola bilər) — platforma üzrə
+  // təkləmə YOXDUR, yalnız eyni URL/istifadəçi adı təkrar göstərilmir.
+  const seenKey = new Set<string>();
   const results: WebResult[] = [];
   for (const r of raw) {
     if (!r || typeof r.url !== 'string' || !/^https?:\/\//i.test(r.url) || !isSocialResult(r.url)) continue;
     const platform = socialPlatform(r.url);
-    if (!platform || seen.has(platform)) continue;
-    seen.add(platform);
+    if (!platform) continue;
+    const handle = socialHandle(r.url);
+    // Profil səhifəsi olmayan linkləri (post/reel/video) at — istifadəçi şəxs axtarır.
+    if (!handle) continue;
+    const key = `${platform}:${handle.toLowerCase()}`;
+    if (seenKey.has(key)) continue;
+    seenKey.add(key);
     let site = '';
     try { site = new URL(r.url).hostname.replace(/^www\./, ''); } catch {}
     results.push({
       title: String(r.title || q).slice(0, 120),
       url: String(r.url),
-      snippet: String(r.content || '').slice(0, 120),
+      snippet: String(r.content || '').slice(0, 160),
       price: null,
       site: site.slice(0, 60),
       kind: 'social',
       platform,
+      handle,
     });
   }
 
