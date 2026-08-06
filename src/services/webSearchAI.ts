@@ -390,8 +390,13 @@ const TAVILY_URL = 'https://api.tavily.com/search';
 // tapmadıqda). Yalnız açıq AZN/manat işarəsi olan qiyməti qəbul edir.
 function extractPriceAzn(text: string): number | null {
   if (!text) return null;
-  const m = text.match(/(\d[\d\s.,]{0,12}\d|\d)\s*(?:azn|₼|manat|man\b)/i)
-        || text.match(/(?:qiym[əe]t|price)\D{0,4}(\d[\d\s.,]{0,12}\d|\d)/i);
+  // Rəqəm şablonu: minlik ayırıcılı (28 500 / 32.000 / 1,250) VƏ YA sadə (12500,50).
+  // Sərbəst [\d\s.,]* işlətmirik — əks halda "2015, 28 500 AZN" kimi mətndə
+  // iki ayrı rəqəmi birləşdirib yanlış qiymət verirdi.
+  const NUM = String.raw`\d{1,3}(?:[ .,]\d{3})+(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?`;
+  const m = text.match(new RegExp(`(${NUM})\\s*(?:azn|₼|manat|man\\b)`, 'i'))      // 28 500 AZN
+        || text.match(new RegExp(`(?:azn|₼|manat)\\s*(${NUM})`, 'i'))              // AZN 45 000
+        || text.match(new RegExp(`(?:qiym[əe]t|price)\\D{0,4}(${NUM})`, 'i'));     // Qiymət: 12500
   if (!m) return null;
   const n = parseFloat(
     m[1].replace(/[^\d.,]/g, '').replace(/[.\s](?=\d{3}\b)/g, '').replace(',', '.'),
