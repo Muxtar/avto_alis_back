@@ -127,25 +127,46 @@ router.get('/payment/callback', async (req: Request, res: Response) => {
 
 // ====================== YIĞIM (MAGNET) WEBHOOK ======================
 // YIĞIM ödəniş statusu dəyişəndə bura GET sorğu göndərir: ?reference=<ref>
-// STATUS-a güvənmirik — getPaymentStatus ilə birbaşa təsdiqləyirik.
+// Bu SERVER-TO-SERVER webhook-dur — istifadəçinin brauzeri bura düşmür
+// (brauzer üçün ayrıca back-url/fail-url `extra` ilə ötürülür).
+//
+// YIĞIM TƏLƏBİ: "Callback-dən cavab gəldikdən sonra get-payment sorğusu çağırın."
+// Ona görə ardıcıllıq belədir:
+//   1) callback-i qeyd et → 2) YIĞIM-ə DƏRHAL 200 cavab ver →
+//   3) yalnız BUNDAN SONRA (fonda) get-payment çağırıb sifarişi settle et.
+// Əvvəl get-payment cavab gözlənilirdi, yəni YIĞIM-in callback sorğusu hələ
+// açıq ikən onlara sorğu gedirdi — şikayətin səbəbi məhz bu idi.
 router.get('/payment/yigim/callback', async (req: Request, res: Response) => {
   const reference = String(req.query.reference || '');
+  if (!reference) { res.status(400).send('reference required'); return; }
   try {
-    if (!reference) return res.redirect(`${FRONTEND_URL}/payment/return?status=error`);
-    const order = await prisma.order.findFirst({ where: { gatewayRef: reference } });
+    const order = await prisma.order.findFirst({ where: { gatewayRef: reference }, select: { id: true } });
     const consultCount = await prisma.consultationSession.count({ where: { gatewayRef: reference } });
-    if (!order && consultCount === 0) return res.redirect(`${FRONTEND_URL}/payment/return?status=error`);
-    // YIĞIM callback-i GƏLDİ — bunu qeyd et. get-payment (yigimStatus) YALNIZ callback
-    // gəldikdən sonra çağırılmalıdır (YIĞIM tələbi). Bu andan status endpoint də icazəlidir.
-    if (order) await prisma.order.updateMany({ where: { gatewayRef: reference }, data: { gatewayCallbackAt: new Date() } });
-    const { status } = await yigimStatus(reference);
-    const paid = yigimPaid(status);
-    if (order) await settleOrders({ gatewayRef: reference }, status, paid);
-    if (consultCount > 0) await settleConsultation({ gatewayRef: reference }, paid);
-    return res.redirect(`${FRONTEND_URL}/payment/return?status=${paid ? 'success' : 'failed'}`);
+    if (!order && consultCount === 0) { res.status(404).send('not found'); return; }
+
+    // 1) Callback-in gəldiyini qeyd et (status endpoint-i bundan sonra icazəlidir).
+    if (order) {
+      await prisma.order.updateMany({ where: { gatewayRef: reference }, data: { gatewayCallbackAt: new Date() } });
+    }
+
+    // 2) YIĞIM-ə DƏRHAL cavab (get-payment-dən ƏVVƏL).
+    res.status(200).send('OK');
+
+    // 3) Cavab göndərildikdən SONRA get-payment + settle (fonda).
+    setImmediate(async () => {
+      try {
+        const { status } = await yigimStatus(reference);
+        const paid = yigimPaid(status);
+        if (order) await settleOrders({ gatewayRef: reference }, status, paid);
+        if (consultCount > 0) await settleConsultation({ gatewayRef: reference }, paid);
+        console.log(`[yigim callback] ${reference} → status=${status} paid=${paid}`);
+      } catch (e: any) {
+        console.error('[yigim callback settle]', e?.message);
+      }
+    });
   } catch (err: any) {
     console.error('[payment/yigim/callback]', err.message);
-    return res.redirect(`${FRONTEND_URL}/payment/return?status=error`);
+    if (!res.headersSent) res.status(500).send('error');
   }
 });
 
@@ -162,7 +183,11 @@ router.get('/payment/status/:orderId', adminAuth, async (req: AuthRequest, res: 
     // (YIĞIM tələbi: "callbackdan cavab gəlmədən get-payment çağırmayın"). Ona görə
     // burada birbaşa sorğunu yalnız gatewayCallbackAt təyin olunubsa edirik. Callback
     // hələ gəlməyibsə sadəcə DB statusunu qaytarırıq (frontend yenidən poll edir).
-    if (order.paymentStatus !== 'PAID' && order.gatewayRef && order.gatewayProvider === 'yigim' && order.gatewayCallbackAt) {
+    // Əlavə: callback yenicə gəlibsə (< 10 san) fonda settle onsuz da gedir —
+    // təkrar get-payment göndərməmək üçün gözləyirik.
+    const callbackAgeMs = order.gatewayCallbackAt ? Date.now() - new Date(order.gatewayCallbackAt).getTime() : -1;
+    const callbackSettled = callbackAgeMs >= 0 && callbackAgeMs < 10_000;
+    if (order.paymentStatus !== 'PAID' && order.gatewayRef && order.gatewayProvider === 'yigim' && order.gatewayCallbackAt && !callbackSettled) {
       try {
         const { status } = await yigimStatus(order.gatewayRef);
         await settleOrders({ gatewayRef: order.gatewayRef }, status, yigimPaid(status));
