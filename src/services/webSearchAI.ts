@@ -26,6 +26,8 @@ export interface WebResult {
   platform?: string;      // social üçün: instagram/facebook/linkedin/tiktok/x/youtube/telegram
   handle?: string;        // social üçün: istifadəçi adı (profil şəkli üçün də lazımdır)
   seller?: string | null; // məhsul üçün: satıcının adı (səhifədə görünürsə)
+  // Bu profil bizim saytda qeydiyyatlı istifadəçiyə aiddirsə (doğrulanmış sosial link).
+  siteUser?: { id: number; name: string; avatar: string | null } | null;
 }
 
 export interface WebSearchResponse {

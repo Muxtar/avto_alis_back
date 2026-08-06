@@ -6,7 +6,7 @@ import { analyzeImage } from '../services/aiText';
 import { imageToSearchQuery, visionSearchEnabled } from '../services/visionSearchAI';
 import { adminAuth, AuthRequest } from '../middleware/auth';
 import { imageSearchLimiter, webSearchLimiter } from '../middleware/rateLimiter';
-import { webSearch, webSearchEnabled } from '../services/webSearchAI';
+import { webSearch, webSearchEnabled, socialHandle, WebResult } from '../services/webSearchAI';
 import { resolveFlag } from '../services/settings';
 import { reviewStats } from '../services/reviewGating';
 import fs from 'fs';
@@ -83,6 +83,44 @@ router.post('/search/image', imageSearchLimiter, adminAuth, upload.single('image
   }
 });
 
+// Şəxs axtarışının nəticələrini saytdakı doğrulanmış sosial linklərlə tutuşdurur.
+// Uyğun gələn profilə istifadəçi məlumatı (ad, avatar, id) əlavə olunur və
+// belə nəticələr siyahının BAŞINA çıxarılır — istifadəçi "bizimkini" dərhal görsün.
+// Platforma adları normallaşdırılır (x ↔ twitter).
+function normPlatform(p: string): string {
+  const s = (p || '').toLowerCase();
+  return s === 'x' ? 'twitter' : s;
+}
+async function attachSiteUsers(results: WebResult[]): Promise<WebResult[]> {
+  try {
+    const platforms = Array.from(new Set(results.map((r) => normPlatform(r.platform || '')).filter(Boolean)));
+    if (!platforms.length) return results;
+    const links = await prisma.socialLink.findMany({
+      where: { verified: true, platform: { in: platforms } },
+      select: { platform: true, url: true, user: { select: { id: true, name: true, avatar: true, isBlocked: true } } },
+    });
+    // "platforma:istifadəçi_adı" → istifadəçi xəritəsi.
+    const byKey = new Map<string, { id: number; name: string; avatar: string | null }>();
+    for (const l of links) {
+      if (!l.user || l.user.isBlocked) continue;
+      const h = socialHandle(l.url);
+      if (!h) continue;
+      byKey.set(`${normPlatform(l.platform)}:${h.toLowerCase()}`, { id: l.user.id, name: l.user.name, avatar: l.user.avatar });
+    }
+    if (!byKey.size) return results;
+    const marked = results.map((r) => {
+      if (!r.handle) return r;
+      const u = byKey.get(`${normPlatform(r.platform || '')}:${r.handle.toLowerCase()}`);
+      return u ? { ...r, siteUser: u } : r;
+    });
+    // Saytda qeydiyyatlı olanlar əvvəldə.
+    return [...marked.filter((r) => r.siteUser), ...marked.filter((r) => !r.siteUser)];
+  } catch (e: any) {
+    console.error('[search/web] attachSiteUsers:', e?.message);
+    return results;
+  }
+}
+
 // POST /api/search/web — saytda nəticə tapılmayanda internetdən axtarır.
 // Claude-un web_search server aləti işlədilir. Auth + saatlıq limit var,
 // çünki hər sorğu real pula başa gəlir.
@@ -102,7 +140,11 @@ router.post('/search/web', webSearchLimiter, adminAuth, async (req: AuthRequest,
 
     const data = await webSearch(q);
     if (!data.ok) { res.status(422).json({ success: false, mode: data.mode, message: data.error || 'Nəticə tapılmadı' }); return; }
-    res.json({ success: true, mode: data.mode, summary: data.summary, results: data.results });
+    // Şəxs axtarışında tapılan sosial profilləri saytımızdakı DOĞRULANMIŞ sosial
+    // linklərlə tutuşdur — profil bizim istifadəçiyə aiddirsə işarələnir.
+    // (Uyğunlaşdırma keşdən KƏNARDA gedir ki, istifadəçi məlumatı həmişə təzə olsun.)
+    const results = data.mode === 'person' ? await attachSiteUsers(data.results) : data.results;
+    res.json({ success: true, mode: data.mode, summary: data.summary, results });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }
