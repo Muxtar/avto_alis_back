@@ -39,6 +39,7 @@ import bannersRoutes from './routes/banners';
 import aiRoutes from './routes/ai';
 import contentRoutes from './routes/content';
 import supportRoutes from './routes/support';
+import outreachRoutes from './routes/outreach';
 import { auditMiddleware } from './services/auditLog';
 import { startOrderExpiryJob } from './services/orderExpiry';
 
@@ -130,6 +131,7 @@ app.use('/api', bannersRoutes);
 app.use('/api', aiRoutes);
 app.use('/api', contentRoutes);
 app.use('/api', supportRoutes);
+app.use('/api', outreachRoutes);
 
 app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok' });

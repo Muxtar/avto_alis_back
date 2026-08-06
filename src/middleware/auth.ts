@@ -227,7 +227,7 @@ export const ADMIN_MODULES = [
   'users', 'listings', 'orders', 'returns', 'finance', 'businesses', 'kyc',
   'credentials', 'complaints', 'social', 'promo', 'comments', 'broadcast',
   'banners', 'couriers', 'settings', 'ai', 'finance_payouts', 'audit',
-  'content', 'support', 'admins',
+  'content', 'support', 'outreach', 'admins',
 ] as const;
 export type AdminModule = typeof ADMIN_MODULES[number];
 

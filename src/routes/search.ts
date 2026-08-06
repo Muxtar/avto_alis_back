@@ -7,6 +7,7 @@ import { imageToSearchQuery, visionSearchEnabled } from '../services/visionSearc
 import { adminAuth, AuthRequest } from '../middleware/auth';
 import { imageSearchLimiter, webSearchLimiter } from '../middleware/rateLimiter';
 import { webSearch, webSearchEnabled, socialHandle, WebResult } from '../services/webSearchAI';
+import { enrichProfiles, isApifyConfigured } from '../services/apifyProfiles';
 import { resolveFlag } from '../services/settings';
 import { reviewStats } from '../services/reviewGating';
 import fs from 'fs';
@@ -143,7 +144,21 @@ router.post('/search/web', webSearchLimiter, adminAuth, async (req: AuthRequest,
     // Şəxs axtarışında tapılan sosial profilləri saytımızdakı DOĞRULANMIŞ sosial
     // linklərlə tutuşdur — profil bizim istifadəçiyə aiddirsə işarələnir.
     // (Uyğunlaşdırma keşdən KƏNARDA gedir ki, istifadəçi məlumatı həmişə təzə olsun.)
-    const results = data.mode === 'person' ? await attachSiteUsers(data.results) : data.results;
+    let results = data.mode === 'person' ? await attachSiteUsers(data.results) : data.results;
+    // Apify qoşulubsa — profillərin gerçək adını və şəklini gətir (istəyə bağlı).
+    if (data.mode === 'person' && isApifyConfigured() && results.length) {
+      try {
+        const enriched = await enrichProfiles(
+          results.filter((r) => r.handle && !r.siteUser).map((r) => ({ platform: r.platform || '', handle: r.handle! })),
+        );
+        if (enriched.size) {
+          results = results.map((r) => {
+            const p = r.handle ? enriched.get(`${(r.platform || '').toLowerCase()}:${r.handle.toLowerCase()}`) : null;
+            return p ? { ...r, displayName: p.fullName, avatarUrl: p.avatarUrl, followers: p.followers ?? null, verifiedBadge: p.verified } : r;
+          });
+        }
+      } catch (e: any) { console.error('[search/web] apify enrich:', e?.message); }
+    }
     res.json({ success: true, mode: data.mode, summary: data.summary, results });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });

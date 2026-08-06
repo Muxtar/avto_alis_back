@@ -28,6 +28,11 @@ export interface WebResult {
   seller?: string | null; // məhsul üçün: satıcının adı (səhifədə görünürsə)
   // Bu profil bizim saytda qeydiyyatlı istifadəçiyə aiddirsə (doğrulanmış sosial link).
   siteUser?: { id: number; name: string; avatar: string | null } | null;
+  // Apify ilə zənginləşdirmə — profilin gerçək adı və şəkli (varsa).
+  displayName?: string | null;
+  avatarUrl?: string | null;
+  followers?: number | null;
+  verifiedBadge?: boolean;
 }
 
 export interface WebSearchResponse {

@@ -196,6 +196,7 @@ model User {
   referralCarts         ReferralCart[]        @relation("ReferralCarts")
   emailVerifications    EmailVerification[]
   socialLinks           SocialLink[]
+  outreachRequests      SocialOutreach[]      @relation("OutreachRequests")
   professionDocuments   ProfessionDocument[]
   phones                PhoneNumber[]
   sharedCarts           SharedCart[]
@@ -1332,4 +1333,37 @@ model TicketMessage {
   ticket    SupportTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
 
   @@index([ticketId, createdAt])
+}
+
+// ── Sosial media müraciəti (outreach) ─────────────────────────────────────────
+// İstifadəçi websearch-də tapdığı şəxsə mesaj yazır; mesaj ADMİN PANELƏ düşür,
+// admin həmin sosial media hesabına ƏLLƏ göndərir və nəticəni qeyd edir.
+enum OutreachStatus {
+  PENDING  // admin göndərməyi gözləyir
+  SENT     // admin göndərdi
+  REJECTED // admin rədd etdi (uyğunsuz/spam)
+}
+
+model SocialOutreach {
+  id             Int            @id @default(autoincrement())
+  requesterId    Int
+  // Hədəf profil (websearch nəticəsindən)
+  targetName     String // ekranda görünən ad
+  targetPlatform String // instagram / facebook / linkedin / tiktok / x / youtube / telegram
+  targetHandle   String // istifadəçi adı
+  targetUrl      String // profilin tam linki
+  targetAvatar   String? // profil şəkli (varsa)
+  // Saytda qeydiyyatlı istifadəçiyə aiddirsə — birbaşa chat mümkündür
+  matchedUserId  Int?
+  message        String // istifadəçinin yazdığı mətn
+  status         OutreachStatus @default(PENDING)
+  adminNote      String?
+  sentById       Int?
+  sentByName     String?
+  sentAt         DateTime?
+  createdAt      DateTime       @default(now())
+  requester      User           @relation("OutreachRequests", fields: [requesterId], references: [id], onDelete: Cascade)
+
+  @@index([status, createdAt])
+  @@index([requesterId, createdAt])
 }
