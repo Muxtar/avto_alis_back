@@ -108,7 +108,8 @@ export function isAzResult(url: string): boolean {
 
 // PUBLIC sosial media / peşəkar profil domenləri — şəxs/ixtisas axtarışında yalnız
 // AÇIQ profil LİNKİ göstərmək üçün (Google kimi). Telefon/email SCRAPE OLUNMUR.
-const SOCIAL_DOMAINS = ['instagram.com', 'facebook.com', 'fb.com', 'linkedin.com', 'x.com', 'twitter.com', 'tiktok.com', 'youtube.com', 't.me', 'telegram.me'];
+// Yalnız 4 platforma — istifadəçi tələbi (Instagram, Facebook, X/Twitter, LinkedIn).
+const SOCIAL_DOMAINS = ['instagram.com', 'facebook.com', 'fb.com', 'linkedin.com', 'x.com', 'twitter.com'];
 export function isSocialResult(url: string): boolean {
   try {
     const host = new URL(url).hostname.toLowerCase().replace(/^www\./, '');
@@ -125,10 +126,7 @@ export function socialPlatform(url: string): string {
     if (host.includes('instagram')) return 'instagram';
     if (host.includes('facebook') || host === 'fb.com') return 'facebook';
     if (host.includes('linkedin')) return 'linkedin';
-    if (host.includes('tiktok')) return 'tiktok';
-    if (host.includes('youtube')) return 'youtube';
     if (host === 'x.com' || host.includes('twitter')) return 'x';
-    if (host.includes('t.me') || host.includes('telegram')) return 'telegram';
     return host;
   } catch { return ''; }
 }
@@ -359,7 +357,7 @@ async function webSearchPerson(q: string): Promise<WebSearchResponse> {
       headers: { 'content-type': 'application/json', authorization: `Bearer ${process.env.TAVILY_API_KEY}` },
       body: JSON.stringify({
         // Sosial platformalarda adı axtar — profil linkləri gəlsin.
-        query: `${q} Azərbaycan instagram OR facebook OR linkedin OR tiktok`,
+        query: `${q} Azərbaycan instagram OR facebook OR linkedin OR twitter`,
         search_depth: 'basic',
         topic: 'general',
         max_results: 12,

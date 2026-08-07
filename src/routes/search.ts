@@ -218,6 +218,25 @@ router.get('/professionals', async (req: Request, res: Response) => {
         consultationOffers: { where: { active: true }, select: { price: true, durationMinutes: true }, orderBy: { price: 'asc' } },
       },
     });
+    // `professions` massivində Prisma yalnız DƏQİQ uyğunluq (`has`) dəstəkləyir.
+    // Ona görə struktur sorğu boş qayıdanda hissəvi uyğunluğu kodda yoxlayırıq
+    // (məs. "santex" → "Santexnik"). Yalnız q varsa və nəticə yoxdursa işə düşür.
+    if (q && professionals.length === 0) {
+      const ql = q.toLowerCase();
+      const pool = await prisma.user.findMany({
+        where: { isBlocked: false, AND: [hasProfession] },
+        take: 300,
+        orderBy: [{ idVerifyStatus: 'asc' }, { avgRating: 'desc' }, { id: 'desc' }],
+        select: {
+          id: true, name: true, profession: true, professions: true, avatar: true, city: true, bio: true,
+          publicId: true, idVerifyStatus: true, avgRating: true, ratingCount: true,
+          _count: { select: { listings: true } },
+          consultationOffers: { where: { active: true }, select: { price: true, durationMinutes: true }, orderBy: { price: 'asc' } },
+        },
+      });
+      const hit = pool.filter((u) => (u.professions || []).some((p) => p.toLowerCase().includes(ql)));
+      return res.json({ success: true, professionals: hit.slice(0, 60) });
+    }
     res.json({ success: true, professionals });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
