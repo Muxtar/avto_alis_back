@@ -8,6 +8,7 @@ import { adminAuth, AuthRequest } from '../middleware/auth';
 import { imageSearchLimiter, webSearchLimiter } from '../middleware/rateLimiter';
 import { webSearch, webSearchEnabled, socialHandle, WebResult } from '../services/webSearchAI';
 import { enrichProfiles, isApifyConfigured } from '../services/apifyProfiles';
+import { fetchPreviews } from '../services/socialPreview';
 import { resolveFlag } from '../services/settings';
 import { reviewStats } from '../services/reviewGating';
 import fs from 'fs';
@@ -145,19 +146,36 @@ router.post('/search/web', webSearchLimiter, adminAuth, async (req: AuthRequest,
     // linklərlə tutuşdur — profil bizim istifadəçiyə aiddirsə işarələnir.
     // (Uyğunlaşdırma keşdən KƏNARDA gedir ki, istifadəçi məlumatı həmişə təzə olsun.)
     let results = data.mode === 'person' ? await attachSiteUsers(data.results) : data.results;
-    // Apify qoşulubsa — profillərin gerçək adını və şəklini gətir (istəyə bağlı).
-    if (data.mode === 'person' && isApifyConfigured() && results.length) {
+
+    if (data.mode === 'person' && results.length) {
+      // 1) PULSUZ önizləmə — profil səhifəsinin og:image / og:title etiketləri.
+      //    Instagram, Facebook, TikTok, LinkedIn, Telegram üçün işləyir.
       try {
-        const enriched = await enrichProfiles(
-          results.filter((r) => r.handle && !r.siteUser).map((r) => ({ platform: r.platform || '', handle: r.handle! })),
-        );
-        if (enriched.size) {
+        const need = results.filter((r) => !r.siteUser);
+        const previews = await fetchPreviews(need.map((r) => ({ url: r.url, platform: r.platform })));
+        if (previews.size) {
           results = results.map((r) => {
-            const p = r.handle ? enriched.get(`${(r.platform || '').toLowerCase()}:${r.handle.toLowerCase()}`) : null;
-            return p ? { ...r, displayName: p.fullName, avatarUrl: p.avatarUrl, followers: p.followers ?? null, verifiedBadge: p.verified } : r;
+            const p = previews.get(r.url);
+            if (!p) return r;
+            return { ...r, displayName: r.displayName || p.name, avatarUrl: r.avatarUrl || p.avatarUrl };
           });
         }
-      } catch (e: any) { console.error('[search/web] apify enrich:', e?.message); }
+      } catch (e: any) { console.error('[search/web] preview:', e?.message); }
+
+      // 2) Apify qoşulubsa — əlavə məlumat (izləyici sayı, təsdiq nişanı) ilə zənginləşdir.
+      if (isApifyConfigured()) {
+        try {
+          const enriched = await enrichProfiles(
+            results.filter((r) => r.handle && !r.siteUser).map((r) => ({ platform: r.platform || '', handle: r.handle! })),
+          );
+          if (enriched.size) {
+            results = results.map((r) => {
+              const p = r.handle ? enriched.get(`${(r.platform || '').toLowerCase()}:${r.handle.toLowerCase()}`) : null;
+              return p ? { ...r, displayName: p.fullName || r.displayName, avatarUrl: p.avatarUrl || r.avatarUrl, followers: p.followers ?? null, verifiedBadge: p.verified } : r;
+            });
+          }
+        } catch (e: any) { console.error('[search/web] apify enrich:', e?.message); }
+      }
     }
     res.json({ success: true, mode: data.mode, summary: data.summary, results });
   } catch (error: any) {
