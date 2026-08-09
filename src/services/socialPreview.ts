@@ -14,6 +14,7 @@ const MAX_HTML_BYTES = 400 * 1024;   // meta etiketlər səhifənin başındadı
 export interface SocialPreview {
   name: string | null;
   avatarUrl: string | null;
+  description: string | null;   // og:description — kartda qısa izah
 }
 
 // ── Keş ──
@@ -117,7 +118,9 @@ export async function fetchPreview(url: string, platform = ''): Promise<SocialPr
 
     const avatarUrl = metaContent(html, 'og:image');
     const name = cleanName(metaContent(html, 'og:title'), platform);
-    const data: SocialPreview | null = (avatarUrl || name) ? { name, avatarUrl } : null;
+    const rawDesc = metaContent(html, 'og:description') || metaContent(html, 'description');
+    const description = rawDesc ? rawDesc.replace(/\s+/g, ' ').trim().slice(0, 160) : null;
+    const data: SocialPreview | null = (avatarUrl || name) ? { name, avatarUrl, description } : null;
     cacheSet(key, data);
     return data;
   } catch (e: any) {
@@ -142,5 +145,94 @@ export async function fetchPreviews(
   settled.forEach((r, i) => {
     if (r.status === 'fulfilled' && r.value) out.set(slice[i].url, r.value);
   });
+  return out;
+}
+
+/**
+ * og:image alınmayan platformalar üçün AÇIQ avatar xidməti.
+ *
+ * Test nəticəsi (empirik):
+ *   • Instagram / Facebook / LinkedIn → og:image İŞLƏYİR (100x100 … 711x711)
+ *   • X (Twitter) → krauler UA-ya HTTP 404 verir, og:image YOXDUR
+ *     ↳ unavatar.io/x/<handle> işləyir (~20KB real şəkil)
+ * Ona görə unavatar YALNIZ ehtiyat kimi və yalnız dəstəklənən platformalarda.
+ * Şəkil yenə alınmasa frontend baş hərfə keçir (onError).
+ */
+const UNAVATAR: Record<string, string> = {
+  x: 'x',
+  twitter: 'x',
+  telegram: 'telegram',
+  youtube: 'youtube',
+  github: 'github',
+};
+export function fallbackAvatar(platform: string, handle: string | null | undefined): string | null {
+  if (!handle) return null;
+  const key = UNAVATAR[(platform || '').toLowerCase()];
+  if (!key) return null;
+  return `https://unavatar.io/${key}/${encodeURIComponent(handle)}?fallback=false`;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DƏRİN ŞƏXS AXTARIŞI — ehtimal olunan profil ünvanlarını BİRBAŞA yoxlayır.
+//
+// Niyə: axtarış motoru (Tavily) bəzən mövcud profili qaytarmır (indekslənməyib,
+// az izləyicilidir və s.). Amma profil ünvanı adətən addan düzəlir:
+//   "Muxtar Bayramov" → instagram.com/muxtarbayramov, /muxtar.bayramov ...
+//
+// Səhv şəxsi göstərməmək üçün NƏTİCƏ TƏSDİQLƏNİR: səhifənin og:title-ında
+// axtarılan adın HƏR İKİ hissəsi olmalıdır. Uyğun gəlməyən profil ATILIR.
+// Azərbaycan hərfləri (ə, ğ, ı, ö, ş, ü, ç) latın qarşılığına salınır.
+
+function fold(s: string): string {
+  return s.toLowerCase()
+    .replace(/ə/g, 'e').replace(/ğ/g, 'g').replace(/ı/g, 'i').replace(/i̇/g, 'i')
+    .replace(/ö/g, 'o').replace(/ş/g, 's').replace(/ü/g, 'u').replace(/ç/g, 'c')
+    .replace(/[^a-z0-9]/g, '');
+}
+
+export interface ProbedProfile {
+  url: string;
+  platform: string;
+  handle: string;
+  name: string | null;
+  avatarUrl: string | null;
+  description: string | null;
+}
+
+/**
+ * Ad-soyaddan ehtimal olunan profil ünvanlarını yoxlayır və YALNIZ adı
+ * uyğun gələnləri qaytarır. Uğursuzlar sadəcə olmur (axtarış pozulmur).
+ */
+export async function probeProfiles(query: string, limit = 6): Promise<ProbedProfile[]> {
+  const parts = query.trim().split(/\s+/).filter(Boolean).slice(0, 3);
+  if (parts.length < 2) return [];                 // tək söz → çox səhv nəticə verir
+  const tokens = parts.map(fold).filter((t) => t.length >= 2);
+  if (tokens.length < 2) return [];
+
+  const [a, b] = tokens;
+  const handles = Array.from(new Set([`${a}${b}`, `${a}.${b}`, `${a}_${b}`, `${b}${a}`]));
+  // X (Twitter) krauler UA-ya 404 verir — burada yoxlamaq mənasızdır.
+  const platforms: { platform: string; base: string }[] = [
+    { platform: 'instagram', base: 'https://www.instagram.com/' },
+    { platform: 'facebook', base: 'https://www.facebook.com/' },
+  ];
+
+  const targets: { url: string; platform: string; handle: string }[] = [];
+  for (const h of handles) for (const p of platforms) targets.push({ url: `${p.base}${h}/`, platform: p.platform, handle: h });
+
+  const settled = await Promise.allSettled(
+    targets.slice(0, limit * 2).map((t) => fetchPreview(t.url, t.platform).then((pv) => ({ t, pv }))),
+  );
+
+  const out: ProbedProfile[] = [];
+  for (const r of settled) {
+    if (r.status !== 'fulfilled' || !r.value.pv) continue;
+    const { t, pv } = r.value;
+    // TƏSDİQ: səhifə başlığında adın hər iki hissəsi olmalıdır.
+    const hay = fold(`${pv.name || ''} ${pv.description || ''}`);
+    if (!tokens.every((tok) => hay.includes(tok))) continue;
+    out.push({ url: t.url, platform: t.platform, handle: t.handle, name: pv.name, avatarUrl: pv.avatarUrl, description: pv.description });
+    if (out.length >= limit) break;
+  }
   return out;
 }

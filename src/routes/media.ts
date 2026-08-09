@@ -22,6 +22,12 @@ const ALLOWED_HOSTS = [
   'telesco.pe', 't.me',                             // Telegram
   'unavatar.io',                                    // ehtiyat avatar xidməti
   'apify.com', 'apifyusercontent.com',              // Apify saxlanc linkləri
+  // MƏHSUL kartlarının şəkilləri — AZ alış-veriş saytları öz og:image-lərini
+  // öz domenlərindən verir (yoxlanılıb: tap.az → tap.az, lalafo.az → lalafo.az).
+  'tap.az', 'turbo.az', 'bina.az', 'lalafo.az', 'umico.az', 'birmarket.az',
+  'emalls.az', 'kontakt.az', 'irshad.az', 'bakuelectronics.az', 'trendyol.az',
+  'soliton.az', 'texnomart.az', 'optimal.az', 'amerikan.az', 'maxi.az',
+  'umico.b-cdn.net', 'strgimgr.umico.az', 'b-cdn.net',   // Umico/Birmarket CDN
 ];
 function hostAllowed(host: string): boolean {
   const h = host.toLowerCase().replace(/^www\./, '');

@@ -31,6 +31,10 @@ export interface WebResult {
   // Apify ilə zənginləşdirmə — profilin gerçək adı və şəkli (varsa).
   displayName?: string | null;
   avatarUrl?: string | null;
+  // MƏHSUL nəticələri üçün: elan səhifəsinin og:image şəkli (kart görünüşü).
+  image?: string | null;
+  // og:description — kartda qısa izah (snippet-dən daha səliqəli).
+  description?: string | null;
   followers?: number | null;
   verifiedBadge?: boolean;
 }

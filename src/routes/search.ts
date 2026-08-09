@@ -8,7 +8,7 @@ import { adminAuth, AuthRequest } from '../middleware/auth';
 import { imageSearchLimiter, webSearchLimiter } from '../middleware/rateLimiter';
 import { webSearch, webSearchEnabled, socialHandle, WebResult, type SearchMode } from '../services/webSearchAI';
 import { enrichProfiles, isApifyConfigured } from '../services/apifyProfiles';
-import { fetchPreviews } from '../services/socialPreview';
+import { fetchPreviews, fallbackAvatar, probeProfiles } from '../services/socialPreview';
 import { resolveFlag } from '../services/settings';
 import { reviewStats } from '../services/reviewGating';
 import fs from 'fs';
@@ -164,10 +164,43 @@ router.post('/search/web', webSearchLimiter, adminAuth, async (req: AuthRequest,
           results = results.map((r) => {
             const p = previews.get(r.url);
             if (!p) return r;
-            return { ...r, displayName: r.displayName || p.name, avatarUrl: r.avatarUrl || p.avatarUrl };
+            return {
+              ...r,
+              displayName: r.displayName || p.name,
+              avatarUrl: r.avatarUrl || p.avatarUrl,
+              description: r.description || p.description,
+            };
           });
         }
       } catch (e: any) { console.error('[search/web] preview:', e?.message); }
+
+      // 1a) DƏRİN AXTARIŞ — nəticə azdırsa ehtimal olunan profil ünvanlarını
+      //     birbaşa yoxla (motorun indeksləmədiyi profillər üçün). Nəticə YALNIZ
+      //     səhifə başlığında axtarılan ad təsdiqlənəndə əlavə olunur.
+      if (results.length < 6) {
+        try {
+          const probed = await probeProfiles(q, 6 - results.length);
+          const seen = new Set(results.map((r) => `${(r.platform || '').toLowerCase()}:${(r.handle || '').toLowerCase()}`));
+          for (const pr of probed) {
+            const key = `${pr.platform}:${pr.handle.toLowerCase()}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            results.push({
+              title: pr.name || pr.handle, url: pr.url, snippet: pr.description || '',
+              price: null, site: pr.platform, kind: 'social',
+              platform: pr.platform, handle: pr.handle,
+              displayName: pr.name, avatarUrl: pr.avatarUrl, description: pr.description,
+            });
+          }
+        } catch (e: any) { console.error('[search/web] probe:', e?.message); }
+      }
+
+      // 1b) Şəkil hələ də yoxdursa açıq avatar xidmətini sına.
+      //     X (Twitter) krauler UA-ya 404 verir və og:image vermir — bu addım
+      //     məhz onun üçündür (empirik olaraq yoxlanılıb).
+      results = results.map((r) =>
+        r.avatarUrl || r.siteUser ? r : { ...r, avatarUrl: fallbackAvatar(r.platform || '', r.handle) },
+      );
 
       // 2) Apify qoşulubsa — əlavə məlumat (izləyici sayı, təsdiq nişanı) ilə zənginləşdir.
       if (isApifyConfigured()) {
@@ -183,6 +216,21 @@ router.post('/search/web', webSearchLimiter, adminAuth, async (req: AuthRequest,
           }
         } catch (e: any) { console.error('[search/web] apify enrich:', e?.message); }
       }
+    }
+    // MƏHSUL nəticələri üçün kart şəkli — elan səhifəsinin og:image-i.
+    // tap.az, umico.az, turbo.az və s. bunu krauler UA-ya verir (yoxlanılıb).
+    // Alınmasa kart şəkilsiz göstərilir — axtarış pozulmur.
+    if (data.mode === 'product' && results.length) {
+      try {
+        const previews = await fetchPreviews(results.map((r) => ({ url: r.url })), 6);
+        if (previews.size) {
+          results = results.map((r) => {
+            const p = previews.get(r.url);
+            if (!p) return r;
+            return { ...r, image: p.avatarUrl, description: r.description || p.description };
+          });
+        }
+      } catch (e: any) { console.error('[search/web] product preview:', e?.message); }
     }
     res.json({ success: true, mode: data.mode, summary: data.summary, results });
   } catch (error: any) {
