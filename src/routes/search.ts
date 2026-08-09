@@ -6,7 +6,7 @@ import { analyzeImage } from '../services/aiText';
 import { imageToSearchQuery, visionSearchEnabled } from '../services/visionSearchAI';
 import { adminAuth, AuthRequest } from '../middleware/auth';
 import { imageSearchLimiter, webSearchLimiter } from '../middleware/rateLimiter';
-import { webSearch, webSearchEnabled, socialHandle, WebResult } from '../services/webSearchAI';
+import { webSearch, webSearchEnabled, socialHandle, WebResult, type SearchMode } from '../services/webSearchAI';
 import { enrichProfiles, isApifyConfigured } from '../services/apifyProfiles';
 import { fetchPreviews } from '../services/socialPreview';
 import { resolveFlag } from '../services/settings';
@@ -140,7 +140,14 @@ router.post('/search/web', webSearchLimiter, adminAuth, async (req: AuthRequest,
     const q = String(req.body?.query || '').trim();
     if (!q) { res.status(400).json({ success: false, message: 'Axtarış mətni tələb olunur' }); return; }
 
-    const data = await webSearch(q);
+    // Rejimi istifadəçi axtarış sahəsindəki seçici ilə ÖZÜ təyin edir:
+    //   'product' → yalnız məhsul (sayt + AZ alış-veriş saytları)
+    //   'person'  → yalnız şəxs (sayt ixtisas sahibləri + sosial media)
+    //   'auto'    → sistem sorğuya baxıb özü qərar verir (default)
+    const rawMode = String(req.body?.mode || 'auto').toLowerCase();
+    const mode: SearchMode = rawMode === 'product' || rawMode === 'person' ? rawMode : 'auto';
+
+    const data = await webSearch(q, mode);
     if (!data.ok) { res.status(422).json({ success: false, mode: data.mode, message: data.error || 'Nəticə tapılmadı' }); return; }
     // Şəxs axtarışında tapılan sosial profilləri saytımızdakı DOĞRULANMIŞ sosial
     // linklərlə tutuşdur — profil bizim istifadəçiyə aiddirsə işarələnir.

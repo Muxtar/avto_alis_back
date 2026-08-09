@@ -45,6 +45,19 @@ export interface WebSearchResponse {
 
 const EMPTY: WebSearchResponse = { ok: false, mode: 'product', summary: '', results: [] };
 
+// İstifadəçi axtarış sahəsində rejimi ÖZÜ seçir: məhsul, yoxsa şəxs.
+// 'auto' — köhnə davranış (sorğuya baxıb özü təxmin edir).
+export type SearchMode = 'auto' | 'product' | 'person';
+
+// Azərbaycanın məhsul/elan alış-veriş saytları — MƏHSUL rejimində axtarış
+// birinci növbədə məhz bunlarda aparılır ki, nəticə xəbər/bloq deyil, ELAN olsun
+// (ad + qiymət + satıcı çıxsın).
+const AZ_SHOP_DOMAINS = [
+  'tap.az', 'turbo.az', 'bina.az', 'lalafo.az', 'umico.az', 'birmarket.az',
+  'emalls.az', 'kontakt.az', 'irshad.az', 'bakuelectronics.az', 'trendyol.az',
+  'soliton.az', 'texnomart.az', 'optimal.az', 'amerikan.az', 'maxi.az',
+];
+
 const AI_MODEL = process.env.WEB_SEARCH_MODEL || 'claude-opus-4-8';
 
 // ── Yaddaş keşi ──────────────────────────────────────────────────────────────
@@ -294,18 +307,20 @@ Azərbaycanla əlaqəsini yoxla. Əlaqəni izah edə bilmirsənsə, nəticəni a
  * Claude web_search yoluna düşülür. İstifadəçiyə qaytarılan forma eynidir.
  * @param query istifadəçinin axtarış mətni
  */
-export async function webSearch(query: string): Promise<WebSearchResponse> {
+export async function webSearch(query: string, mode: SearchMode = 'auto'): Promise<WebSearchResponse> {
   const q = query.trim().slice(0, 200);
   if (!q) return { ...EMPTY, error: 'Axtarış mətni boşdur.' };
 
-  const key = cacheKey(q);
+  // Keş açarına rejim də daxildir — eyni söz "məhsul" və "şəxs" rejimlərində
+  // fərqli nəticə verir (məs. "Rəna Səlimova" ad ola bilər, marka da).
+  const key = `${mode}|${cacheKey(q)}`;
   const hit = cache.get(key);
   if (hit && Date.now() - hit.at < hit.ttl) {
     console.log('[webSearch] keş HIT — sorğu:', q);
     return hit.data;
   }
 
-  const data = await webSearchUncached(q);
+  const data = await webSearchUncached(q, mode);
 
   // TTL: nəticə var → uzun, boş → orta, xəta → qısa.
   const ttl = data.ok ? (data.results.length > 0 ? TTL_HIT : TTL_EMPTY) : TTL_ERROR;
@@ -323,7 +338,7 @@ export async function webSearch(query: string): Promise<WebSearchResponse> {
 //   ai_websearch_tavily  — məhsul üçün əsas Tavily motoru
 //   ai_websearch_claude  — məhsul üçün Claude ehtiyat motoru
 //   ai_person_search     — şəxs (sosial media) axtarışı (Tavily)
-async function webSearchUncached(q: string): Promise<WebSearchResponse> {
+async function webSearchUncached(q: string, mode: SearchMode = 'auto'): Promise<WebSearchResponse> {
   const [tavilyOn, claudeOn, personOn] = await Promise.all([
     resolveFlag('ai_websearch_tavily'),
     resolveFlag('ai_websearch_claude'),
@@ -332,8 +347,12 @@ async function webSearchUncached(q: string): Promise<WebSearchResponse> {
   const hasTavily = !!process.env.TAVILY_API_KEY;
   const hasClaude = !!process.env.ANTHROPIC_API_KEY;
 
+  // Rejim istifadəçi tərəfindən seçilibsə ona hörmət edilir; 'auto' olanda
+  // köhnə davranış — sorğuya baxıb təxmin edirik.
+  const wantsPerson = mode === 'person' || (mode === 'auto' && looksLikePerson(q));
+
   // ── Şəxs axtarışı — yalnız flag aktiv + Tavily açarı + Tavily motoru aktiv ──
-  if (looksLikePerson(q)) {
+  if (wantsPerson) {
     if (personOn && tavilyOn && hasTavily) return webSearchPerson(q);
     return { ok: true, mode: 'person', summary: '', results: [] };  // deaktiv → boş
   }
@@ -449,43 +468,59 @@ function extractSeller(text: string): string | null {
   return name.length >= 2 ? name.slice(0, 40) : null;
 }
 
-async function webSearchTavily(q: string): Promise<WebSearchResponse> {
-  console.log('[webSearch] Tavily başladı — sorğu:', q);
-
-  let data: any;
+// Bir Tavily sorğusu. `shopsOnly` — nəticələr YALNIZ AZ alış-veriş saytlarından
+// gəlsin (elan səhifələri: ad + qiymət + satıcı). Xəta olarsa mesaj qaytarır.
+async function tavilyQuery(q: string, shopsOnly: boolean): Promise<{ results: any[] } | { error: string }> {
+  const body: any = {
+    query: shopsOnly ? q : `${q} Azərbaycan`,
+    search_depth: 'basic',      // 'basic' = 1 kredit; 'advanced' = 2 kredit
+    topic: 'general',
+    country: 'azerbaijan',      // nəticələri AZ-ə meyilləndirir
+    max_results: shopsOnly ? 12 : 10,
+    include_answer: false,      // xülasə lazım deyil — yalnız linklər (az kredit)
+  };
+  if (shopsOnly) body.include_domains = AZ_SHOP_DOMAINS;
+  else body.exclude_domains = BLOCKED_DOMAINS;
   try {
     const resp = await fetch(TAVILY_URL, {
       method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        authorization: `Bearer ${process.env.TAVILY_API_KEY}`,
-      },
-      body: JSON.stringify({
-        query: `${q} Azərbaycan`,
-        search_depth: 'basic',      // 'basic' = 1 kredit; 'advanced' = 2 kredit
-        topic: 'general',
-        country: 'azerbaijan',      // nəticələri AZ-ə meyilləndirir
-        max_results: 10,
-        include_answer: false,      // xülasə lazım deyil — yalnız linklər (az kredit)
-        exclude_domains: BLOCKED_DOMAINS,
-      }),
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${process.env.TAVILY_API_KEY}` },
+      body: JSON.stringify(body),
       signal: AbortSignal.timeout(15000),
     });
     if (!resp.ok) {
-      const body = await resp.text().catch(() => '');
-      console.error('[webSearch] Tavily HTTP', resp.status, body.slice(0, 300));
-      const msg = resp.status === 401 || resp.status === 403 ? 'Axtarış açarı etibarsızdır.'
+      const t = await resp.text().catch(() => '');
+      console.error('[webSearch] Tavily HTTP', resp.status, t.slice(0, 300));
+      return { error: resp.status === 401 || resp.status === 403 ? 'Axtarış açarı etibarsızdır.'
         : resp.status === 429 ? 'Axtarış limiti doldu, bir azdan yenidən cəhd edin.'
-        : 'İnternet axtarışı alınmadı. Yenidən cəhd edin.';
-      return { ...EMPTY, error: msg };
+        : 'İnternet axtarışı alınmadı. Yenidən cəhd edin.' };
     }
-    data = await resp.json();
+    const j: any = await resp.json();
+    return { results: Array.isArray(j?.results) ? j.results : [] };
   } catch (e: any) {
     console.error('[webSearch] Tavily xəta:', e?.name, e?.message);
-    return { ...EMPTY, error: 'İnternet axtarışı alınmadı. Yenidən cəhd edin.' };
+    return { error: 'İnternet axtarışı alınmadı. Yenidən cəhd edin.' };
   }
+}
 
-  const rawResults: any[] = Array.isArray(data?.results) ? data.results : [];
+async function webSearchTavily(q: string): Promise<WebSearchResponse> {
+  console.log('[webSearch] Tavily başladı — sorğu:', q);
+
+  // 1) ƏVVƏLCƏ Azərbaycan alış-veriş saytları (tap.az, turbo.az, bina.az,
+  //    lalafo.az, umico.az, kontakt.az ...) — burada nəticə ELANDIR, yəni
+  //    ad + qiymət + satıcı çıxarmaq mümkündür.
+  let first = await tavilyQuery(q, true);
+  if ('error' in first) return { ...EMPTY, error: first.error };
+  let rawResults: any[] = first.results;
+
+  // 2) Həmin saytlarda tapılmadısa — ümumi AZ axtarışı (əlavə 1 kredit YALNIZ
+  //    burada sərf olunur; adətən birinci addım kifayət edir).
+  if (rawResults.length === 0) {
+    console.log('[webSearch] alış-veriş saytlarında tapılmadı → ümumi AZ axtarışı');
+    const second = await tavilyQuery(q, false);
+    if ('error' in second) return { ...EMPTY, error: second.error };
+    rawResults = second.results;
+  }
 
   // Buraxılır: AZ saytları (məhsul/elan) VƏ YA public sosial media profil linkləri
   // (şəxs/ixtisas axtarışı — yalnız açıq profil linki, scrape yox).
