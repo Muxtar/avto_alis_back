@@ -541,6 +541,12 @@ model SharedCart {
   latitude     Float?
   longitude    Float?
   phone        String?
+  // Məhsulu KİM alacaq. null → paylaşanın özü. Dost seçilibsə o, saytda
+  // QEYDİYYATLI olmalıdır (ünvan/bildiriş/sifariş tarixçəsi ona bağlanır).
+  // Ödəyən isə qeydiyyatlı olmaya bilər — link hamıya açıqdır.
+  recipientUserId Int?
+  // Bu linkdən yaradılmış sifarişlər — link təkrar ödənilməsin deyə yoxlanılır.
+  orderIds     Int[]    @default([])
   createdAt    DateTime @default(now())
   user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -599,6 +605,12 @@ model Order {
   gatewayProvider     String? // 'kapital' | 'yigim'
   gatewayRef          String? // şlüz referansı (YIĞIM: reference; Kapital: order id)
   gatewayCallbackAt   DateTime? // YIĞIM callback-inin gəldiyi an — get-payment YALNIZ bundan sonra çağırılır
+  // "Paylaş — başqası ödəsin": sifarişi ÖDƏYƏN şəxs alıcıdan (buyerId) fərqlidir.
+  // Ödəyən saytda qeydiyyatlı olmaya bilər, ona görə ad/telefon sahə kimi saxlanılır.
+  sharedCartId        Int? // hansı paylaşım linkindən gəldi
+  payerName           String?
+  payerPhone          String?
+  payerUserId         Int? // ödəyən qeydiyyatlıdırsa
   promoCodeId         Int?
   // Referal (komissiyalı) satış
   referrerId          Int? // sifarişi yönləndirən peşəkar
