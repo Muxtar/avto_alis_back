@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { recordSettlement } from '../services/settlement';
+import { validateIban } from '../services/iban';
 import { PrismaClient } from '@prisma/client';
 import { adminAuth, requirePermission, AuthRequest } from '../middleware/auth';
 import { upload, docUpload, UPLOADS_DIR } from '../middleware/upload';
@@ -366,7 +367,10 @@ router.post('/me/businesses/:id/banks', adminAuth, async (req: AuthRequest, res:
     if (!(await ownsBiz(businessId, req.adminId!))) { res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return; }
     const { iban, title } = req.body;
     if (!iban?.trim()) { res.status(400).json({ success: false, message: 'IBAN tələb olunur' }); return; }
-    const bank = await prisma.bankAccount.create({ data: { businessId, iban: iban.trim(), title: title?.trim() || null } });
+    // Səhv IBAN → köçürmə bankda qayıdır və hesablaşma pozulur. Yazılan anda yoxlanır.
+    const chk = validateIban(iban);
+    if (!chk.ok) { res.status(400).json({ success: false, message: chk.error }); return; }
+    const bank = await prisma.bankAccount.create({ data: { businessId, iban: chk.iban, title: title?.trim() || null } });
     res.status(201).json({ success: true, bank });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
@@ -975,8 +979,10 @@ router.post('/admin/businesses/:id/banks', requirePermission('businesses'), asyn
     const iban = String(req.body?.iban || '').replace(/\s+/g, '').toUpperCase();
     const title = typeof req.body?.title === 'string' ? (req.body.title.trim() || null) : null;
     if (!iban) { res.status(400).json({ success: false, message: 'IBAN tələb olunur' }); return; }
+    const chk = validateIban(iban);
+    if (!chk.ok) { res.status(400).json({ success: false, message: chk.error }); return; }
     const count = await prisma.bankAccount.count({ where: { businessId } });
-    const bank = await prisma.bankAccount.create({ data: { businessId, iban, title, isPrimary: count === 0, isActive: true } });
+    const bank = await prisma.bankAccount.create({ data: { businessId, iban: chk.iban, title, isPrimary: count === 0, isActive: true } });
     res.json({ success: true, bank });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
@@ -990,7 +996,9 @@ router.put('/admin/banks/:id', requirePermission('businesses'), async (req: Auth
     const iban = String(req.body?.iban || '').replace(/\s+/g, '').toUpperCase();
     const title = typeof req.body?.title === 'string' ? (req.body.title.trim() || null) : undefined;
     if (!iban) { res.status(400).json({ success: false, message: 'IBAN tələb olunur' }); return; }
-    const bank = await prisma.bankAccount.update({ where: { id }, data: { iban, ...(title !== undefined ? { title } : {}) } });
+    const chk = validateIban(iban);
+    if (!chk.ok) { res.status(400).json({ success: false, message: chk.error }); return; }
+    const bank = await prisma.bankAccount.update({ where: { id }, data: { iban: chk.iban, ...(title !== undefined ? { title } : {}) } });
     res.json({ success: true, bank });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });

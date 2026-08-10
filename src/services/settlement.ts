@@ -26,6 +26,22 @@ export async function setCommissionPercent(percent: number): Promise<number> {
   return p;
 }
 
+// ALICI MÜDAFİƏSİ pəncərəsi (gün) — çatdırılandan sonra pul bu qədər müddət
+// bizdə saxlanılır ki, qaytarma tələbi çıxsa satıcıya artıq ödəmiş olmayaq.
+// Setting: `payout_hold_days` (default 3). 0 = saxlama yoxdur.
+export async function getPayoutHoldDays(): Promise<number> {
+  try {
+    const row = await prisma.setting.findUnique({ where: { key: 'payout_hold_days' } });
+    const n = row ? parseInt(row.value, 10) : NaN;
+    return Number.isFinite(n) && n >= 0 && n <= 90 ? n : 3;
+  } catch { return 3; }
+}
+export async function setPayoutHoldDays(days: number): Promise<number> {
+  const d = Math.max(0, Math.min(90, Math.round(days)));
+  await prisma.setting.upsert({ where: { key: 'payout_hold_days' }, update: { value: String(d) }, create: { key: 'payout_hold_days', value: String(d) } });
+  return d;
+}
+
 // Sifarişin cari vəziyyətinə görə ledger-i idempotent yarat/yenilə.
 // Sifariş dəyişən hər əsas nöqtədə (PAID/DELIVERED/CANCELLED/REFUNDED) çağırılır.
 export async function recordSettlement(orderId: number): Promise<void> {
@@ -56,6 +72,10 @@ export async function recordSettlement(orderId: number): Promise<void> {
     const delivered = order.status === 'DELIVERED';
     const targetStatus = reversed ? 'REVERSED' : delivered ? 'AVAILABLE' : 'PENDING';
 
+    // Çatdırılıbsa saxlama pəncərəsinin bitmə vaxtını hesabla.
+    const holdDays = delivered ? await getPayoutHoldDays() : 0;
+    const availableAt = delivered ? new Date(Date.now() + holdDays * 24 * 60 * 60 * 1000) : null;
+
     if (!existing) {
       const rate = await getCommissionPercent();
       const gross = order.total || 0;
@@ -67,17 +87,38 @@ export async function recordSettlement(orderId: number): Promise<void> {
           businessId: order.items[0]?.listing?.businessId ?? null,
           grossAmount: gross, commissionRate: rate, commission, netAmount: net,
           heldByPlatform: order.paymentMethod === 'CARD',
-          status: targetStatus as any,
+          // Saxlama pəncərəsi bitməyibsə AVAILABLE etmirik — PENDING qalır.
+          status: (delivered && holdDays > 0 ? 'PENDING' : targetStatus) as any,
+          availableAt,
         },
       });
       return;
     }
 
-    // Ödənilmiş ledger var — statusu köçür (PAID_OUT toxunulmaz qalır).
-    if (existing.status === 'PAID_OUT') return;
-    if (existing.status !== targetStatus) {
-      await prisma.sellerLedger.update({ where: { orderId }, data: { status: targetStatus as any } });
+    // PUL ARTIQ ÖDƏNİLİB, amma sifariş ləğv/qaytarma oldu → geri alınmalıdır.
+    // Avtomatik geri ala bilmirik (pul satıcının bankındadır), ona görə admin
+    // üçün işarələyirik. İşarələnməsə zərər bizim üzərimizdə qalardı.
+    if (existing.status === 'PAID_OUT') {
+      if (reversed && !existing.clawbackNeeded) {
+        await prisma.sellerLedger.update({
+          where: { orderId },
+          data: {
+            clawbackNeeded: true,
+            clawbackReason: `Sifariş #${order.id} ödənişdən SONRA ${order.status === 'CANCELLED' ? 'ləğv edildi' : 'geri qaytarıldı'} — ${existing.netAmount} AZN satıcıdan geri alınmalıdır`,
+          },
+        });
+        console.warn(`[settlement] CLAWBACK: order ${order.id}, seller ${existing.sellerId}, ${existing.netAmount} AZN`);
+      }
+      return;
     }
+
+    // Saxlama pəncərəsi: çatdırılıb, amma vaxt dolmayıbsa PENDING saxla.
+    const nextStatus = delivered && holdDays > 0 ? 'PENDING' : targetStatus;
+    const patch: any = {};
+    if (existing.status !== nextStatus) patch.status = nextStatus;
+    if (delivered && !existing.availableAt) patch.availableAt = availableAt;
+    if (reversed) patch.availableAt = null;
+    if (Object.keys(patch).length) await prisma.sellerLedger.update({ where: { orderId }, data: patch });
   } catch (e) {
     console.error('[settlement] recordSettlement xəta:', (e as any)?.message);
   }
@@ -112,4 +153,24 @@ export async function createPayout(sellerId: number, adminId: number, adminName:
   });
   await prisma.sellerLedger.updateMany({ where: { id: { in: ledgers.map((l) => l.id) } }, data: { status: 'PAID_OUT', payoutId: payout.id } });
   return payout;
+}
+
+/**
+ * Saxlama pəncərəsi bitmiş sətirləri ödənilə bilən (AVAILABLE) et.
+ * `startOrderExpiryJob` ilə birlikdə mütəmadi işləyir.
+ * Yalnız çatdırılmış və vaxtı çatmış sətirlərə toxunur — qaytarma pəncərəsi
+ * bitməyən pul heç vaxt ödəniş siyahısına düşmür.
+ */
+export async function releaseHeldLedgers(): Promise<number> {
+  try {
+    const r = await prisma.sellerLedger.updateMany({
+      where: { status: 'PENDING', availableAt: { not: null, lte: new Date() }, clawbackNeeded: false },
+      data: { status: 'AVAILABLE' },
+    });
+    if (r.count > 0) console.log(`[settlement] saxlama pəncərəsi bitdi → ${r.count} sətir ödənilə bilən oldu`);
+    return r.count;
+  } catch (e) {
+    console.error('[settlement] releaseHeldLedgers xəta:', (e as any)?.message);
+    return 0;
+  }
 }

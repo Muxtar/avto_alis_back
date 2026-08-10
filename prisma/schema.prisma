@@ -1281,6 +1281,15 @@ model SellerLedger {
   // köçürüldüyü üçün hesablaşma biznes üzrə qruplaşdırılır. null → şəxsi satıcı.
   // Köhnə sətirlər üçün admin paneli ilk oxunuşda doldurur (lazy backfill).
   businessId     Int?
+  // ALICI MÜDAFİƏSİ: çatdırılandan sonra pul DƏRHAL ödənilə bilməz — qaytarma
+  // pəncərəsi bitməlidir. Bu tarixdən əvvəl sətir PENDING qalır və ödəniş
+  // ekranında görünmür. `payout_hold_days` ayarı ilə idarə olunur.
+  availableAt    DateTime?
+  // Pul artıq satıcıya köçürüldükdən SONRA sifariş ləğv/qaytarma olubsa —
+  // bu pulu satıcıdan geri almaq lazımdır. Avtomatik geri alına bilmədiyi üçün
+  // admin üçün işarələnir (əks halda zərər bizim üzərimizdə qalır).
+  clawbackNeeded Boolean      @default(false)
+  clawbackReason String?
   payoutId       Int?
   createdAt      DateTime     @default(now())
   updatedAt      DateTime     @updatedAt
@@ -1288,6 +1297,7 @@ model SellerLedger {
   @@index([sellerId, status])
   @@index([businessId, status])
   @@index([payoutId])
+  @@index([clawbackNeeded])
 }
 
 // ── Payout — satıcıya edilmiş ödəniş (bir neçə ledger-i əhatə edir) ────────────
@@ -1303,6 +1313,11 @@ model Payout {
   createdById Int      // əməliyyatı edən admin
   createdName String
   createdAt   DateTime @default(now())
+  // Səhvən edilmiş ödəniş geri alına bilər — sətirlər yenidən ödəniləcək olur.
+  reversedAt     DateTime?
+  reversedById   Int?
+  reversedName   String?
+  reversedReason String?
 
   @@index([sellerId, createdAt])
   @@index([businessId, createdAt])

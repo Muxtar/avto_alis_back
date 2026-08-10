@@ -2,7 +2,7 @@
 // Satıcı müəyyən müddət ərzində təsdiqləməzsə pul AVTOMATİK alıcıya qaytarılır.
 import { PrismaClient } from '@prisma/client';
 import { refundOrder as gatewayRefundOrder } from './paymentGateway';
-import { recordSettlement } from './settlement';
+import { recordSettlement, releaseHeldLedgers } from './settlement';
 
 const prisma = new PrismaClient();
 
@@ -79,8 +79,12 @@ export async function expireUnconfirmedOrders(): Promise<number> {
 
 // Server başlayanda periodik yoxlama qur (hər 10 dəqiqə) + dərhal bir dəfə.
 export function startOrderExpiryJob() {
-  const run = () => { expireUnconfirmedOrders().catch(() => {}); };
+  const run = () => {
+    expireUnconfirmedOrders().catch(() => {});
+    // Alıcı müdafiəsi pəncərəsi bitmiş hesablaşmaları ödənilə bilən et.
+    releaseHeldLedgers().catch(() => {});
+  };
   setTimeout(run, 30 * 1000);              // start-dan 30 san sonra ilk yoxlama
   setInterval(run, 10 * 60 * 1000);        // sonra hər 10 dəqiqə
-  console.log('[orderExpiry] satıcı təsdiqi timeout yoxlaması aktivdir (hər 10 dəq).');
+  console.log('[orderExpiry] satıcı təsdiqi timeout + hesablaşma buraxılışı aktivdir (hər 10 dəq).');
 }

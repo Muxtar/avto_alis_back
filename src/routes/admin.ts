@@ -9,7 +9,7 @@ import { listFlags, setFlag } from '../services/settings';
 import { checkAllServices } from '../services/serviceHealth';
 import { runWebSearchTest } from '../services/webSearchAI';
 import { runAgent } from '../services/aiAgent';
-import { getCommissionPercent, setCommissionPercent, createPayout, sellerBalance } from '../services/settlement';
+import { getCommissionPercent, setCommissionPercent, createPayout, sellerBalance, getPayoutHoldDays, setPayoutHoldDays } from '../services/settlement';
 import { recordSettlement } from '../services/settlement';
 import { infobipStatus, testWhatsApp } from '../services/infobipWhatsApp';
 import { smsStatus, testSms } from '../services/infobipSms';
@@ -553,7 +553,7 @@ router.get('/admin/payouts/businesses', requirePermission('finance_payouts'), as
   try {
     const q = String(req.query.q || '').trim().toLowerCase();
     const ledgers = await prisma.sellerLedger.findMany({
-      where: { heldByPlatform: true, status: { in: ['AVAILABLE', 'PENDING'] } },
+      where: { heldByPlatform: true, status: { in: ['AVAILABLE', 'PENDING'] }, clawbackNeeded: false },
       select: { id: true, orderId: true, businessId: true, sellerId: true, status: true, netAmount: true, commission: true, grossAmount: true },
     });
     await backfillLedgerBusiness(ledgers);
@@ -611,7 +611,10 @@ router.get('/admin/payouts/businesses/:key', requirePermission('finance_payouts'
     const id = parseInt(key.slice(1));
     if (Number.isNaN(id)) { res.status(400).json({ success: false, message: 'Yanlış açar' }); return; }
 
-    const where: any = { heldByPlatform: true, status: 'AVAILABLE' };
+    const where: any = {
+      heldByPlatform: true, status: 'AVAILABLE', clawbackNeeded: false,
+      OR: [{ availableAt: null }, { availableAt: { lte: new Date() } }],
+    };
     if (isBiz) where.businessId = id; else { where.sellerId = id; where.businessId = null; }
 
     const ledgers = await prisma.sellerLedger.findMany({ where, orderBy: { createdAt: 'desc' }, take: 500 });
@@ -671,7 +674,14 @@ router.post('/admin/payouts/businesses/:key/pay', requirePermission('finance_pay
     if (!ids.length) { res.status(400).json({ success: false, message: 'Heç bir sətir seçilməyib' }); return; }
 
     // Yalnız BU biznesə aid və hələ ödənilməmiş sətirlər — səhv ödənişin qarşısı.
-    const where: any = { id: { in: ids }, heldByPlatform: true, status: 'AVAILABLE' };
+    const where: any = {
+      id: { in: ids }, heldByPlatform: true, status: 'AVAILABLE',
+      // Müdafiə: geri alınmalı sətir ödənilə bilməz.
+      clawbackNeeded: false,
+      // Müdafiə: alıcı müdafiəsi pəncərəsi bitməyibsə ödənilə bilməz.
+      // (Job onsuz da vaxtı çatmayanı AVAILABLE etmir — bu ikinci qatdır.)
+      OR: [{ availableAt: null }, { availableAt: { lte: new Date() } }],
+    };
     if (isBiz) where.businessId = id; else { where.sellerId = id; where.businessId = null; }
     const ledgers = await prisma.sellerLedger.findMany({ where });
     if (!ledgers.length) { res.status(400).json({ success: false, message: 'Seçilmiş sətirlər artıq ödənilib və ya tapılmadı' }); return; }
@@ -706,6 +716,93 @@ router.post('/admin/payouts/businesses/:key/pay', requirePermission('finance_pay
     }).catch(() => {});
 
     res.json({ success: true, payout, paidCount: ledgers.length, amount });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
+
+// ── ÖDƏNİŞİ GERİ AL — səhvən "ödənildi" işarələnibsə ──
+// Sətirlər yenidən ödəniləcək (AVAILABLE) olur, payout isə tarixçədə qalır
+// (silinmir — audit üçün) və "geri alındı" kimi işarələnir.
+router.post('/admin/payouts/:id/reverse', requirePermission('finance_payouts'), async (req: AuthRequest, res: Response) => {
+  try {
+    const id = parseInt(String(req.params.id));
+    if (Number.isNaN(id)) { res.status(400).json({ success: false, message: 'Yanlış id' }); return; }
+    const payout = await prisma.payout.findUnique({ where: { id } });
+    if (!payout) { res.status(404).json({ success: false, message: 'Ödəniş tapılmadı' }); return; }
+    if (payout.reversedAt) { res.status(400).json({ success: false, message: 'Bu ödəniş artıq geri alınıb' }); return; }
+    const reason = String(req.body?.reason || '').trim().slice(0, 300);
+    if (!reason) { res.status(400).json({ success: false, message: 'Səbəb yazılmalıdır' }); return; }
+
+    const ledgers = await prisma.sellerLedger.findMany({ where: { payoutId: id }, select: { id: true } });
+    await prisma.$transaction(async (tx) => {
+      await tx.sellerLedger.updateMany({
+        where: { id: { in: ledgers.map((l) => l.id) } },
+        data: { status: 'AVAILABLE', payoutId: null },
+      });
+      await tx.payout.update({
+        where: { id },
+        data: { reversedAt: new Date(), reversedById: req.adminId!, reversedName: req.adminName || 'Admin', reversedReason: reason },
+      });
+    });
+    console.warn(`[payouts] GERİ ALINDI: payout ${id}, ${payout.amount} AZN, ${ledgers.length} sətir, admin ${req.adminName}`);
+    res.json({ success: true, restored: ledgers.length, amount: payout.amount });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
+// ── GERİ ALINMALI PULLAR — ödənişdən SONRA ləğv/qaytarma olan sifarişlər ──
+// Bu pul satıcının bankındadır; sistem avtomatik geri ala bilmir, ona görə
+// admin görüb satıcı ilə həll etməlidir. Görünməsə zərər bizim üzərimizdə qalır.
+router.get('/admin/payouts/clawbacks', requirePermission('finance_payouts'), async (_req: AuthRequest, res: Response) => {
+  try {
+    const rows = await prisma.sellerLedger.findMany({
+      where: { clawbackNeeded: true },
+      orderBy: { updatedAt: 'desc' },
+      take: 200,
+      select: { id: true, orderId: true, sellerId: true, businessId: true, netAmount: true, clawbackReason: true, updatedAt: true },
+    });
+    const sellerIds = Array.from(new Set(rows.map((r) => r.sellerId)));
+    const bizIds = Array.from(new Set(rows.map((r) => r.businessId).filter(Boolean))) as number[];
+    const [users, bizzes] = await Promise.all([
+      sellerIds.length ? prisma.user.findMany({ where: { id: { in: sellerIds } }, select: { id: true, name: true, phone: true } }) : [],
+      bizIds.length ? prisma.business.findMany({ where: { id: { in: bizIds } }, select: { id: true, name: true } }) : [],
+    ]);
+    const uById = new Map(users.map((u) => [u.id, u]));
+    const bById = new Map(bizzes.map((b) => [b.id, b]));
+    const total = Math.round(rows.reduce((s, r) => s + r.netAmount, 0) * 100) / 100;
+    res.json({
+      success: true, total,
+      rows: rows.map((r) => ({
+        ...r,
+        sellerName: uById.get(r.sellerId)?.name || '—',
+        sellerPhone: uById.get(r.sellerId)?.phone || '',
+        businessName: r.businessId ? bById.get(r.businessId)?.name || null : null,
+      })),
+    });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
+// Geri alınma həll olundu — işarəni götür (admin satıcı ilə razılaşıb).
+router.post('/admin/payouts/clawbacks/:id/resolve', requirePermission('finance_payouts'), async (req: AuthRequest, res: Response) => {
+  try {
+    const id = parseInt(String(req.params.id));
+    const note = String(req.body?.note || '').trim().slice(0, 300);
+    await prisma.sellerLedger.update({
+      where: { id },
+      data: { clawbackNeeded: false, clawbackReason: note ? `HƏLL OLUNDU (${req.adminName || 'Admin'}): ${note}` : null },
+    });
+    res.json({ success: true });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
+// ── Saxlama pəncərəsi (alıcı müdafiəsi) ayarı ──
+router.get('/admin/payouts/hold-days', requirePermission('finance_payouts'), async (_req: AuthRequest, res: Response) => {
+  res.json({ success: true, days: await getPayoutHoldDays() });
+});
+router.patch('/admin/payouts/hold-days', requirePermission('finance_payouts'), async (req: AuthRequest, res: Response) => {
+  try {
+    const d = parseInt(String(req.body?.days));
+    if (!Number.isFinite(d) || d < 0 || d > 90) { res.status(400).json({ success: false, message: '0–90 gün arası olmalıdır' }); return; }
+    res.json({ success: true, days: await setPayoutHoldDays(d) });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
 
