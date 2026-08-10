@@ -1,4 +1,5 @@
 import { Router, Request, Response } from 'express';
+import { recordSettlement } from '../services/settlement';
 import { PrismaClient } from '@prisma/client';
 import { adminAuth, requirePermission, AuthRequest } from '../middleware/auth';
 import { upload, docUpload, UPLOADS_DIR } from '../middleware/upload';
@@ -800,6 +801,12 @@ router.put('/me/business-orders/:orderId/status', adminAuth, async (req: AuthReq
       }
     }
     const updated = await prisma.order.update({ where: { id: orderId }, data: { status: status as any } });
+
+    // Satıcı hesablaşması — status dəyişdi. BU ÇAĞIRIŞ OLMADAN biznesin
+    // "çatdırıldı" etdiyi sifariş ledger-də PENDING qalır və heç vaxt
+    // ödəniləcək (AVAILABLE) balansa keçmirdi. Alıcı və admin yollarında
+    // bu çağırış var idi, biznes yolunda unudulmuşdu.
+    await recordSettlement(orderId).catch(() => {});
     await prisma.notification.create({
       data: { userId: order.buyerId, type: 'ORDER', title: 'Sifariş statusu', body: `Sifariş #${order.id}: ${status}`, link: `/orders/${order.id}` },
     }).catch(() => {});
