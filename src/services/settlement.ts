@@ -32,7 +32,12 @@ export async function recordSettlement(orderId: number): Promise<void> {
   try {
     const order = await prisma.order.findUnique({
       where: { id: orderId },
-      select: { id: true, sellerId: true, buyerId: true, total: true, status: true, paymentStatus: true, paymentMethod: true },
+      select: {
+        id: true, sellerId: true, buyerId: true, total: true, status: true,
+        paymentStatus: true, paymentMethod: true,
+        // Hesablaşma BİZNES üzrə qruplaşdırılır — ödəniş biznesin bank hesabına gedir.
+        items: { select: { listing: { select: { businessId: true } } }, take: 1 },
+      },
     });
     if (!order) return;
     const existing = await prisma.sellerLedger.findUnique({ where: { orderId } });
@@ -59,6 +64,7 @@ export async function recordSettlement(orderId: number): Promise<void> {
       await prisma.sellerLedger.create({
         data: {
           sellerId: order.sellerId, orderId: order.id, buyerId: order.buyerId,
+          businessId: order.items[0]?.listing?.businessId ?? null,
           grossAmount: gross, commissionRate: rate, commission, netAmount: net,
           heldByPlatform: order.paymentMethod === 'CARD',
           status: targetStatus as any,

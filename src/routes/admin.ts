@@ -519,6 +519,196 @@ router.get('/admin/payouts/sellers/:id', requirePermission('finance_payouts'), a
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
 
+
+// ═══════════════════════════════════════════════════════════════════════════
+// BİZNES ÜZRƏ HESABLAŞMA (satıcıya ödəniləcək pul)
+//
+// Axın: müştəri kartla ödəyir → pul PLATFORMANIN hesabına gəlir → biz burada
+// hansı biznesə nə qədər borclu olduğumuzu görürük → işçimiz BANKDAN həmin
+// biznesin IBAN-ına köçürür → burada həmin sətirləri "ödənildi" işarələyir.
+// Bu ekran YALNIZ uçotdur; pul köçürməsini özü etmir.
+//
+// Yeni alışlar avtomatik "ödənilməmiş" kimi yenidən görünür.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Köhnə ledger sətirlərində businessId boşdur — ilk oxunuşda doldururuq.
+async function backfillLedgerBusiness(ledgers: { id: number; orderId: number; businessId: number | null }[]) {
+  const missing = ledgers.filter((l) => l.businessId === null).slice(0, 200);
+  if (!missing.length) return;
+  const orders = await prisma.order.findMany({
+    where: { id: { in: missing.map((l) => l.orderId) } },
+    select: { id: true, items: { select: { listing: { select: { businessId: true } } }, take: 1 } },
+  });
+  const bizByOrder = new Map(orders.map((o) => [o.id, o.items[0]?.listing?.businessId ?? null]));
+  for (const l of missing) {
+    const biz = bizByOrder.get(l.orderId) ?? null;
+    if (biz === null) continue;
+    l.businessId = biz;
+    await prisma.sellerLedger.update({ where: { id: l.id }, data: { businessId: biz } }).catch(() => {});
+  }
+}
+
+// Kart siyahısı — hər biznes üçün ödəniləcək məbləğ və neçə sifariş.
+router.get('/admin/payouts/businesses', requirePermission('finance_payouts'), async (req: AuthRequest, res: Response) => {
+  try {
+    const q = String(req.query.q || '').trim().toLowerCase();
+    const ledgers = await prisma.sellerLedger.findMany({
+      where: { heldByPlatform: true, status: { in: ['AVAILABLE', 'PENDING'] } },
+      select: { id: true, orderId: true, businessId: true, sellerId: true, status: true, netAmount: true, commission: true, grossAmount: true },
+    });
+    await backfillLedgerBusiness(ledgers);
+
+    type Row = { businessId: number | null; sellerId: number; unpaid: number; pending: number; commission: number; gross: number; orders: number };
+    const map = new Map<string, Row>();
+    for (const l of ledgers) {
+      const key = l.businessId ? `b${l.businessId}` : `u${l.sellerId}`;
+      const cur = map.get(key) || { businessId: l.businessId, sellerId: l.sellerId, unpaid: 0, pending: 0, commission: 0, gross: 0, orders: 0 };
+      if (l.status === 'AVAILABLE') { cur.unpaid += l.netAmount; cur.orders++; cur.commission += l.commission; cur.gross += l.grossAmount; }
+      else cur.pending += l.netAmount;
+      map.set(key, cur);
+    }
+
+    const bizIds = Array.from(new Set(Array.from(map.values()).map((r) => r.businessId).filter(Boolean))) as number[];
+    const userIds = Array.from(new Set(Array.from(map.values()).filter((r) => !r.businessId).map((r) => r.sellerId)));
+    const [bizzes, users] = await Promise.all([
+      bizIds.length ? prisma.business.findMany({ where: { id: { in: bizIds } }, select: { id: true, name: true, voen: true, banks: { where: { isActive: true }, select: { iban: true, title: true, isPrimary: true } } } }) : [],
+      userIds.length ? prisma.user.findMany({ where: { id: { in: userIds } }, select: { id: true, name: true, phone: true } }) : [],
+    ]);
+    const bById = new Map(bizzes.map((b) => [b.id, b]));
+    const uById = new Map(users.map((u) => [u.id, u]));
+    const r2 = (n: number) => Math.round(n * 100) / 100;
+
+    let rows = Array.from(map.values()).map((r) => {
+      const b = r.businessId ? bById.get(r.businessId) : null;
+      const acc = b?.banks?.find((a: { isPrimary: boolean }) => a.isPrimary) || b?.banks?.[0] || null;
+      return {
+        key: r.businessId ? `b${r.businessId}` : `u${r.sellerId}`,
+        businessId: r.businessId, sellerId: r.sellerId,
+        name: b?.name || uById.get(r.sellerId)?.name || '—',
+        voen: b?.voen || null,
+        isBusiness: !!r.businessId,
+        iban: acc?.iban || null, bankTitle: acc?.title || null,
+        unpaid: r2(r.unpaid), pending: r2(r.pending),
+        commission: r2(r.commission), gross: r2(r.gross), orders: r.orders,
+      };
+    });
+    if (q) rows = rows.filter((r) => r.name.toLowerCase().includes(q) || (r.iban || '').toLowerCase().includes(q));
+    rows.sort((a, b) => b.unpaid - a.unpaid);
+    const totals = {
+      unpaid: r2(rows.reduce((s, r) => s + r.unpaid, 0)),
+      pending: r2(rows.reduce((s, r) => s + r.pending, 0)),
+      commission: r2(rows.reduce((s, r) => s + r.commission, 0)),
+    };
+    res.json({ success: true, rows, totals });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
+// Bir biznesin detalı — ÖDƏNİLMƏMİŞ sətirlər məhsul-məhsul açılır.
+router.get('/admin/payouts/businesses/:key', requirePermission('finance_payouts'), async (req: AuthRequest, res: Response) => {
+  try {
+    const key = String(req.params.key);
+    const isBiz = key.startsWith('b');
+    const id = parseInt(key.slice(1));
+    if (Number.isNaN(id)) { res.status(400).json({ success: false, message: 'Yanlış açar' }); return; }
+
+    const where: any = { heldByPlatform: true, status: 'AVAILABLE' };
+    if (isBiz) where.businessId = id; else { where.sellerId = id; where.businessId = null; }
+
+    const ledgers = await prisma.sellerLedger.findMany({ where, orderBy: { createdAt: 'desc' }, take: 500 });
+    const orders = ledgers.length ? await prisma.order.findMany({
+      where: { id: { in: ledgers.map((l) => l.orderId) } },
+      select: {
+        id: true, createdAt: true, total: true, status: true, paymentMethod: true,
+        buyer: { select: { id: true, name: true, phone: true } },
+        items: { select: { id: true, title: true, quantity: true, price: true } },
+      },
+    }) : [];
+    const oById = new Map(orders.map((o) => [o.id, o]));
+
+    const lines = ledgers.map((l) => {
+      const o = oById.get(l.orderId);
+      return {
+        ledgerId: l.id, orderId: l.orderId, createdAt: o?.createdAt || l.createdAt,
+        buyer: o?.buyer ? { id: o.buyer.id, name: o.buyer.name } : null,
+        items: o?.items || [],
+        gross: l.grossAmount, commission: l.commission, commissionRate: l.commissionRate,
+        net: l.netAmount, orderStatus: o?.status || null, paymentMethod: o?.paymentMethod || null,
+      };
+    });
+
+    const [biz, seller, payouts] = await Promise.all([
+      isBiz ? prisma.business.findUnique({ where: { id }, select: { id: true, name: true, voen: true, banks: { where: { isActive: true }, select: { id: true, iban: true, title: true, isPrimary: true } } } }) : null,
+      !isBiz ? prisma.user.findUnique({ where: { id }, select: { id: true, name: true, phone: true } }) : null,
+      prisma.payout.findMany({ where: isBiz ? { businessId: id } : { sellerId: id }, orderBy: { createdAt: 'desc' }, take: 30 }),
+    ]);
+    const r2 = (n: number) => Math.round(n * 100) / 100;
+    const acc = biz?.banks?.find((a: { isPrimary: boolean }) => a.isPrimary) || biz?.banks?.[0] || null;
+    res.json({
+      success: true, key, isBusiness: isBiz,
+      name: biz?.name || seller?.name || '—', voen: biz?.voen || null,
+      iban: acc?.iban || null, bankTitle: acc?.title || null,
+      bankAccounts: biz?.banks || [],
+      lines, payouts,
+      totals: {
+        net: r2(lines.reduce((s, l) => s + l.net, 0)),
+        gross: r2(lines.reduce((s, l) => s + l.gross, 0)),
+        commission: r2(lines.reduce((s, l) => s + l.commission, 0)),
+        count: lines.length,
+      },
+    });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
+// SEÇİLMİŞ sətirləri "ödənildi" işarələ. Pul köçürməsi BANKDA edilir —
+// bu endpoint yalnız uçotu bağlayır.
+router.post('/admin/payouts/businesses/:key/pay', requirePermission('finance_payouts'), async (req: AuthRequest, res: Response) => {
+  try {
+    const key = String(req.params.key);
+    const isBiz = key.startsWith('b');
+    const id = parseInt(key.slice(1));
+    const rawIds: any[] = Array.isArray(req.body?.ledgerIds) ? req.body.ledgerIds : [];
+    const ids = Array.from(new Set(rawIds.map((x) => parseInt(String(x))).filter((n) => n > 0)));
+    if (!ids.length) { res.status(400).json({ success: false, message: 'Heç bir sətir seçilməyib' }); return; }
+
+    // Yalnız BU biznesə aid və hələ ödənilməmiş sətirlər — səhv ödənişin qarşısı.
+    const where: any = { id: { in: ids }, heldByPlatform: true, status: 'AVAILABLE' };
+    if (isBiz) where.businessId = id; else { where.sellerId = id; where.businessId = null; }
+    const ledgers = await prisma.sellerLedger.findMany({ where });
+    if (!ledgers.length) { res.status(400).json({ success: false, message: 'Seçilmiş sətirlər artıq ödənilib və ya tapılmadı' }); return; }
+    if (ledgers.length !== ids.length) {
+      console.warn(`[payouts] ${ids.length} seçildi, ${ledgers.length} uyğun gəldi — bəziləri artıq ödənilib`);
+    }
+
+    const amount = Math.round(ledgers.reduce((s, l) => s + l.netAmount, 0) * 100) / 100;
+    const sellerId = ledgers[0].sellerId;
+    let iban: string | null = null;
+    if (isBiz) {
+      const acc = await prisma.bankAccount.findFirst({ where: { businessId: id, isActive: true }, orderBy: { isPrimary: 'desc' }, select: { iban: true } });
+      iban = acc?.iban || null;
+    }
+
+    const payout = await prisma.$transaction(async (tx) => {
+      const p = await tx.payout.create({
+        data: {
+          sellerId, businessId: isBiz ? id : null, iban,
+          amount,
+          method: req.body?.method ? String(req.body.method).slice(0, 40) : 'BANK',
+          reference: req.body?.reference ? String(req.body.reference).slice(0, 200) : null,
+          createdById: req.adminId!, createdName: req.adminName || 'Admin',
+        },
+      });
+      await tx.sellerLedger.updateMany({ where: { id: { in: ledgers.map((l) => l.id) } }, data: { status: 'PAID_OUT', payoutId: p.id } });
+      return p;
+    });
+
+    await prisma.notification.create({
+      data: { userId: sellerId, type: 'SYSTEM', title: 'Ödəniş edildi 💸', body: `${amount} AZN bank hesabınıza köçürüldü (${ledgers.length} sifariş).`, link: '/earnings' },
+    }).catch(() => {});
+
+    res.json({ success: true, payout, paidCount: ledgers.length, amount });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
 // Payout yarat — satıcının mövcud (AVAILABLE) balansını ödə.
 router.post('/admin/payouts', requirePermission('finance_payouts'), async (req: AuthRequest, res: Response) => {
   try {

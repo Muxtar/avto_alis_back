@@ -1277,11 +1277,16 @@ model SellerLedger {
   netAmount      Float        // satıcının qazancı (gross - commission)
   heldByPlatform Boolean      @default(true) // KART: platforma pulu saxlayır. NAĞD: satıcı özü alıb (komissiya borcu)
   status         LedgerStatus @default(PENDING)
+  // Hansı BİZNESƏ aiddir — ödəniş biznesin bank hesabına (BankAccount.isPrimary)
+  // köçürüldüyü üçün hesablaşma biznes üzrə qruplaşdırılır. null → şəxsi satıcı.
+  // Köhnə sətirlər üçün admin paneli ilk oxunuşda doldurur (lazy backfill).
+  businessId     Int?
   payoutId       Int?
   createdAt      DateTime     @default(now())
   updatedAt      DateTime     @updatedAt
 
   @@index([sellerId, status])
+  @@index([businessId, status])
   @@index([payoutId])
 }
 
@@ -1289,6 +1294,9 @@ model SellerLedger {
 model Payout {
   id          Int      @id @default(autoincrement())
   sellerId    Int
+  // Ödəniş hansı biznesin bank hesabına getdi (varsa).
+  businessId  Int?
+  iban        String?  // köçürmə anındakı IBAN — sonradan dəyişsə tarixçə pozulmasın
   amount      Float
   method      String?  // bank köçürməsi / nağd / digər
   reference   String?  // köçürmə referansı / admin qeydi
@@ -1297,6 +1305,7 @@ model Payout {
   createdAt   DateTime @default(now())
 
   @@index([sellerId, createdAt])
+  @@index([businessId, createdAt])
 }
 
 // ── CMS səhifələri — admin paneldən redaktə olunan statik məzmun (about/terms/faq) ──
