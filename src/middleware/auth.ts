@@ -57,6 +57,35 @@ export function isAdminPhone(phone: string | null | undefined): boolean {
   return adminPhoneList().some((a) => a === d || a.endsWith(tail) || d.endsWith(a.slice(-9)));
 }
 
+// ── ADMİN PANELİNƏ GİRİŞ İCAZƏSİ ────────────────────────────────────────────
+// İki ayrı env siyahısı var və fərqi vacibdir:
+//
+//   ADMIN_PHONES        → SUPER-ADMIN. Hər modula icazəlidir, panel üzərindən
+//                         səlahiyyəti götürülə bilməz.
+//   ADMIN_LOGIN_PHONES  → yalnız GİRİŞ icazəsi. Bu nömrənin sahibi əvvəlcədən
+//                         panel üzərindən admin kimi əlavə edilməli və
+//                         icazələri təyin edilməlidir (RBAC). Sadəcə env-ə
+//                         yazmaqla tam səlahiyyət ALMIR.
+//
+// Belə bölgü olmasa məhdud icazəli adminlər (RBAC) girə bilməzdi, yaxud
+// əksinə — env-ə yazılan hər nömrə avtomatik tam səlahiyyət alardı.
+export function adminLoginPhoneList(): string[] {
+  const extra = (process.env.ADMIN_LOGIN_PHONES || '')
+    .split(',').map((s) => s.replace(/\D/g, '')).filter((s) => s.length >= 7);
+  return [...adminPhoneList(), ...extra];
+}
+function matchesAny(phone: string | null | undefined, list: string[]): boolean {
+  if (!phone) return false;
+  const d = String(phone).replace(/\D/g, '');
+  if (d.length < 7) return false;
+  const tail = d.slice(-9);
+  return list.some((a) => a === d || a.endsWith(tail) || d.endsWith(a.slice(-9)));
+}
+// Bu nömrə ümumiyyətlə admin panelinə giriş cəhdi edə bilərmi?
+export function canAdminLogin(phone: string | null | undefined): boolean {
+  return matchesAny(phone, adminLoginPhoneList());
+}
+
 // User-Agent-dən cihaz məlumatını çıxar (WhatsApp "bağlı cihazlar" üçün).
 // Xarici asılılıq yoxdur — sadə imza uyğunlaşması.
 export function parseDevice(ua: string | undefined): { os: string | null; browser: string | null; deviceType: string } {

@@ -136,6 +136,12 @@ model User {
   // Admin icazə modulları (RBAC) — məs. ["listings","orders"]. Super-admin
   // (ADMIN_PHONES) bu siyahıdan asılı olmadan hər şeyə girə bilir; adi adminlər
   // yalnız burada sadalanan modullara. role=ADMIN olmayanlarda mənasızdır.
+
+  // ADMIN GİRİŞİNİN KİLİDLƏNMƏSİ — ardıcıl səhv kod cəhdləri sayılır.
+  // Limit aşılanda hesab müəyyən müddət kilidlənir (IP limitindən asılı deyil,
+  // ona görə fərqli IP-lərdən yavaş hücum da dayanır).
+  adminFailedLogins Int       @default(0)
+  adminLockedUntil  DateTime?
   adminPermissions      String[]              @default([])
   password              String?
   verified              Boolean               @default(false)

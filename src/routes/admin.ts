@@ -1,7 +1,7 @@
 import { Router, Response } from 'express';
 import { PrismaClient, Prisma, UserType } from '@prisma/client';
 import bcrypt from 'bcryptjs';
-import { adminAuth, requireAdmin, requirePermission, requireSuperAdmin, AuthRequest, generateToken, isAdminPhone, ADMIN_MODULES } from '../middleware/auth';
+import { adminAuth, requireAdmin, requirePermission, requireSuperAdmin, AuthRequest, generateToken, isAdminPhone, ADMIN_MODULES, canAdminLogin } from '../middleware/auth';
 import { authLimiter } from '../middleware/rateLimiter';
 import { createOtp } from '../services/otp';
 import { refund as kapitalRefund } from '../services/kapital';
@@ -70,6 +70,10 @@ router.post('/admin/whatsapp-test', requirePermission('settings'), async (req: A
 });
 
 // ── ADMIN: nömrə + OTP ilə giriş ──
+// Kilidləmə tənzimləri — ardıcıl səhv koddan sonra hesab bağlanır.
+const ADMIN_MAX_FAILED = 5;
+const ADMIN_LOCK_MINUTES = 30;
+
 // Nömrə ADMIN_PHONES (Railway env) siyahısında olmalıdır. İsim+şifrə girişi
 // yedək olaraq qalır. Eyni nömrə ilə normal saytda giriş də admin verir.
 
@@ -77,19 +81,39 @@ router.post('/admin/whatsapp-test', requirePermission('settings'), async (req: A
 router.post('/admin/login/phone', authLimiter, async (req: AuthRequest, res: Response) => {
   try {
     const raw = String(req.body?.phone || '').trim();
-    if (!isAdminPhone(raw)) { res.status(403).json({ success: false, message: 'Bu nömrə admin siyahısında deyil' }); return; }
+    // Nömrə env siyahılarından birində olmalıdır (ADMIN_PHONES və ya ADMIN_LOGIN_PHONES).
+    if (!canAdminLogin(raw)) { res.status(403).json({ success: false, message: 'Bu nömrə admin siyahısında deyil' }); return; }
     const digits = raw.replace(/\D/g, '');
     const tail = digits.slice(-9);
-    // Mövcud istifadəçini formatdan asılı olmadan tap, yoxdursa yarat — hər ikisinə admin rolu.
+    const superAdmin = isAdminPhone(raw);
     let user = await prisma.user.findFirst({ where: { phone: { contains: tail } } });
-    if (!user) {
-      user = await prisma.user.create({
-        data: { name: 'Admin', phone: digits.startsWith('994') ? `+${digits}` : (raw || `+${digits}`), type: 'CAR_OWNER', role: 'ADMIN', verified: true, profileComplete: true },
-      });
-    } else if (user.role !== 'ADMIN') {
-      user = await prisma.user.update({ where: { id: user.id }, data: { role: 'ADMIN' } });
+
+    if (superAdmin) {
+      // SUPER-ADMIN (ADMIN_PHONES): yoxdursa yaradılır, varsa admin edilir.
+      if (!user) {
+        user = await prisma.user.create({
+          data: { name: 'Admin', phone: digits.startsWith('994') ? `+${digits}` : (raw || `+${digits}`), type: 'CAR_OWNER', role: 'ADMIN', verified: true, profileComplete: true },
+        });
+      } else if (user.role !== 'ADMIN') {
+        user = await prisma.user.update({ where: { id: user.id }, data: { role: 'ADMIN' } });
+      }
+    } else {
+      // ADMIN_LOGIN_PHONES: yalnız GİRİŞ icazəsidir. İstifadəçi əvvəlcədən panel
+      // üzərindən admin edilməlidir — əks halda env-ə yazmaqla tam səlahiyyət
+      // alınardı (boş icazə siyahısı "tam giriş" deməkdir).
+      if (!user || user.role !== 'ADMIN') {
+        res.status(403).json({ success: false, message: 'Bu nömrə hələ admin kimi əlavə edilməyib. Super-admin panel üzərindən əlavə etməlidir.' });
+        return;
+      }
     }
+
     if (user.isBlocked) { res.status(403).json({ success: false, message: 'Hesab bloklanıb' }); return; }
+    // Kilid yoxlaması — ardıcıl səhv kodlardan sonra hesab müvəqqəti bağlanır.
+    if (user.adminLockedUntil && user.adminLockedUntil > new Date()) {
+      const mins = Math.ceil((user.adminLockedUntil.getTime() - Date.now()) / 60000);
+      res.status(429).json({ success: false, message: `Hesab müvəqqəti kilidlənib. ${mins} dəqiqə sonra yenidən cəhd edin.` });
+      return;
+    }
     const otp = await createOtp(user.id); // otp_real aktivdirsə SMS gedir
     res.json({ success: true, userId: user.id, delivered: otp.delivered, ...(otp.showCode ? { code: otp.code } : {}) });
   } catch (error: any) {
@@ -104,15 +128,41 @@ router.post('/admin/login/phone/verify', authLimiter, async (req: AuthRequest, r
     const code = String(req.body?.code || '');
     if (!userId || !code) { res.status(400).json({ success: false, message: 'userId və kod tələb olunur' }); return; }
     const user = await prisma.user.findUnique({ where: { id: userId } });
-    if (!user || !isAdminPhone(user.phone)) { res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return; }
+    if (!user || !canAdminLogin(user.phone)) { res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return; }
     if (user.isBlocked) { res.status(403).json({ success: false, message: 'Hesab bloklanıb' }); return; }
+    if (user.adminLockedUntil && user.adminLockedUntil > new Date()) {
+      const mins = Math.ceil((user.adminLockedUntil.getTime() - Date.now()) / 60000);
+      res.status(429).json({ success: false, message: `Hesab müvəqqəti kilidlənib. ${mins} dəqiqə sonra yenidən cəhd edin.` });
+      return;
+    }
     const record = await prisma.verificationCode.findFirst({
       where: { userId, verified: false, expiresAt: { gt: new Date() } },
       orderBy: { createdAt: 'desc' },
     });
-    if (!record || record.code !== code) { res.status(400).json({ success: false, message: 'Kod yanlışdır və ya vaxtı keçib' }); return; }
+    if (!record || record.code !== code) {
+      // SƏHV KOD → sayğacı artır; limit aşılanda hesabı kilidlə.
+      // Bu, IP limitindən asılı deyil — fərqli IP-lərdən yavaş hücum da dayanır.
+      const failed = user.adminFailedLogins + 1;
+      const lock = failed >= ADMIN_MAX_FAILED;
+      await prisma.user.update({
+        where: { id: userId },
+        data: {
+          adminFailedLogins: lock ? 0 : failed,
+          ...(lock ? { adminLockedUntil: new Date(Date.now() + ADMIN_LOCK_MINUTES * 60 * 1000) } : {}),
+        },
+      });
+      if (lock) console.warn(`[admin] KİLİDLƏNDİ: user ${userId} (${ADMIN_MAX_FAILED} səhv kod) — ${ADMIN_LOCK_MINUTES} dəq.`);
+      res.status(400).json({
+        success: false,
+        message: lock
+          ? `Çox sayda səhv cəhd. Hesab ${ADMIN_LOCK_MINUTES} dəqiqə kilidləndi.`
+          : `Kod yanlışdır və ya vaxtı keçib. Qalan cəhd: ${ADMIN_MAX_FAILED - failed}`,
+      });
+      return;
+    }
     await prisma.verificationCode.update({ where: { id: record.id }, data: { verified: true } });
-    if (user.role !== 'ADMIN') await prisma.user.update({ where: { id: userId }, data: { role: 'ADMIN' } });
+    // Uğurlu giriş → sayğac sıfırlanır.
+    await prisma.user.update({ where: { id: userId }, data: { adminFailedLogins: 0, adminLockedUntil: null, ...(user.role !== 'ADMIN' ? { role: 'ADMIN' } : {}) } });
     const token = generateToken(user.id);
     res.json({ success: true, token, admin: { id: user.id, name: user.name } });
   } catch (error: any) {
@@ -120,31 +170,16 @@ router.post('/admin/login/phone/verify', authLimiter, async (req: AuthRequest, r
   }
 });
 
-// Admin Login
-router.post('/admin/login', authLimiter, async (req: AuthRequest, res: Response) => {
-  try {
-    const { username, password } = req.body;
-
-    const admin = await prisma.user.findFirst({
-      where: { name: username, role: 'ADMIN' },
-    });
-
-    if (!admin || !admin.password) {
-      res.status(401).json({ success: false, message: 'Yanlış istifadəçi adı və ya şifrə' });
-      return;
-    }
-
-    const valid = await bcrypt.compare(password, admin.password);
-    if (!valid) {
-      res.status(401).json({ success: false, message: 'Yanlış istifadəçi adı və ya şifrə' });
-      return;
-    }
-
-    const token = generateToken(admin.id);
-    res.json({ success: true, token, admin: { id: admin.id, name: admin.name } });
-  } catch (error: any) {
-    res.status(400).json({ success: false, message: error.message });
-  }
+// ── İSİM + ŞİFRƏ GİRİŞİ BAĞLANIB ──────────────────────────────────────────
+// Admin panelinə giriş YALNIZ nömrə + SMS kodu ilədir və nömrə env
+// siyahısında (ADMIN_PHONES / ADMIN_LOGIN_PHONES) olmalıdır.
+// Səbəb: şifrə tək faktordur — sızsa və ya təxmin edilsə panel açılırdı.
+// Endpoint silinmir, 410 qaytarır ki, köhnə müştəri aydın mesaj görsün.
+router.post('/admin/login', authLimiter, async (_req: AuthRequest, res: Response) => {
+  res.status(410).json({
+    success: false,
+    message: 'Şifrə ilə giriş dayandırılıb. Admin panelinə yalnız nömrə + təsdiq kodu ilə daxil olun.',
+  });
 });
 
 // Dashboard Stats
