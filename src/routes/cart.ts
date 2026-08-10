@@ -126,7 +126,11 @@ router.get('/shared-cart/:token', async (req: AuthRequest, res: Response) => {
       deliveryMode: sc.deliveryMode, recipient,
       // Ünvan paylaşan tərəfindən əvvəlcədən seçilibsə link BİRBAŞA ödənişə hazırdır
       // (ödəyən heç nə seçmir — sadəcə ödəyir). Qeydiyyat tələb olunmur.
-      payable: sc.deliveryMode === 'SENDER' && !!sc.address && !paidOrder,
+      // Link kartla ödənilə bilər (ödənilməyibsə). İki rejim var:
+      //   SENDER    → ünvan hazırdır, açan yalnız ödəyir (hesab lazım DEYİL)
+      //   RECIPIENT → açan məhsulu özü alır: ünvanı O yazır və hesabı OLMALIDIR
+      payable: !paidOrder && (sc.deliveryMode === 'SENDER' ? !!sc.address : true),
+      needsAddress: sc.deliveryMode !== 'SENDER',
       paid: !!paidOrder,
       // SENDER rejimində göndərənin çatdırılma ünvanı (alıcı görür, dəyişə bilmir).
       deliveryAddress: sc.deliveryMode === 'SENDER' ? { address: sc.address, city: sc.city, latitude: sc.latitude, longitude: sc.longitude, phone: sc.phone } : null,
@@ -153,18 +157,42 @@ router.post('/shared-cart/:token/pay', guestPayLimiter, async (req: AuthRequest,
   try {
     const sc = await prisma.sharedCart.findUnique({ where: { token: String(req.params.token) } });
     if (!sc) { res.status(404).json({ success: false, message: 'Link tapılmadı' }); return; }
-    if (sc.deliveryMode !== 'SENDER' || !sc.address) {
-      res.status(400).json({ success: false, message: 'Bu link birbaşa ödəniş üçün deyil' });
-      return;
-    }
     // Təkrar ödənişin qarşısını al.
     if (sc.orderIds.length) {
       const already = await prisma.order.findFirst({ where: { id: { in: sc.orderIds }, paymentStatus: 'PAID' }, select: { id: true } });
       if (already) { res.status(409).json({ success: false, message: 'Bu link artıq ödənilib' }); return; }
     }
 
-    // Məhsulu alan — paylaşanın özü, ya da seçilmiş qeydiyyatlı dost.
-    const buyerId = sc.recipientUserId || sc.userId;
+    // ── İKİ SSENARİ ──────────────────────────────────────────────────────────
+    // A) SENDER — məhsul PAYLAŞANA (və ya onun seçdiyi qeydiyyatlı dosta) gedir.
+    //    Ünvanı paylaşan əvvəlcədən yazıb. Linki açan YALNIZ ödəyir; onun
+    //    saytda hesabı olmasına ehtiyac yoxdur.
+    // B) RECIPIENT — məhsulu LİNKİ AÇAN özü alır. Ona görə ünvanı O yazır və
+    //    hesabı OLMALIDIR: sifariş, bildiriş, qaytarma və çatdırılma onun
+    //    hesabına bağlanır (istifadəçinin öz qoyduğu qayda).
+    let buyerId: number;
+    let delAddress: string | null;
+    let delCity: string | null;
+    let delPhone: string | null;
+
+    if (sc.deliveryMode === 'SENDER') {
+      if (!sc.address) { res.status(400).json({ success: false, message: 'Bu linkdə çatdırılma ünvanı yoxdur' }); return; }
+      buyerId = sc.recipientUserId || sc.userId;
+      delAddress = sc.address; delCity = sc.city; delPhone = sc.phone;
+    } else {
+      if (!req.adminId) {
+        res.status(401).json({ success: false, message: 'Məhsulu özünüz aldığınız üçün hesabınıza daxil olmalısınız', needLogin: true });
+        return;
+      }
+      buyerId = req.adminId;
+      const rawAddr = String(req.body?.address || '').trim();
+      delCity = String(req.body?.city || '').trim() || null;
+      delPhone = String(req.body?.phone || '').trim() || null;
+      if (!rawAddr) { res.status(400).json({ success: false, message: 'Çatdırılma ünvanınızı seçin' }); return; }
+      // Order-də ayrıca `city` sahəsi yoxdur — şəhər ünvanın əvvəlinə qatılır.
+      delAddress = [delCity, rawAddr].filter(Boolean).join(', ');
+    }
+
     const buyer = await prisma.user.findUnique({ where: { id: buyerId }, select: { id: true, isBlocked: true } });
     if (!buyer || buyer.isBlocked) { res.status(400).json({ success: false, message: 'Alıcı hesabı əlçatan deyil' }); return; }
 
@@ -200,7 +228,7 @@ router.post('/shared-cart/:token/pay', guestPayLimiter, async (req: AuthRequest,
           data: {
             buyerId, sellerId, total,
             status: 'PENDING', paymentMethod: 'CARD', paymentStatus: 'PENDING',
-            deliveryType: 'DELIVERY', address: sc.address, phone: sc.phone,
+            deliveryType: 'DELIVERY', address: delAddress, phone: delPhone,
             pickupCode: genPickupCode(),
             sharedCartId: sc.id, payerName, payerPhone, payerUserId,
             items: { create: its.map((it: any) => ({ listingId: it.id, quantity: it.quantity, price: it.price, title: it.title })) },
