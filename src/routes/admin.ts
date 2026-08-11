@@ -1418,6 +1418,164 @@ router.get('/admin/orders', requirePermission('orders'), async (req: AuthRequest
 // Kim kimdən aldı, nə qədər ödədi, platformaya (bizə) nə qədər pul gəldi.
 // "Bizə gələn pul" = KART ödənişləri (PAID) — YIĞIM/Kapital merchant hesabımıza
 // düşür. NAĞD ödənişlər alıcı→satıcı birbaşa gedir (bizə gəlmir).
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MALİYYƏ — QRUPLAŞDIRILMIŞ GÖRÜNÜŞ
+//
+// Düz siyahıda "kim kimə nə satdı" anlaşılmırdı. Burada iyerarxiya var:
+//
+//   Satıcı (istifadəçi)
+//     └ Biznes (VÖEN, yaradan şəxs, ümumi satış)
+//         └ Obyekt (filial/mağaza)
+//             └ Sifariş → alıcı + məhsullar + qiymət
+//
+// Hər səviyyədə satış sayı və məbləği. Məhsulun hansı obyektə aid olduğu
+// listing.businessObjectId ilə tapılır.
+// Qeyd: `/admin/finance/:orderId` marşrutu ilə toqquşmasın deyə ad `finance-tree`.
+// ═══════════════════════════════════════════════════════════════════════════
+router.get('/admin/finance-tree', requirePermission('finance'), async (req: AuthRequest, res: Response) => {
+  try {
+    const q = String(req.query.q || '').trim();
+    const payStatus = String(req.query.paymentStatus || 'PAID');
+    const from = req.query.from ? new Date(String(req.query.from)) : null;
+    const to = req.query.to ? new Date(String(req.query.to)) : null;
+
+    const where: Prisma.OrderWhereInput = {};
+    if (payStatus !== 'all') where.paymentStatus = payStatus as any;
+    if (from || to) where.createdAt = { ...(from ? { gte: from } : {}), ...(to ? { lte: to } : {}) };
+    if (q) where.OR = [
+      { buyer: { name: { contains: q, mode: 'insensitive' } } },
+      { seller: { name: { contains: q, mode: 'insensitive' } } },
+      { seller: { phone: { contains: q } } },
+    ];
+
+    const orders = await prisma.order.findMany({
+      where,
+      orderBy: { createdAt: 'desc' },
+      take: 2000,                       // qorunma limiti — çox böyük dövrdə səhifə donmasın
+      select: {
+        id: true, createdAt: true, total: true, paymentMethod: true, paymentStatus: true, status: true,
+        buyer: { select: { id: true, name: true, phone: true } },
+        seller: { select: { id: true, name: true, phone: true } },
+        items: {
+          select: {
+            id: true, title: true, quantity: true, price: true,
+            listing: { select: { id: true, businessId: true, businessObjectId: true } },
+          },
+        },
+      },
+    });
+
+    // Sifarişdəki məhsulların hamısı eyni satıcıya aiddir; biznes/obyekt ilk
+    // məhsuldan götürülür (checkout satıcı üzrə bölündüyü üçün eynidir).
+    const bizIds = new Set<number>();
+    const objIds = new Set<number>();
+    for (const o of orders) {
+      const l = o.items[0]?.listing;
+      if (l?.businessId) bizIds.add(l.businessId);
+      if (l?.businessObjectId) objIds.add(l.businessObjectId);
+    }
+    const [bizzes, objs] = await Promise.all([
+      bizIds.size ? prisma.business.findMany({
+        where: { id: { in: [...bizIds] } },
+        select: {
+          id: true, name: true, voen: true, ownerName: true, founderName: true,
+          createdAt: true, status: true, isActive: true, phone: true,
+          user: { select: { id: true, name: true, phone: true } },   // biznesi YARADAN şəxs
+        },
+      }) : [],
+      objIds.size ? prisma.businessObject.findMany({
+        where: { id: { in: [...objIds] } },
+        select: { id: true, name: true, address: true, city: true, phone: true, isActive: true, businessId: true },
+      }) : [],
+    ]);
+    const bById = new Map(bizzes.map((b) => [b.id, b]));
+    const oById = new Map(objs.map((o) => [o.id, o]));
+
+    // ── Ağac qur ──
+    type Leaf = typeof orders[number];
+    const sellers = new Map<number, any>();
+    for (const o of orders) {
+      if (!o.seller) continue;
+      const l = o.items[0]?.listing;
+      const bizKey = l?.businessId ?? 0;         // 0 → biznes yoxdur (şəxsi satış)
+      const objKey = l?.businessObjectId ?? 0;   // 0 → obyekt təyin edilməyib
+
+      let s = sellers.get(o.seller.id);
+      if (!s) {
+        s = { id: o.seller.id, name: o.seller.name, phone: o.seller.phone, orders: 0, amount: 0, businesses: new Map() };
+        sellers.set(o.seller.id, s);
+      }
+      s.orders++; s.amount += o.total;
+
+      let b = s.businesses.get(bizKey);
+      if (!b) {
+        const info = bizKey ? bById.get(bizKey) : null;
+        b = {
+          id: bizKey || null,
+          name: info?.name || 'Şəxsi satış (biznes yoxdur)',
+          voen: info?.voen || null, ownerName: info?.ownerName || null, founderName: info?.founderName || null,
+          phone: info?.phone || null, status: info?.status || null, isActive: info?.isActive ?? null,
+          createdAt: info?.createdAt || null,
+          createdBy: info?.user ? { id: info.user.id, name: info.user.name } : null,
+          orders: 0, amount: 0, objects: new Map(),
+        };
+        s.businesses.set(bizKey, b);
+      }
+      b.orders++; b.amount += o.total;
+
+      let ob = b.objects.get(objKey);
+      if (!ob) {
+        const info = objKey ? oById.get(objKey) : null;
+        ob = {
+          id: objKey || null,
+          name: info?.name || 'Obyekt təyin edilməyib',
+          address: info?.address || null, city: info?.city || null,
+          phone: info?.phone || null, isActive: info?.isActive ?? null,
+          orders: 0, amount: 0, list: [] as Leaf[],
+        };
+        b.objects.set(objKey, ob);
+      }
+      ob.orders++; ob.amount += o.total;
+      ob.list.push(o);
+    }
+
+    const r2 = (n: number) => Math.round(n * 100) / 100;
+    const result = [...sellers.values()]
+      .map((s) => ({
+        ...s, amount: r2(s.amount),
+        businesses: [...s.businesses.values()]
+          .map((b: any) => ({
+            ...b, amount: r2(b.amount),
+            objects: [...b.objects.values()]
+              .map((ob: any) => ({
+                ...ob, amount: r2(ob.amount),
+                list: ob.list.map((o: Leaf) => ({
+                  id: o.id, createdAt: o.createdAt, total: o.total,
+                  paymentMethod: o.paymentMethod, paymentStatus: o.paymentStatus, status: o.status,
+                  buyer: o.buyer,
+                  items: o.items.map((it) => ({ id: it.id, title: it.title, quantity: it.quantity, price: it.price })),
+                })),
+              }))
+              .sort((x: any, y: any) => y.amount - x.amount),
+          }))
+          .sort((x: any, y: any) => y.amount - x.amount),
+      }))
+      .sort((a, b) => b.amount - a.amount);
+
+    res.json({
+      success: true,
+      sellers: result,
+      totals: {
+        sellers: result.length,
+        orders: orders.length,
+        amount: r2(orders.reduce((s, o) => s + o.total, 0)),
+        capped: orders.length >= 2000,   // limitə çatdısa istifadəçiyə bildir
+      },
+    });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
 router.get('/admin/finance', requirePermission('finance'), async (req: AuthRequest, res: Response) => {
   try {
     const page = parseInt(String(req.query.page || '1')) || 1;
