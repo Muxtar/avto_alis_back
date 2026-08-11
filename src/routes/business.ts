@@ -921,6 +921,58 @@ router.post('/admin/businesses/:id/ai-recheck', requirePermission('businesses'),
   }
 });
 
+
+// ── VOEN / IBAN DUBLİKAT YOXLAMASI ────────────────────────────────────────
+// Eyni VÖEN başqa bir biznesdə qeydiyyatdadırsa bu, saxtakarlıq əlamətidir:
+// bir şirkət ikinci dəfə hesab açır, ya da kimsə başqasının sənədini işlədir.
+// Admin yüzlərlə VÖEN-i əl ilə tutuşdurmasın deyə sistem özü tapır.
+//
+// Müqayisə YALNIZ rəqəmlər üzrədir — "1234567891" və "12345678-91" eynidir.
+async function findVoenDuplicates(voen: string, exceptId: number) {
+  const digits = String(voen || '').replace(/\D/g, '');
+  if (digits.length < 6) return [];          // çox qısa → mənasız uyğunluq verir
+  const all = await prisma.business.findMany({
+    where: { id: { not: exceptId } },
+    select: { id: true, name: true, voen: true, status: true, isActive: true, createdAt: true, userId: true },
+    take: 2000,
+  });
+  return all
+    .filter((b) => String(b.voen || '').replace(/\D/g, '') === digits)
+    .map((b) => ({
+      id: b.id, name: b.name, voen: b.voen, status: b.status,
+      isActive: b.isActive, createdAt: b.createdAt, ownerUserId: b.userId,
+    }));
+}
+
+// Eyni IBAN iki biznesdə → pul eyni hesaba gedir. Bu da yoxlanılır.
+async function findIbanDuplicates(ibans: string[], exceptId: number) {
+  const norm = ibans.map((i) => String(i || '').toUpperCase().replace(/[\s-]/g, '')).filter(Boolean);
+  if (!norm.length) return [];
+  const rows = await prisma.bankAccount.findMany({
+    where: { businessId: { not: exceptId } },
+    select: { iban: true, businessId: true, business: { select: { id: true, name: true, voen: true, status: true } } },
+    take: 3000,
+  });
+  const out: any[] = [];
+  for (const r of rows) {
+    const ri = String(r.iban || '').toUpperCase().replace(/[\s-]/g, '');
+    if (norm.includes(ri) && r.business) {
+      out.push({ iban: r.iban, id: r.business.id, name: r.business.name, voen: r.business.voen, status: r.business.status });
+    }
+  }
+  return out;
+}
+
+// Admin VÖEN-i əl ilə yazanda da canlı yoxlasın deyə ayrıca endpoint.
+router.get('/admin/businesses/:id/voen-check', requirePermission('businesses'), async (req: AuthRequest, res: Response) => {
+  try {
+    const id = parseInt(String(req.params.id));
+    const voen = String(req.query.voen || '');
+    const duplicates = await findVoenDuplicates(voen, id);
+    res.json({ success: true, duplicates });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
 // ── ADMIN: sənəddən şirkət məlumatlarını AI ilə OXU (search) — saxlamır, qaytarır ──
 // Admin nəticəni görüb istəsə redaktə formasına tətbiq edir.
 router.post('/admin/businesses/:id/ai-extract', requirePermission('businesses'), async (req: AuthRequest, res: Response) => {
@@ -939,7 +991,13 @@ router.post('/admin/businesses/:id/ai-extract', requirePermission('businesses'),
       if (!p) continue;
       try { const r = await extractBankAccounts(p); for (const a of r.accounts || []) if (a.iban) ibans.push(a.iban); } catch { /* keç */ }
     }
-    res.json({ success: true, info, ibans: [...new Set(ibans)] });
+    const uniqIbans = [...new Set(ibans)];
+    // AI-ın oxuduğu VÖEN/IBAN başqa biznesdə varmı? Admin təsdiqdən əvvəl görsün.
+    const [voenDuplicates, ibanDuplicates] = await Promise.all([
+      info?.voen ? findVoenDuplicates(info.voen, id) : Promise.resolve([]),
+      findIbanDuplicates(uniqIbans, id),
+    ]);
+    res.json({ success: true, info, ibans: uniqIbans, voenDuplicates, ibanDuplicates });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }
