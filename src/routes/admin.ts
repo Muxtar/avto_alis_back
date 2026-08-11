@@ -1492,6 +1492,14 @@ router.get('/admin/finance-tree', requirePermission('finance'), async (req: Auth
     const bById = new Map(bizzes.map((b) => [b.id, b]));
     const oById = new Map(objs.map((o) => [o.id, o]));
 
+    // Hesablaşma vəziyyəti — hər sifarişin pulu satıcıya ödənilib, yoxsa yox.
+    // Bu, admin maliyyə ekranından birbaşa "ödənildi" işarələyə bilsin deyə lazımdır.
+    const ledgers = orders.length ? await prisma.sellerLedger.findMany({
+      where: { orderId: { in: orders.map((o) => o.id) } },
+      select: { id: true, orderId: true, status: true, netAmount: true, commission: true, availableAt: true, clawbackNeeded: true, heldByPlatform: true },
+    }) : [];
+    const lByOrder = new Map(ledgers.map((l) => [l.orderId, l]));
+
     // ── Ağac qur ──
     type Leaf = typeof orders[number];
     const sellers = new Map<number, any>();
@@ -1550,12 +1558,27 @@ router.get('/admin/finance-tree', requirePermission('finance'), async (req: Auth
             objects: [...b.objects.values()]
               .map((ob: any) => ({
                 ...ob, amount: r2(ob.amount),
-                list: ob.list.map((o: Leaf) => ({
-                  id: o.id, createdAt: o.createdAt, total: o.total,
-                  paymentMethod: o.paymentMethod, paymentStatus: o.paymentStatus, status: o.status,
-                  buyer: o.buyer,
-                  items: o.items.map((it) => ({ id: it.id, title: it.title, quantity: it.quantity, price: it.price })),
-                })),
+                list: ob.list.map((o: Leaf) => {
+                  const lg = lByOrder.get(o.id);
+                  return {
+                    id: o.id, createdAt: o.createdAt, total: o.total,
+                    paymentMethod: o.paymentMethod, paymentStatus: o.paymentStatus, status: o.status,
+                    buyer: o.buyer,
+                    items: o.items.map((it) => ({ id: it.id, title: it.title, quantity: it.quantity, price: it.price })),
+                    // Satıcıya ödəniş vəziyyəti:
+                    //   null        → hesablaşma sətri yoxdur (ödənilməmiş sifariş)
+                    //   PENDING     → çatdırılmayıb və ya müdafiə pəncərəsi bitməyib
+                    //   AVAILABLE   → ÖDƏNİLƏ BİLƏR (seçilib "ödənildi" edilir)
+                    //   PAID_OUT    → artıq ödənilib
+                    //   REVERSED    → ləğv/qaytarma
+                    ledgerId: lg?.id ?? null,
+                    ledgerStatus: lg?.status ?? null,
+                    net: lg ? Math.round(lg.netAmount * 100) / 100 : null,
+                    commission: lg ? Math.round(lg.commission * 100) / 100 : null,
+                    payable: !!lg && lg.status === 'AVAILABLE' && lg.heldByPlatform && !lg.clawbackNeeded
+                             && (!lg.availableAt || lg.availableAt <= new Date()),
+                  };
+                }),
               }))
               .sort((x: any, y: any) => y.amount - x.amount),
           }))
