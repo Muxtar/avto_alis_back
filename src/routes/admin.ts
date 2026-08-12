@@ -290,7 +290,15 @@ router.post('/admin/ai/test', requirePermission('ai'), async (req: AuthRequest, 
 router.get('/admin/service-health', requirePermission('ai'), async (_req: AuthRequest, res: Response) => {
   try {
     const services = await checkAllServices();
-    res.json({ success: true, services });
+    // Serverin ÇIXIŞ IP-si. Yango kimi xidmətlər API açarını IP-yə bağlayır
+    // ("Host is not allowed" xətası buradan gəlir) — həmin IP-ni onlara
+    // vermək lazımdır. Railway-də IP deploy-dan deploy-a dəyişə bilər.
+    let outboundIp: string | null = null;
+    try {
+      const r = await fetch('https://api.ipify.org?format=json', { signal: AbortSignal.timeout(5000) });
+      outboundIp = ((await r.json()) as any)?.ip ?? null;
+    } catch { /* şəbəkə bağlıdırsa göstərilmir */ }
+    res.json({ success: true, services, outboundIp });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }
