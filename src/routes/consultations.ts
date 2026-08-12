@@ -111,21 +111,30 @@ router.post('/consultations/request', consultationLimiter, adminAuth, async (req
     const pro = await prisma.user.findUnique({ where: { id: professionalId }, select: { consultationSuspended: true } });
     if (pro?.consultationSuspended) { res.status(400).json({ success: false, message: 'Bu peşəkar hazırda konsultasiya qəbul etmir' }); return; }
 
+    // Alıcı NEÇƏ BLOK almaq istədiyini seçir. Məs. təklif "1 saat / 100 AZN"
+    // olsa, qty=2 → 2 saat / 200 AZN. Blok ölçüsü təklifdə sabitdir; alıcı
+    // yalnız sayı seçir. 1–24 arası (bir gündən çox seans mənasızdır).
+    const qty = Math.max(1, Math.min(24, parseInt(String(req.body?.quantity ?? 1)) || 1));
     const voen = await hasApprovedBusiness(professionalId);
     const block = offer.durationMinutes * 60;
+    const totalSeconds = block * qty;
+    const totalPrice = Math.round(offer.price * qty * 100) / 100;
     const session = await prisma.consultationSession.create({
       data: {
         buyerId: req.adminId!, professionalId, offerId: offer.id,
-        title: offer.title || 'Rəy konsultasiyası', price: offer.price,
-        blockSeconds: block, durationSeconds: block,
+        title: offer.title || 'Rəy konsultasiyası', price: totalPrice,
+        // blockSeconds — sonradan vaxt artırmaq (top-up) üçün bir blokun ölçüsü.
+        blockSeconds: block, durationSeconds: totalSeconds,
         status: voen ? 'REQUESTED' : 'PENDING_VOEN',
       },
     });
     // Mesaj bölməsində görünməsi üçün ilk mesaj (ayrı icon ilə göstəriləcək).
+    const totalMin = offer.durationMinutes * qty;
     await prisma.message.create({
       data: {
         senderId: req.adminId!, receiverId: professionalId, consultationId: session.id,
-        content: `🗣️ Rəy konsultasiyası sorğusu — ${offer.durationMinutes} dəq / ${offer.price} AZN`,
+        content: `🗣️ Rəy konsultasiyası sorğusu — ${totalMin} dəq / ${totalPrice} AZN`
+               + (qty > 1 ? ` (${qty} × ${offer.durationMinutes} dəq)` : ''),
       },
     });
     // Bildiriş
@@ -341,5 +350,49 @@ export async function settleConsultation(where: { gatewayOrderId?: number | null
         settledRefs: { push: ref },
       },
     });
+  }
+}
+
+/**
+ * VAXTI BİTMİŞ SEANSLARI AVTOMATİK BAĞLA.
+ *
+ * Problem: vaxt bitəndə mesaj göndərmək onsuz da bloklanırdı, amma seansın
+ * STATUSU ACTIVE qalırdı. Nəticədə:
+ *   • alıcı rəy verə bilmirdi (rəy forması yalnız ENDED-də açılır)
+ *   • şikayət düyməsi çıxmırdı
+ *   • seans "işləyir" kimi görünürdü
+ * Heç kim "Bitir" düyməsinə basmasa seans əbədi asılı qalırdı.
+ *
+ * Bu funksiya vaxtı dolmuş ACTIVE seansları tapıb ENDED edir və hər iki
+ * tərəfə bildiriş göndərir.
+ */
+export async function endExpiredConsultations(): Promise<number> {
+  try {
+    const active = await prisma.consultationSession.findMany({
+      where: { status: 'ACTIVE', runningSince: { not: null } },
+      select: { id: true, buyerId: true, professionalId: true, durationSeconds: true, consumedSeconds: true, runningSince: true },
+    });
+    let closed = 0;
+    for (const s of active) {
+      const elapsed = Math.floor((Date.now() - new Date(s.runningSince!).getTime()) / 1000);
+      if (s.consumedSeconds + elapsed < s.durationSeconds) continue;   // vaxt hələ var
+      await prisma.consultationSession.update({
+        where: { id: s.id },
+        data: { status: 'ENDED', consumedSeconds: s.durationSeconds, runningSince: null, endedAt: new Date() },
+      });
+      closed++;
+      // Hər iki tərəfə bildiriş — alıcı rəy/şikayət üçün geri dönsün.
+      await prisma.notification.createMany({
+        data: [
+          { userId: s.buyerId, type: 'CONSULTATION', title: 'Konsultasiya bitdi', body: 'Vaxt tamamlandı. Rəy bildirə və ya şikayət edə bilərsiniz.', link: `/consultations/${s.id}` },
+          { userId: s.professionalId, type: 'CONSULTATION', title: 'Konsultasiya bitdi', body: 'Seansın vaxtı tamamlandı.', link: `/consultations/${s.id}` },
+        ],
+      }).catch(() => {});
+    }
+    if (closed > 0) console.log(`[consultations] vaxtı bitən ${closed} seans bağlandı`);
+    return closed;
+  } catch (e) {
+    console.error('[consultations] endExpiredConsultations xəta:', (e as any)?.message);
+    return 0;
   }
 }

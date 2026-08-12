@@ -3,6 +3,7 @@
 import { PrismaClient } from '@prisma/client';
 import { refundOrder as gatewayRefundOrder } from './paymentGateway';
 import { recordSettlement, releaseHeldLedgers } from './settlement';
+import { endExpiredConsultations } from '../routes/consultations';
 
 const prisma = new PrismaClient();
 
@@ -83,6 +84,8 @@ export function startOrderExpiryJob() {
     expireUnconfirmedOrders().catch(() => {});
     // Alıcı müdafiəsi pəncərəsi bitmiş hesablaşmaları ödənilə bilən et.
     releaseHeldLedgers().catch(() => {});
+    // Vaxtı bitmiş konsultasiya seanslarını bağla (rəy/şikayət açılsın).
+    endExpiredConsultations().catch(() => {});
   };
   setTimeout(run, 30 * 1000);              // start-dan 30 san sonra ilk yoxlama
   setInterval(run, 10 * 60 * 1000);        // sonra hər 10 dəqiqə
