@@ -91,7 +91,13 @@ export async function dispatchOrderToYango(orderId: number): Promise<{ ok: boole
 // ── Qiymət təxmini (checkout-da göstərmək üçün) ───────────────────────────────
 router.post('/yango/quote', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
-    if (!isYangoConfigured()) { res.json({ success: true, available: false, fee: 0 }); return; }
+    // Səbəbi MÜTLƏQ qaytarılmalıdır: səbəbsiz `available:false` gələndə panel
+    // "konum seçin" yazırdı və istifadəçi konumu onsuz da seçdiyi üçün nə
+    // etməli olduğunu anlamırdı.
+    if (!isYangoConfigured()) {
+      res.json({ success: true, available: false, fee: 0, message: 'Yango inteqrasiyası hazırda aktiv deyil' });
+      return;
+    }
     const businessObjectId = req.body.businessObjectId ? parseInt(String(req.body.businessObjectId)) : null;
     const sellerId = req.body.sellerId ? parseInt(String(req.body.sellerId)) : null;
     const lat = req.body.latitude != null ? parseFloat(String(req.body.latitude)) : null;
