@@ -9,7 +9,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { isInfobipConfigured } from './infobipWhatsApp';
 import { isSmsConfigured } from './infobipSms';
 import { isVeriffConfigured } from './veriff';
-import { isYangoConfigured } from './yangoDelivery';
+import { isYangoConfigured, checkPrice as yangoCheckPrice } from './yangoDelivery';
 import { isConfigured as isYigimConfigured } from './yigimPay';
 import { isMailerConfigured } from './mailer';
 
@@ -108,13 +108,45 @@ function configOnly(id: string, name: string, category: ServiceHealth['category'
   };
 }
 
+// Yango — CANLI yoxlama. Pulsuzdur (check-price sifariş yaratmır), ona görə
+// real sorğu göndərib əsl xətanı göstəririk. "Host is not allowed" kimi
+// cavabları admin panelində görmək lazımdır, əks halda səbəb gizli qalır.
+async function checkYango(): Promise<ServiceHealth> {
+  const base = { id: 'yango', name: 'Yango (çatdırılma)', category: 'delivery' as const };
+  if (!isYangoConfigured()) {
+    return { ...base, configured: false, live: false, status: 'not_configured', detail: 'YANGO_TOKEN qurulmayıb' };
+  }
+  try {
+    // Bakı mərkəzindən Bakı mərkəzinə sınaq qiyməti — sifariş YARANMIR.
+    // Geo formatı [uzunluq, en] — routes/yango.ts ilə eyni sıra.
+    const q = await yangoCheckPrice({
+      source: [49.8920, 40.3777],        // Bakı mərkəzi
+      destination: [49.8671, 40.4093],   // Bakı, başqa nöqtə
+      weightKg: 1,
+    });
+    if (q.ok && q.data?.price) {
+      return { ...base, configured: true, live: true, status: 'ok', detail: `İşləyir — sınaq qiyməti alındı (${q.data.price})` };
+    }
+    const err = q.error || 'Qiymət alınmadı';
+    // Ən çox rast gəlinən iki halı izahla göstəririk.
+    const hint = /host is not allowed/i.test(err)
+      ? ' → Yango serverimizin IP-sini tanımır. Admin paneldəki çıxış IP-sini Yango-ya verib ağ siyahıya saldırın.'
+      : /access denied|unauthorized/i.test(err)
+        ? ' → Token qəbul edilmir. YANGO_TOKEN-i yoxlayın.'
+        : '';
+    return { ...base, configured: true, live: true, status: 'error', detail: `${err}${hint}` };
+  } catch (e: any) {
+    return { ...base, configured: true, live: true, status: 'error', detail: e?.message || 'Yoxlama alınmadı' };
+  }
+}
+
 export async function checkAllServices(): Promise<ServiceHealth[]> {
   const results = await Promise.allSettled([
     checkAnthropic(),
     checkTavily(),
     checkInfobip(),
     Promise.resolve(configOnly('veriff', 'Veriff (kimlik doğrulaması)', 'kyc', isVeriffConfigured())),
-    Promise.resolve(configOnly('yango', 'Yango (çatdırılma)', 'delivery', isYangoConfigured())),
+    checkYango(),
     Promise.resolve(configOnly('yigim', 'YIGIM (ödəniş)', 'payment', isYigimConfigured())),
     Promise.resolve(configOnly('mailer', 'Email (SMTP)', 'mail', isMailerConfigured())),
   ]);
