@@ -287,6 +287,18 @@ router.post('/admin/ai/test', requirePermission('ai'), async (req: AuthRequest, 
 // Xarici servislərin canlı sağlamlıq yoxlaması — hansı işləyir, hansı yox
 // (Claude kredit vəziyyəti, Tavily, Infobip balans və s.). Canlı sınaq az
 // token/kredit xərcləyə bilər — ona görə yalnız bu endpoint çağırılanda işləyir.
+// Yalnız serverin çıxış IP-si — servis yoxlaması İŞLƏMİR (kredit xərclənmir).
+// Yango kimi API-lər açarı IP-yə bağlayır; "Host is not allowed" xətasında
+// bu ünvan onlara verilməlidir.
+router.get('/admin/service-health/ip', requirePermission('ai'), async (_req: AuthRequest, res: Response) => {
+  try {
+    const r = await fetch('https://api.ipify.org?format=json', { signal: AbortSignal.timeout(5000) });
+    res.json({ success: true, outboundIp: ((await r.json()) as any)?.ip ?? null });
+  } catch {
+    res.json({ success: true, outboundIp: null });
+  }
+});
+
 router.get('/admin/service-health', requirePermission('ai'), async (_req: AuthRequest, res: Response) => {
   try {
     const services = await checkAllServices();
