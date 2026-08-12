@@ -1,8 +1,15 @@
 // Yango (Yandex Delivery) Express API inteqrasiyası.
 // Sənəd: https://yandex.com/support/delivery-profile/en/api/express/quickstart
 // Token KODA YAZILMIR — YANGO_TOKEN env dəyişənindən oxunur (Railway-də qoyulmalıdır).
+//
+// HOST: Rusiyadan kənar (Yango) üçün `b2b.delivery.yango.tech`.
+// Köhnə default `b2b.taxi.yandex.net` idi — o host cavab verir, amma bizim
+// hesabımızda "Host is not allowed" qaytarırdı: o, Yandex-in Rusiya
+// hesabları üçündür. Hər iki host eyni yolu (/b2b/cargo/integration/v2) və
+// eyni cavab formatını işlədir, ona görə yalnız BASE dəyişdi.
+// Lazım olsa YANGO_BASE_URL env dəyişəni ilə geri qaytarmaq olar.
 
-const BASE = process.env.YANGO_BASE_URL || 'https://b2b.taxi.yandex.net';
+const BASE = process.env.YANGO_BASE_URL || 'https://b2b.delivery.yango.tech';
 const PATH = '/b2b/cargo/integration/v2';
 const TOKEN = process.env.YANGO_TOKEN || '';
 const LANG = process.env.YANGO_LANG || 'en';
