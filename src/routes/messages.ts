@@ -1,5 +1,5 @@
 import { Router, Response } from 'express';
-import { PrismaClient } from '@prisma/client';
+import { Prisma, PrismaClient } from '@prisma/client';
 import { adminAuth, AuthRequest } from '../middleware/auth';
 import { messageLimiter } from '../middleware/rateLimiter';
 import { emitToUser, isUserOnline } from '../services/callSignaling';
@@ -12,6 +12,8 @@ const prisma = new PrismaClient();
 const msgInclude = {
   sender: { select: { id: true, name: true, avatar: true } },
   listing: { select: { id: true, title: true } },
+  // Hansı biznes obyektinə (filial) aid olduğu — chat-da göstərilir.
+  businessObject: { select: { id: true, name: true, city: true } },
   reactions: { select: { userId: true, emoji: true } },
   replyTo: { select: { id: true, content: true, senderId: true, deletedAt: true, type: true, mediaName: true } },
 } as const;
@@ -92,6 +94,8 @@ router.post('/messages', messageLimiter, adminAuth, async (req: AuthRequest, res
     }
 
     let receiver = parseInt(receiverId);
+    // Mesajın hansı obyektə aid olduğu — chat-da göstərilir.
+    let msgObjectId: number | null = null;
     // VÖEN (obyekt) elanına yazılan mesaj — elanı paylaşana yox, obyektin əlaqə
     // nömrəsinin sahibinə yönləndirilir. Obyektin telefonu bir istifadəçiyə aiddirsə
     // ona, deyilsə biznes sahibinə gedir. (Satıcı alıcıya cavab yazanda dəyişmir.)
@@ -103,12 +107,25 @@ router.post('/messages', messageLimiter, adminAuth, async (req: AuthRequest, res
           businessObject: { select: { phone: true, business: { select: { userId: true } } } },
         },
       });
+      msgObjectId = L?.businessObjectId ?? null;
       if (L?.businessObjectId && receiver === L.userId) {
         let objContact: number | null = null;
-        const objPhone = L.businessObject?.phone?.trim();
-        if (objPhone) {
-          const u = await prisma.user.findFirst({ where: { phone: objPhone }, select: { id: true } });
-          if (u) objContact = u.id;
+        // Telefonu SON 9 RƏQƏM üzrə uyğunlaşdırırıq. Hərfi mətn müqayisəsi
+        // səssizcə sınırdı: istifadəçi "+994501234567" kimi qeydiyyatdan keçir,
+        // obyekt nömrəsi isə əl ilə "050 123 45 67" yazıla bilər — format
+        // fərqli olduğu üçün uyğunluq tapılmır və mesaj yanlış şəxsə (biznes
+        // sahibinə) gedirdi. Nə göndərən, nə alan bunu görürdü.
+        // (Eyni normallaşdırma kontaktlarda da işlədilir.)
+        const objDigits = (L.businessObject?.phone || '').replace(/\D/g, '');
+        const tail9 = objDigits.slice(-9);
+        if (tail9.length >= 7) {
+          const rows = await prisma.$queryRaw<{ id: number }[]>(
+            Prisma.sql`SELECT id FROM "User"
+                       WHERE right(regexp_replace(phone, '[^0-9]', '', 'g'), 9) = ${tail9}
+                         AND "isBlocked" = false
+                       LIMIT 1`,
+          );
+          if (rows.length) objContact = rows[0].id;
         }
         if (!objContact) objContact = L.businessObject?.business?.userId ?? null;
         if (objContact && objContact !== req.adminId) receiver = objContact;
@@ -123,6 +140,7 @@ router.post('/messages', messageLimiter, adminAuth, async (req: AuthRequest, res
         senderId: req.adminId!,
         receiverId: receiver,
         listingId: listingId ? parseInt(listingId) : null,
+        businessObjectId: msgObjectId,
         consultationId: consultId,
         content: content.trim(),
         replyToId: replyToId ? parseInt(String(replyToId)) : null,
@@ -392,6 +410,7 @@ router.get('/messages/conversations', adminAuth, async (req: AuthRequest, res: R
         sender: { select: { id: true, name: true, type: true, avatar: true } },
         receiver: { select: { id: true, name: true, type: true, avatar: true } },
         listing: { select: { id: true, title: true } },
+        businessObject: { select: { id: true, name: true, city: true } },
       },
       orderBy: { createdAt: 'desc' },
     });

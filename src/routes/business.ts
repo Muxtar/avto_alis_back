@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { recordSettlement } from '../services/settlement';
 import { validateIban } from '../services/iban';
-import { PrismaClient } from '@prisma/client';
+import { Prisma, PrismaClient } from '@prisma/client';
 import { adminAuth, requirePermission, AuthRequest } from '../middleware/auth';
 import { upload, docUpload, UPLOADS_DIR } from '../middleware/upload';
 import { processImages } from '../middleware/imageProcess';
@@ -424,12 +424,59 @@ router.delete('/me/banks/:id', adminAuth, async (req: AuthRequest, res: Response
 
 // ==================== OBYEKTLƏR ====================
 
+/**
+ * OBYEKTİN ƏLAQƏ NÖMRƏSİNİN YOXLANIŞI.
+ *
+ * Obyektə yazılan nömrə həmin obyektin elanlarına gələn bütün mesajları
+ * qəbul edir (messages.ts-dəki yönləndirmə). Ona görə iki şərt vacibdir:
+ *
+ *   1) Nömrə saytda QEYDİYYATLI olmalıdır — əks halda mesajlar səssizcə
+ *      biznes sahibinə düşür və heç kim səbəbini bilmir.
+ *   2) Nömrə sahibi həmin biznesin SAHİBİ və ya ÜZVÜ olmalıdır — əks halda
+ *      tanımadığın bir adamın nömrəsini yazıb bütün mesajlarını onun
+ *      poçtuna yönləndirmək olardı (onun xəbəri olmadan).
+ *
+ * Uyğunlaşdırma son 9 rəqəm üzrədir — format fərqi (+994 / 0 / boşluq)
+ * problem yaratmasın.
+ */
+async function validateObjectPhone(businessId: number, phone: string | null | undefined):
+  Promise<{ ok: true; userId: number | null } | { ok: false; message: string }> {
+  const digits = String(phone || '').replace(/\D/g, '');
+  if (!digits) return { ok: true, userId: null };          // nömrə boş — icazəlidir
+  const tail9 = digits.slice(-9);
+  if (tail9.length < 7) return { ok: false, message: 'Telefon nömrəsi natamamdır' };
+
+  const rows = await prisma.$queryRaw<{ id: number }[]>(
+    Prisma.sql`SELECT id FROM "User"
+               WHERE right(regexp_replace(phone, '[^0-9]', '', 'g'), 9) = ${tail9}
+               LIMIT 1`,
+  );
+  if (!rows.length) {
+    return { ok: false, message: 'Bu nömrə saytda qeydiyyatdan keçməyib. Obyektin əlaqə şəxsi əvvəlcə qeydiyyatdan keçməlidir.' };
+  }
+  const userId = rows[0].id;
+
+  const biz = await prisma.business.findUnique({ where: { id: businessId }, select: { userId: true } });
+  if (biz?.userId === userId) return { ok: true, userId };   // biznesin sahibi
+
+  const member = await prisma.businessMember.findFirst({
+    where: { businessId, userId, status: 'ACTIVE' },
+    select: { id: true },
+  });
+  if (!member) {
+    return { ok: false, message: 'Bu nömrənin sahibi biznesin işçisi deyil. Əvvəlcə onu işçi kimi əlavə edin.' };
+  }
+  return { ok: true, userId };
+}
+
 router.post('/me/businesses/:id/objects', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
     const businessId = parseInt(req.params.id);
     if (!(await ownsBiz(businessId, req.adminId!))) { res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return; }
     const { name, phone, address, city, latitude, longitude, activityAreas } = req.body;
     if (!name?.trim() || !address?.trim()) { res.status(400).json({ success: false, message: 'Obyekt adı və ünvanı tələb olunur' }); return; }
+    const chk = await validateObjectPhone(businessId, phone);
+    if (!chk.ok) { res.status(400).json({ success: false, message: chk.message }); return; }
     const obj = await prisma.businessObject.create({
       data: {
         businessId,
@@ -456,8 +503,13 @@ async function ownsObject(objectId: number, userId: number) {
 router.put('/me/objects/:id', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
     const id = parseInt(req.params.id);
-    if (!(await ownsObject(id, req.adminId!))) { res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return; }
+    const owned = await ownsObject(id, req.adminId!);
+    if (!owned) { res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return; }
     const { name, phone, address, city, latitude, longitude, activityAreas } = req.body;
+    if (phone !== undefined) {
+      const chk = await validateObjectPhone(owned.businessId, phone);
+      if (!chk.ok) { res.status(400).json({ success: false, message: chk.message }); return; }
+    }
     const updated = await prisma.businessObject.update({
       where: { id },
       data: {

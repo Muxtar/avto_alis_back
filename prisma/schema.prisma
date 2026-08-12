@@ -432,6 +432,12 @@ model Message {
   receiverId     Int? // 1:1 mesaj üçün alıcı; qrup mesajında null
   conversationId Int? // qrup mesajı üçün; 1:1-də null
   listingId      Int?
+  // Mesaj hansı BİZNES OBYEKTİNƏ (filial/mağaza) aiddir.
+  // Yazılma anında elandan götürülür və SABİT qalır — elan sonradan başqa
+  // obyektə köçürülsə, keçmiş mesajlar yanlış obyekti göstərməsin.
+  // Obyektin əlaqə şəxsi bir neçə obyektə baxırsa, hansı filialdan gəldiyini
+  // yalnız bu sahə ilə ayırd edə bilir.
+  businessObjectId Int?
   consultationId Int? // dolu olarsa bu mesaj "Rəy" konsultasiyasına aiddir (ayrı icon)
   content        String
   type           MessageType          @default(TEXT)
@@ -453,6 +459,7 @@ model Message {
   deletedForIds  Int[]     @default([]) // "yalnız məndə sil" — bu istifadəçilər üçün gizlədilib
   replyToId      Int? // cavab verilən mesaj
   createdAt      DateTime             @default(now())
+  businessObject BusinessObject?      @relation(fields: [businessObjectId], references: [id], onDelete: SetNull)
   sender         User                 @relation("SentMessages", fields: [senderId], references: [id], onDelete: Cascade)
   receiver       User?                @relation("ReceivedMessages", fields: [receiverId], references: [id], onDelete: Cascade)
   conversation   Conversation?        @relation(fields: [conversationId], references: [id], onDelete: Cascade)
@@ -462,6 +469,7 @@ model Message {
   replies        Message[]            @relation("MessageReplies")
   reactions      MessageReaction[]
 
+  @@index([businessObjectId])
   @@index([senderId, receiverId])
   @@index([receiverId, read])
   @@index([conversationId])
@@ -978,6 +986,7 @@ model BusinessObject {
   referralEnabled Boolean          @default(false) // referal (komissiyalı) satışa icazə
   business        Business         @relation(fields: [businessId], references: [id], onDelete: Cascade)
   listings        Listing[]
+  messages        Message[]
   managers        BusinessMember[]
   referralRules   ReferralRule[]
   purchases       Order[]          @relation("ObjectPurchases") // bu obyekt adına edilən alışlar
