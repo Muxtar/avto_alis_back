@@ -148,33 +148,28 @@ router.post('/search/web', webSearchLimiter, adminAuth, async (req: AuthRequest,
     const mode: SearchMode = rawMode === 'product' || rawMode === 'person' ? rawMode : 'auto';
 
     const data = await webSearch(q, mode);
-    if (!data.ok) { res.status(422).json({ success: false, mode: data.mode, message: data.error || 'Nəticə tapılmadı' }); return; }
+    // ŞƏXS rejimində motor xəta versə də dayanmırıq: birbaşa profil yoxlaması
+    // (probe) motordan asılı deyil və çox vaxt nəticəni məhz o tapır.
+    // Məhsul rejimində isə motorsuz edəcək bir şey yoxdur → 422.
+    if (!data.ok && mode !== 'person') {
+      res.status(422).json({ success: false, mode: data.mode, message: data.error || 'Nəticə tapılmadı' });
+      return;
+    }
+    // Xəta olsa da şəxs axını davam etsin — nəticələr boş massivdən başlayır.
+    const engineError = data.ok ? null : (data.error || null);
+    if (!data.ok) { data.mode = 'person'; data.results = []; data.summary = ''; }
     // Şəxs axtarışında tapılan sosial profilləri saytımızdakı DOĞRULANMIŞ sosial
     // linklərlə tutuşdur — profil bizim istifadəçiyə aiddirsə işarələnir.
     // (Uyğunlaşdırma keşdən KƏNARDA gedir ki, istifadəçi məlumatı həmişə təzə olsun.)
     let results = data.mode === 'person' ? await attachSiteUsers(data.results) : data.results;
 
-    if (data.mode === 'person' && results.length) {
-      // 1) PULSUZ önizləmə — profil səhifəsinin og:image / og:title etiketləri.
-      //    Instagram, Facebook, TikTok, LinkedIn, Telegram üçün işləyir.
-      try {
-        const need = results.filter((r) => !r.siteUser);
-        const previews = await fetchPreviews(need.map((r) => ({ url: r.url, platform: r.platform })));
-        if (previews.size) {
-          results = results.map((r) => {
-            const p = previews.get(r.url);
-            if (!p) return r;
-            return {
-              ...r,
-              displayName: r.displayName || p.name,
-              avatarUrl: r.avatarUrl || p.avatarUrl,
-              description: r.description || p.description,
-            };
-          });
-        }
-      } catch (e: any) { console.error('[search/web] preview:', e?.message); }
-
-      // 1a) DƏRİN AXTARIŞ — nəticə azdırsa ehtimal olunan profil ünvanlarını
+    // DİQQƏT: burada `results.length` YOXLANMIR.
+    // Əvvəl `data.mode === 'person' && results.length` idi — motor sıfır nəticə
+    // qaytaranda bütün blok atlanırdı və birbaşa profil yoxlaması (probe) HEÇ VAXT
+    // işə düşmürdü. Halbuki probe məhz o hal üçündür: `x_agayev_79` kimi
+    // indekslənməmiş profillər yalnız birbaşa yoxlama ilə tapılır.
+    if (data.mode === 'person') {
+      // 1) DƏRİN AXTARIŞ (ƏVVƏLCƏ) — nəticə azdırsa ehtimal olunan profil ünvanlarını
       //     birbaşa yoxla (motorun indeksləmədiyi profillər üçün). Nəticə YALNIZ
       //     səhifə başlığında axtarılan ad təsdiqlənəndə əlavə olunur.
       if (results.length < 6) {
@@ -198,6 +193,26 @@ router.post('/search/web', webSearchLimiter, adminAuth, async (req: AuthRequest,
           }
         } catch (e: any) { console.error('[search/web] probe:', e?.message); }
       }
+
+
+      // 2) PULSUZ önizləmə — profil səhifəsinin og:image / og:title etiketləri.
+      //    Instagram, Facebook, TikTok, LinkedIn, Telegram üçün işləyir.
+      try {
+        const need = results.filter((r) => !r.siteUser);
+        const previews = await fetchPreviews(need.map((r) => ({ url: r.url, platform: r.platform })));
+        if (previews.size) {
+          results = results.map((r) => {
+            const p = previews.get(r.url);
+            if (!p) return r;
+            return {
+              ...r,
+              displayName: r.displayName || p.name,
+              avatarUrl: r.avatarUrl || p.avatarUrl,
+              description: r.description || p.description,
+            };
+          });
+        }
+      } catch (e: any) { console.error('[search/web] preview:', e?.message); }
 
       // 1b) Şəkil hələ də yoxdursa açıq avatar xidmətini sına.
       //     X (Twitter) krauler UA-ya 404 verir və og:image vermir — bu addım
@@ -236,7 +251,7 @@ router.post('/search/web', webSearchLimiter, adminAuth, async (req: AuthRequest,
         }
       } catch (e: any) { console.error('[search/web] product preview:', e?.message); }
     }
-    res.json({ success: true, mode: data.mode, summary: data.summary, results });
+    res.json({ success: true, mode: data.mode, summary: data.summary, results, engineError });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }
