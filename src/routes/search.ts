@@ -8,7 +8,7 @@ import { adminAuth, AuthRequest } from '../middleware/auth';
 import { imageSearchLimiter, webSearchLimiter } from '../middleware/rateLimiter';
 import { webSearch, webSearchEnabled, socialHandle, WebResult, type SearchMode } from '../services/webSearchAI';
 import { enrichProfiles, isApifyConfigured } from '../services/apifyProfiles';
-import { fetchPreviews, fallbackAvatar, probeProfiles } from '../services/socialPreview';
+import { fetchPreviews, fallbackAvatar, probeProfiles, probeHandle, looksLikeHandle } from '../services/socialPreview';
 import { resolveFlag } from '../services/settings';
 import { reviewStats } from '../services/reviewGating';
 import fs from 'fs';
@@ -179,7 +179,11 @@ router.post('/search/web', webSearchLimiter, adminAuth, async (req: AuthRequest,
       //     səhifə başlığında axtarılan ad təsdiqlənəndə əlavə olunur.
       if (results.length < 6) {
         try {
-          const probed = await probeProfiles(q, 6 - results.length);
+          // Sorğu istifadəçi adına bənzəyirsə (boşluqsuz, `_`/`.`/rəqəmli) onu
+          // BİRBAŞA handle kimi yoxla; əks halda ad-soyaddan ünvan qur.
+          const probed = looksLikeHandle(q)
+            ? await probeHandle(q)
+            : await probeProfiles(q, 6 - results.length);
           const seen = new Set(results.map((r) => `${(r.platform || '').toLowerCase()}:${(r.handle || '').toLowerCase()}`));
           for (const pr of probed) {
             const key = `${pr.platform}:${pr.handle.toLowerCase()}`;

@@ -236,3 +236,44 @@ export async function probeProfiles(query: string, limit = 6): Promise<ProbedPro
   }
   return out;
 }
+
+/**
+ * İSTİFADƏÇİ ADI ilə BİRBAŞA axtarış.
+ *
+ * Problem: axtarış motoru (Tavily) hər profili indeksləmir. Az izləyicili
+ * hesablar ümumiyyətlə tapılmır. Məsələn `x_agayev_79` — profil mövcuddur
+ * (instagram.com/x_agayev_79 → "Xanlar Agayev"), amma motor onu qaytarmır.
+ *
+ * probeProfiles() də kömək etmirdi: o, AD-SOYADDAN ehtimal ünvanlar qurur və
+ * ən azı 2 söz tələb edir. Tək sözlü istifadəçi adında dərhal boş qayıdır.
+ *
+ * Bu funksiya sorğunu BİRBAŞA istifadəçi adı kimi qəbul edib platformalarda
+ * yoxlayır. Ad uyğunluğu yoxlanılmır — çünki handle sorğunun ÖZÜDÜR.
+ */
+export function looksLikeHandle(q: string): boolean {
+  const s = q.trim();
+  if (!s || /\s/.test(s)) return false;            // boşluq varsa ad-soyaddır
+  if (s.length < 3 || s.length > 40) return false;
+  return /^[A-Za-z0-9._-]+$/.test(s);              // yalnız handle simvolları
+}
+
+export async function probeHandle(raw: string): Promise<ProbedProfile[]> {
+  const handle = raw.trim().replace(/^@/, '');
+  if (!looksLikeHandle(handle)) return [];
+  // X (Twitter) krauler UA-ya 404 verir — orada yoxlamaq mənasızdır.
+  const targets: { platform: string; url: string }[] = [
+    { platform: 'instagram', url: `https://www.instagram.com/${handle}/` },
+    { platform: 'facebook', url: `https://www.facebook.com/${handle}` },
+    { platform: 'linkedin', url: `https://www.linkedin.com/in/${handle}` },
+  ];
+  const settled = await Promise.allSettled(targets.map((t) => fetchPreview(t.url, t.platform).then((pv) => ({ t, pv }))));
+  const out: ProbedProfile[] = [];
+  for (const r of settled) {
+    if (r.status !== 'fulfilled' || !r.value.pv) continue;
+    const { t, pv } = r.value;
+    // Ən azı ad VƏ YA şəkil olmalıdır — boş səhifə profil sayılmır.
+    if (!pv.name && !pv.avatarUrl) continue;
+    out.push({ url: t.url, platform: t.platform, handle, name: pv.name, avatarUrl: pv.avatarUrl, description: pv.description });
+  }
+  return out;
+}
