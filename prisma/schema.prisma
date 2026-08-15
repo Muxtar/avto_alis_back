@@ -613,6 +613,12 @@ model Order {
   yangoPrice          Float? // Yango çatdırılma qiyməti
   yangoCurrency       String?
   yangoError          String? // göndərmə uğursuz olsa səbəb (kuryer tapılmadı, ünvan yoxdur...)
+  // Neçənci dəfə Yango-ya göndərilir. Ləğvdən sonra yenidən kuryer çağırmaq
+  // üçün lazımdır: Yango sorğuları `request_id` üzrə təkrarlanandan qoruyur —
+  // eyni id ilə yeni claim yaratmaq istəsək KÖHNƏ (ləğv edilmiş) claim qayıdır.
+  // Sayğac hər yeni cəhddə artır, cəhd daxilində isə sabit qalır (təkrar
+  // sorğu təhlükəsiz olsun).
+  yangoAttempt        Int             @default(0)
   scheduledAt         DateTime? // ileri tarihli siparis
   paymentMethod       PaymentMethod   @default(CASH)
   paymentStatus       PaymentStatus   @default(PENDING)

@@ -23,12 +23,36 @@ async function syncOrderStatus(orderId: number, current: string, yangoStatus: st
   const mapped = mapYangoStatus(yangoStatus);
   if (!mapped) return;
   if (current === 'DELIVERED' || current === 'CANCELLED') return; // terminal
-  if (mapped === 'CANCELLED' || (RANK[mapped] ?? 0) > (RANK[current] ?? 0)) {
+
+  // ÇATDIRILMANIN ləğvi SİFARİŞİN ləğvi DEYİL.
+  //
+  // Əvvəl burada sifarişin özü də CANCELLED edilirdi. Nəticə: satıcı yalnız
+  // kuryeri ləğv etmək istəyəndə növbəti status sorğusunda BÜTÜN SİFARİŞ
+  // bağlanırdı — satıcı düymələri (`status !== CANCELLED` şərti ilə) yox olur,
+  // yeni kuryer də çağırıla bilmirdi. Sifariş ortada ilişib qalırdı.
+  //
+  // Kuryer ləğv olunubsa sifariş öz statusunda qalır; satıcı yeni kuryer çağırır
+  // və ya özü çatdırır. Sifarişi yalnız satıcı/alıcı özü ləğv edə bilər.
+  if (mapped === 'CANCELLED') {
+    await prisma.order.update({
+      where: { id: orderId },
+      data: { yangoError: 'Çatdırılma ləğv edildi — yeni kuryer çağıra bilərsiniz' },
+    }).catch(() => {});
+    return;
+  }
+  if ((RANK[mapped] ?? 0) > (RANK[current] ?? 0)) {
     await prisma.order.update({ where: { id: orderId }, data: { status: mapped as any } }).catch(() => {});
   }
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// Claim-in "ölü" (bir daha hərəkət etməyəcək) statusları. Belə sifariş üçün
+// yeni claim yaradıla bilər — satıcı kuryeri yenidən çağıra bilsin.
+export const YANGO_DEAD = [
+  'cancelled', 'cancelled_by_taxi', 'cancelled_with_payment', 'cancelled_with_items_on_hands',
+  'failed', 'estimating_failed', 'performer_not_found', 'returned', 'returned_finish',
+];
 
 // Yango axını: create → estimating → ready_for_approval → **accept** → performer_lookup.
 //
@@ -93,7 +117,12 @@ function retryAcceptInBackground(orderId: number, claimId: string, version: numb
 export async function dispatchOrderToYango(orderId: number): Promise<{ ok: boolean; message?: string; claimId?: string; status?: string }> {
   const order = await prisma.order.findUnique({ where: { id: orderId }, include: orderInclude });
   if (!order) return { ok: false, message: 'Sifariş tapılmadı' };
-  if (order.yangoClaimId) return { ok: true, claimId: order.yangoClaimId, status: order.yangoStatus || undefined };
+  // Aktiv claim varsa təkrar göndərmirik. Amma claim ÖLÜdürsə (ləğv/uğursuz)
+  // yenisi yaradılmalıdır — əvvəl burada köhnə claim qaytarılırdı və ləğvdən
+  // sonra kuryeri yenidən çağırmaq MÜMKÜN DEYİLDİ: sifariş ortada ilişib qalırdı.
+  const dead = YANGO_DEAD.includes(order.yangoStatus || '');
+  if (order.yangoClaimId && !dead) return { ok: true, claimId: order.yangoClaimId, status: order.yangoStatus || undefined };
+  if (order.status === 'CANCELLED' || order.status === 'DELIVERED') return { ok: false, message: 'Sifariş bağlanıb — kuryer çağırılmır' };
   // Bunlar əsl "Yango xətası" deyil — sifariş sadəcə Yango ilə deyil (səbəb yazılmır).
   if (order.deliveryType === 'PICKUP') return { ok: false, message: 'Götürmə sifarişi üçün kuryer lazım deyil' };
   if (order.deliveryMethod !== 'COURIER') return { ok: false, message: 'Bu sifariş Yango ilə deyil' };
@@ -123,8 +152,16 @@ export async function dispatchOrderToYango(orderId: number): Promise<{ ok: boole
   const totalWeight = order.items.reduce((s, i) => s + i.quantity * ((i.listing as any)?.weightKg || 0), 0);
   if (totalWeight > YANGO_MAX_WEIGHT_KG) return fail(`Sifariş çəkisi ${totalWeight} kq — Yango limiti ${YANGO_MAX_WEIGHT_KG} kq`);
 
+  // Cəhd nömrəsi. Yango eyni `request_id` ilə gələn sorğuya KÖHNƏ claim-i
+  // qaytarır (təkrarlanmadan qorunma) — ləğvdən sonra eyni id işlədilsəydi
+  // ləğv edilmiş claim geri gələrdi. Sayğac yalnız MÖVCUD claim varsa artır;
+  // yaratma uğursuz olsa bazaya yazılmır, ona görə növbəti cəhd eyni id ilə
+  // gedir və təkrar sorğu təhlükəsiz qalır.
+  const attempt = order.yangoClaimId ? (order.yangoAttempt || 0) + 1 : (order.yangoAttempt || 0);
+  const requestId = attempt === 0 ? `order-${order.id}` : `order-${order.id}-r${attempt}`;
+
   const claim = await createClaim({
-    requestId: `order-${order.id}`,
+    requestId,
     source: { fullname: srcAddr, coordinates: [srcLng, srcLat] as Geo, contact: { name: srcName, phone: srcPhone } },
     destination: { fullname: order.address || 'Çatdırılma ünvanı', coordinates: [order.longitude, order.latitude] as Geo, contact: { name: order.buyer.name || 'Alıcı', phone: dstPhone } },
     items: order.items.map((i) => ({ title: i.title, quantity: i.quantity, costValue: i.price.toFixed(2), costCurrency: 'AZN', weightKg: (i.listing as any)?.weightKg || 1 })),
@@ -148,7 +185,9 @@ export async function dispatchOrderToYango(orderId: number): Promise<{ ok: boole
     where: { id: order.id },
     data: {
       yangoClaimId: claimId, yangoStatus: status, yangoVersion: (info.data?.version as number) ?? version,
-      yangoPrice: price, yangoCurrency: currency,
+      yangoPrice: price, yangoCurrency: currency, yangoAttempt: attempt,
+      // Köhnə kuryerin son mövqeyi qalmasın — xəritədə yanlış nöqtə göstərərdi.
+      courierLat: null, courierLng: null,
       // Təsdiq alınmayıbsa səbəbi satıcıya göstərilir — sifariş səssizcə gözləməsin.
       yangoError: acc.ok ? null : (acc.error || null),
     },
@@ -295,8 +334,17 @@ router.post('/orders/:id/yango/cancel', adminAuth, async (req: AuthRequest, res:
     const cancelState: 'free' | 'paid' = ci.data?.cancel_state === 'paid' ? 'paid' : 'free';
     const cancel = await cancelClaim(order.yangoClaimId, version, cancelState);
     if (!cancel.ok) { res.status(502).json({ success: false, message: cancel.error || 'Yango ləğvi alınmadı' }); return; }
-    await prisma.order.update({ where: { id: order.id }, data: { yangoStatus: cancel.data?.status || 'cancelled' } }).catch(() => {});
-    res.json({ success: true, status: cancel.data?.status || 'cancelled', cancelState });
+    // Sifarişin ÖZ statusuna toxunmuruq — yalnız çatdırılma ləğv olundu.
+    // Köhnə kuryerin mövqeyi təmizlənir ki, xəritədə qalmasın.
+    await prisma.order.update({
+      where: { id: order.id },
+      data: {
+        yangoStatus: cancel.data?.status || 'cancelled',
+        courierLat: null, courierLng: null,
+        yangoError: 'Çatdırılma ləğv edildi — yeni kuryer çağıra bilərsiniz',
+      },
+    }).catch(() => {});
+    res.json({ success: true, status: cancel.data?.status || 'cancelled', cancelState, canRedispatch: true });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
 
