@@ -961,7 +961,17 @@ router.get('/admin/users', requirePermission('users'), async (req: AuthRequest, 
     const [users, total] = await Promise.all([
       prisma.user.findMany({
         where,
-        include: { vehicles: true, workplaces: true, _count: { select: { listings: true } } },
+        // DİQQƏT: sahələr açıq seçilir. `include` bütün skalyar sahələri qaytarır
+        // və şifrə hash-i ilə vəsiqə şəkilləri də cavaba düşürdü — siyahıda
+        // onlara ehtiyac yoxdur, brauzerə göndərilməməlidir.
+        select: {
+          id: true, name: true, phone: true, email: true, avatar: true, type: true, role: true,
+          verified: true, sellerVerified: true, isBlocked: true, profileComplete: true,
+          city: true, profession: true, publicId: true, createdAt: true, lastSeen: true,
+          avgRating: true, ratingCount: true, complaintFlags: true, idVerifyStatus: true,
+          vehicles: true, workplaces: true,
+          _count: { select: { listings: true, businesses: true, buyerOrders: true, sellerOrders: true } },
+        },
         orderBy: { createdAt: 'desc' },
         skip,
         take,
@@ -970,6 +980,123 @@ router.get('/admin/users', requirePermission('users'), async (req: AuthRequest, 
     ]);
 
     res.json({ users, total, page: parseInt(page as string), totalPages: Math.ceil(total / take) });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+// Bir istifadəçi haqqında HƏR ŞEY — profil, sənədlər, biznesləri, elanları,
+// alış/satışları, pulu, reytinqi, sosial hesabları, əlaqə tarixçəsi.
+//
+// Ayrı endpoint-dir, siyahıya qoşulmayıb: bu qədər məlumatı 20 istifadəçi üçün
+// birdən çəkmək siyahını ağırlaşdırardı. Yalnız kart açılanda bir dəfə çağırılır.
+router.get('/admin/users/:id/full', requirePermission('users'), async (req: AuthRequest, res: Response) => {
+  try {
+    const id = parseInt(String(req.params.id));
+    if (!Number.isFinite(id)) { res.status(400).json({ success: false, message: 'Yanlış id' }); return; }
+
+    const user = await prisma.user.findUnique({
+      where: { id },
+      include: {
+        vehicles: true,
+        workplaces: true,
+        socialLinks: { select: { id: true, platform: true, url: true, verified: true } },
+        // `code` sahəsi qəsdən seçilmir — o, canlı SMS doğrulama kodudur.
+        phones: { select: { id: true, phone: true, isPrimary: true, verified: true } },
+        addresses: { select: { id: true, label: true, address: true, phone: true, isDefault: true } },
+        sellerApplication: { select: { id: true, status: true, businessName: true, taxId: true, submittedAt: true, reviewedAt: true, rejectionReason: true } },
+        _count: {
+          select: {
+            listings: true, buyerOrders: true, sellerOrders: true, favorites: true,
+            sentMessages: true, receivedMessages: true, complaintsMade: true, complaintsAgainst: true,
+            sellerRatings: true, givenRatings: true, contacts: true, businesses: true,
+            consultationsBought: true, consultationsSelling: true, notifications: true,
+          },
+        },
+      },
+    });
+    if (!user) { res.status(404).json({ success: false, message: 'İstifadəçi tapılmadı' }); return; }
+
+    const [
+      businesses, memberships, listings, listingStats,
+      buyerAgg, sellerAgg, ledgerAgg, recentBuyerOrders, recentSellerOrders, ratings, lastMessage,
+    ] = await Promise.all([
+      // Sahibi olduğu bizneslər + obyektləri
+      prisma.business.findMany({
+        where: { userId: id },
+        select: {
+          id: true, name: true, voen: true, status: true, phone: true, ownerName: true, founderName: true, createdAt: true,
+          objects: { select: { id: true, name: true, city: true, address: true, phone: true } },
+        },
+        orderBy: { createdAt: 'desc' },
+      }),
+      // Başqasının biznesində işçidirsə
+      prisma.businessMember.findMany({
+        where: { userId: id },
+        select: {
+          id: true, status: true, canSell: true, canBuy: true,
+          business: { select: { id: true, name: true, voen: true } },
+          object: { select: { id: true, name: true } },
+        },
+      }),
+      // Son elanları — şəkli ilə
+      prisma.listing.findMany({
+        where: { userId: id },
+        select: { id: true, title: true, price: true, images: true, category: true, status: true, stock: true, city: true, createdAt: true },
+        orderBy: { createdAt: 'desc' },
+        take: 12,
+      }),
+      // Elanların statusa görə bölgüsü
+      prisma.listing.groupBy({ by: ['status'], where: { userId: id }, _count: { _all: true } }),
+      // Alıcı kimi ödədiyi (yalnız ödənilmiş sifarişlər)
+      prisma.order.aggregate({ where: { buyerId: id, paymentStatus: 'PAID' }, _sum: { total: true }, _count: { _all: true } }),
+      // Satıcı kimi satdığı
+      prisma.order.aggregate({ where: { sellerId: id, paymentStatus: 'PAID' }, _sum: { total: true }, _count: { _all: true } }),
+      // Ona borclu olduğumuz / ödədiyimiz pul
+      prisma.sellerLedger.groupBy({ by: ['status'], where: { sellerId: id }, _sum: { netAmount: true, commission: true }, _count: { _all: true } }),
+      prisma.order.findMany({
+        where: { buyerId: id },
+        select: { id: true, total: true, status: true, paymentStatus: true, paymentMethod: true, createdAt: true, seller: { select: { id: true, name: true } } },
+        orderBy: { createdAt: 'desc' }, take: 8,
+      }),
+      prisma.order.findMany({
+        where: { sellerId: id },
+        select: { id: true, total: true, status: true, paymentStatus: true, paymentMethod: true, createdAt: true, buyer: { select: { id: true, name: true } } },
+        orderBy: { createdAt: 'desc' }, take: 8,
+      }),
+      prisma.sellerRating.findMany({
+        where: { sellerId: id },
+        select: { id: true, rating: true, comment: true, createdAt: true, buyer: { select: { id: true, name: true } } },
+        orderBy: { createdAt: 'desc' }, take: 6,
+      }),
+      prisma.message.findFirst({
+        where: { OR: [{ senderId: id }, { receiverId: id }] },
+        select: { createdAt: true }, orderBy: { createdAt: 'desc' },
+      }),
+    ]);
+
+    // Şifrə heç vaxt göndərilmir — admin panelə düşsə brauzer yaddaşında qalardı.
+    const { password, ...safe } = user as any;
+
+    res.json({
+      success: true,
+      user: safe,
+      businesses,
+      memberships,
+      listings,
+      listingStats: listingStats.map((s) => ({ status: s.status, count: s._count._all })),
+      money: {
+        boughtTotal: buyerAgg._sum.total || 0,
+        boughtOrders: buyerAgg._count._all,
+        soldTotal: sellerAgg._sum.total || 0,
+        soldOrders: sellerAgg._count._all,
+        ledger: ledgerAgg.map((l) => ({ status: l.status, net: l._sum.netAmount || 0, commission: l._sum.commission || 0, count: l._count._all })),
+      },
+      recentBuyerOrders,
+      recentSellerOrders,
+      ratings,
+      lastMessageAt: lastMessage?.createdAt || null,
+    });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }
