@@ -28,6 +28,66 @@ async function syncOrderStatus(orderId: number, current: string, yangoStatus: st
   }
 }
 
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// Yango axını: create → estimating → ready_for_approval → **accept** → performer_lookup.
+//
+// KUYRERİN GEC TAPILMASININ SƏBƏBİ BURADADIR. Claim yaradılan kimi accept
+// çağırsaq, claim hələ `estimating` mərhələsindədir və Yango accept-i rədd edir.
+// Əvvəl bu cavab yoxlanmırdı — nəticədə claim `ready_for_approval` vəziyyətində
+// ilişib qalırdı və KURYER AXTARIŞI HEÇ BAŞLAMIRDI. Sifariş yalnız kimsə
+// səhifəni açıb status sorğusu göndərəndə (və ya Yango öz-özünə təsdiqləyəndə)
+// hərəkətə gəlirdi — satıcıya bu, "kuryer çox gec tapılır" kimi görünürdü.
+//
+// İndi qiymətləndirmənin bitməsi gözlənilir və accept TƏZƏ versiya ilə edilir.
+// Gözləmə qəsdən qısadır (default 6 s) — satıcı düyməyə basıb gözləyir, sorğu
+// uzanarsa şlüz 502 verər. Qalanını fon təkrarı və status sorğusu tamamlayır.
+async function acceptWhenReady(
+  claimId: string,
+  firstVersion: number,
+  budgetMs = 6000,
+): Promise<{ ok: boolean; status?: string; error?: string }> {
+  const DONE = ['accepted', 'performer_lookup', 'performer_draft', 'performer_found', 'pickup_arrived', 'pickuped'];
+  const started = Date.now();
+  let version = firstVersion;
+  let status = '';
+  while (Date.now() - started < budgetMs) {
+    const info = await getClaimInfo(claimId);
+    status = String(info.data?.status || '');
+    if (info.data?.version != null) version = info.data.version as number;
+    if (DONE.includes(status)) return { ok: true, status };            // artıq təsdiqlənib
+    if (status === 'estimating_failed') return { ok: false, error: 'Yango qiymətləndirə bilmədi — ünvan və ya çəki uyğun deyil' };
+    if (status === 'ready_for_approval') {
+      const acc = await acceptClaim(claimId, version);
+      if (acc.ok) return { ok: true, status: (acc.data?.status as string) || 'accepted' };
+      // Versiya köhnəlibsə növbəti dövrədə təzəsi ilə yenidən cəhd edilir.
+      if (Date.now() - started >= budgetMs) return { ok: false, error: acc.error || 'Yango claim təsdiqlənmədi' };
+    }
+    // Büdcəni aşmayaq — satıcı düymənin altında gözləyir.
+    const left = budgetMs - (Date.now() - started);
+    if (left <= 0) break;
+    await sleep(Math.min(1200, left));
+  }
+  return { ok: false, status, error: `Yango hələ hazır deyil (status: ${status || 'bilinmir'})` };
+}
+
+// Fon təkrarı — qısa gözləmə çatmasa, sorğunu bloklamadan bir neçə dəfə də cəhd
+// edilir. Beləliklə heç kim səhifə açmasa belə kuryer axtarışı başlayır.
+function retryAcceptInBackground(orderId: number, claimId: string, version: number) {
+  let attempt = 0;
+  const tick = async () => {
+    attempt++;
+    const r = await acceptWhenReady(claimId, version, 8000).catch(() => ({ ok: false } as any));
+    if (r.ok) {
+      await prisma.order.update({ where: { id: orderId }, data: { yangoStatus: r.status || 'accepted', yangoError: null } }).catch(() => {});
+      return;
+    }
+    if (attempt < 6) setTimeout(tick, 15000); // ~1.5 dəqiqə ərzində 6 cəhd
+    else await prisma.order.update({ where: { id: orderId }, data: { yangoError: r.error || 'Yango təsdiqi alınmadı' } }).catch(() => {});
+  };
+  setTimeout(tick, 5000);
+}
+
 // ── Ortaq: sifarişi Yango-ya göndər (claim yarat + təsdiqlə). Həm route, həm
 //    avtomatik dispatch (satıcı təsdiqləyəndə) bunu çağırır. ──────────────────
 export async function dispatchOrderToYango(orderId: number): Promise<{ ok: boolean; message?: string; claimId?: string; status?: string }> {
@@ -75,15 +135,23 @@ export async function dispatchOrderToYango(orderId: number): Promise<{ ok: boole
 
   const claimId = claim.data.id as string;
   const version = (claim.data.version as number) ?? 1;
-  await acceptClaim(claimId, version);
+  // Təsdiq — kuryer axtarışını BU başladır. Nəticəsi yoxlanılır (əvvəl səssizcə
+  // atılırdı və claim təsdiqsiz qalırdı).
+  const acc = await acceptWhenReady(claimId, version);
+  if (!acc.ok) retryAcceptInBackground(order.id, claimId, version);
   const info = await getClaimInfo(claimId);
-  const status = info.data?.status || claim.data.status || 'new';
+  const status = info.data?.status || acc.status || claim.data.status || 'new';
   const price = info.data?.pricing?.offer?.price ? parseFloat(info.data.pricing.offer.price) : (order.deliveryFee || null);
   const currency = info.data?.pricing?.currency || order.yangoCurrency || 'AZN';
 
   await prisma.order.update({
     where: { id: order.id },
-    data: { yangoClaimId: claimId, yangoStatus: status, yangoVersion: (info.data?.version as number) ?? version, yangoPrice: price, yangoCurrency: currency, yangoError: null },
+    data: {
+      yangoClaimId: claimId, yangoStatus: status, yangoVersion: (info.data?.version as number) ?? version,
+      yangoPrice: price, yangoCurrency: currency,
+      // Təsdiq alınmayıbsa səbəbi satıcıya göstərilir — sifariş səssizcə gözləməsin.
+      yangoError: acc.ok ? null : (acc.error || null),
+    },
   });
   return { ok: true, claimId, status };
 }
@@ -139,8 +207,19 @@ router.get('/orders/:id/yango/status', adminAuth, async (req: AuthRequest, res: 
 
     const info = await getClaimInfo(order.yangoClaimId);
     if (!info.ok || !info.data) { res.status(502).json({ success: false, message: info.error || 'Yango status alına bilmədi' }); return; }
-    const status = info.data.status as string;
-    const version = (info.data.version as number) ?? undefined;
+    let status = info.data.status as string;
+    let version = (info.data.version as number) ?? undefined;
+
+    // ÖZÜNÜ SAĞALTMA: claim təsdiqsiz ilişibsə burada təsdiqlənir. Köhnə kodda
+    // təsdiq nəticəsi yoxlanmadığı üçün belə sifarişlər bazada qalıb ola bilər —
+    // satıcı səhifəni açan kimi kuryer axtarışı başlasın.
+    if (status === 'ready_for_approval') {
+      const acc = await acceptClaim(order.yangoClaimId, version ?? 1);
+      if (acc.ok) {
+        status = (acc.data?.status as string) || 'accepted';
+        if (acc.data?.version != null) version = acc.data.version as number;
+      }
+    }
 
     // Kuryer aktiv mərhələ? (Wolt-tipli canlı izləmə/ETA/təhvil kodu bu mərhələdə lazımdır.)
     const ACTIVE = ['accepted', 'performer_found', 'performer_draft', 'pickup_arrived', 'ready_for_pickup_confirmation', 'pickuped', 'delivery_arrived', 'ready_for_delivery_confirmation'];
@@ -228,8 +307,14 @@ router.post('/orders/:id/yango/call', adminAuth, async (req: AuthRequest, res: R
     const order = await prisma.order.findUnique({ where: { id }, select: { id: true, buyerId: true, sellerId: true, yangoClaimId: true } });
     if (!order || (order.buyerId !== req.adminId && order.sellerId !== req.adminId)) { res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return; }
     if (!order.yangoClaimId) { res.status(400).json({ success: false, message: 'Bu sifariş Yango-ya göndərilməyib' }); return; }
+    // Kuryer hələ təyin olunmayıbsa Yango nömrə vermir. Bu, SERVER XƏTASI deyil —
+    // sadəcə vaxtı çatmayıb. Əvvəl 502 qaytarılırdı: brauzer konsoluna "Bad
+    // Gateway" kimi düşür və sistem sınıb kimi görünürdü. İndi 409 (konflikt).
     const r = await getDriverPhone(order.yangoClaimId);
-    if (!r.ok || !r.data?.phone) { res.status(502).json({ success: false, message: r.error || 'Kuryer nömrəsi hələ əlçatan deyil (kuryer təyin olunmayıb ola bilər)' }); return; }
+    if (!r.ok || !r.data?.phone) {
+      res.status(409).json({ success: false, pending: true, message: 'Kuryer hələ təyin olunmayıb — nömrə kuryer tapılandan sonra açılır' });
+      return;
+    }
     res.json({ success: true, phone: r.data.phone, ext: r.data.ext || null, ttlSeconds: r.data.ttl_seconds || null });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
@@ -242,10 +327,17 @@ router.post('/yango/callback', async (req: Request, res: Response) => {
     const claimId = body.claim_id || body.id || body.order_id;
     const status = body.status || body.claim_status;
     if (claimId && status) {
-      const order = await prisma.order.findFirst({ where: { yangoClaimId: String(claimId) }, select: { id: true, status: true } });
+      const order = await prisma.order.findFirst({ where: { yangoClaimId: String(claimId) }, select: { id: true, status: true, yangoVersion: true } });
       if (order) {
-        await prisma.order.update({ where: { id: order.id }, data: { yangoStatus: String(status) } }).catch(() => {});
-        await syncOrderStatus(order.id, order.status, String(status));
+        let st = String(status);
+        // Yango "təsdiq gözlənilir" deyirsə dərhal təsdiqlə — kuryer axtarışı
+        // bu addımla başlayır. Push yolu olduğu üçün ən sürətli reaksiya budur.
+        if (st === 'ready_for_approval') {
+          const acc = await acceptClaim(String(claimId), order.yangoVersion ?? (body.version as number) ?? 1);
+          if (acc.ok) st = (acc.data?.status as string) || 'accepted';
+        }
+        await prisma.order.update({ where: { id: order.id }, data: { yangoStatus: st } }).catch(() => {});
+        await syncOrderStatus(order.id, order.status, st);
       }
     }
     // Yango 200 gözləyir.
