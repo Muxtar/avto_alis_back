@@ -1,7 +1,7 @@
 // Satıcı təsdiqi axını — kartla ödənilmiş sifariş satıcı təsdiqini gözləyir.
 // Satıcı müəyyən müddət ərzində təsdiqləməzsə pul AVTOMATİK alıcıya qaytarılır.
 import { PrismaClient } from '@prisma/client';
-import { refundOrder as gatewayRefundOrder } from './paymentGateway';
+import { refundOrderSafe, retryFailedRefunds, unstickPendingRefunds, restoreStockForOrder } from './refunds';
 import { recordSettlement, releaseHeldLedgers } from './settlement';
 import { endExpiredConsultations } from '../routes/consultations';
 
@@ -48,25 +48,31 @@ export async function expireUnconfirmedOrders(): Promise<number> {
     });
     for (const order of expired) {
       try {
-        // 1) Gateway geri ödəniş.
-        if (order.gatewayRef || order.gatewayOrderId) {
-          await gatewayRefundOrder(order as any, order.total).catch((e) => { throw new Error('refund: ' + e?.message); });
-        }
-        // 2) Sifarişi ləğv et + refund işarəsi.
+        // 1) Pulun qaytarılması — ortaq servis (qeyd + təkrar cəhd + qıfıl).
+        //    Uğursuz olsa sifariş yenə ləğv edilir, amma sətir FAILED qalır və
+        //    fon işi təkrar cəhd edir; admin panelində görünür.
+        const r = await refundOrderSafe(order.id, 'TIMEOUT', order.total);
+        // 2) Sifarişi ləğv et. `paymentStatus`-a burada TOXUNMURUQ — onu
+        //    yalnız qaytarma servisi (həqiqətən baş tutanda) dəyişir.
+        //    Əvvəl burada "REFUNDED" yazılırdı və qaytarma alınmasa belə
+        //    sifariş geri ödənilmiş kimi görünürdü.
         await prisma.order.update({
           where: { id: order.id },
-          data: { status: 'CANCELLED', paymentStatus: 'REFUNDED', gatewayStatus: 'Refunded', autoRefunded: true },
+          data: { status: 'CANCELLED', autoRefunded: r.ok },
         });
-        // 3) Stok bərpası (kartda ödənişdə azaldılıbsa).
-        if (order.stockCommitted) {
-          for (const it of order.items) {
-            await prisma.listing.update({ where: { id: it.listingId }, data: { stock: { increment: it.quantity } } }).catch(() => {});
-          }
-        }
+        // 3) Stok bərpası — qaytarmanın nəticəsindən asılı deyil.
+        await restoreStockForOrder(order.id).catch(() => {});
         // 4) Satıcı hesablaşmasını geri al.
         await recordSettlement(order.id).catch(() => {});
         // 5) Bildirişlər.
-        await prisma.notification.create({ data: { userId: order.buyerId, type: 'ORDER', title: `Sifariş #${order.id}`, body: 'Satıcı vaxtında təsdiqləmədiyi üçün ödənişiniz avtomatik geri qaytarıldı.', link: '/orders' } }).catch(() => {});
+        // Alıcıya yalnız BAŞ TUTAN qaytarma barədə "pulunuz qaytarıldı" deyilir.
+        // Uğursuz halda bildirişi qaytarma servisi (admin xəbərdarlığı) idarə edir —
+        // olmayan qaytarma barədə alıcıya yalan məlumat verilməməlidir.
+        if (r.ok) {
+          await prisma.notification.create({ data: { userId: order.buyerId, type: 'ORDER', title: `Sifariş #${order.id}`, body: 'Satıcı vaxtında təsdiqləmədiyi üçün ödənişiniz avtomatik geri qaytarıldı.', link: '/orders' } }).catch(() => {});
+        } else {
+          await prisma.notification.create({ data: { userId: order.buyerId, type: 'ORDER', title: `Sifariş #${order.id}`, body: 'Sifariş ləğv edildi. Ödənişin qaytarılması emal olunur — qısa müddətdə hesabınıza qayıdacaq.', link: '/orders' } }).catch(() => {});
+        }
         await prisma.notification.create({ data: { userId: order.sellerId, type: 'ORDER', title: `Sifariş #${order.id}`, body: 'Vaxtında təsdiqlənmədiyi üçün sifariş ləğv edildi və ödəniş alıcıya qaytarıldı.', link: '/orders?tab=selling' } }).catch(() => {});
         done++;
       } catch (e) {
@@ -82,6 +88,9 @@ export async function expireUnconfirmedOrders(): Promise<number> {
 export function startOrderExpiryJob() {
   const run = () => {
     expireUnconfirmedOrders().catch(() => {});
+    // Yarımçıq qalmış qaytarma qıfıllarını aç, sonra uğursuzları təkrar cəhd et.
+    // Alıcının pulu şlüzün müvəqqəti nasazlığına görə bizdə qalmasın.
+    unstickPendingRefunds().then(() => retryFailedRefunds()).catch(() => {});
     // Alıcı müdafiəsi pəncərəsi bitmiş hesablaşmaları ödənilə bilən et.
     releaseHeldLedgers().catch(() => {});
     // Vaxtı bitmiş konsultasiya seanslarını bağla (rəy/şikayət açılsın).

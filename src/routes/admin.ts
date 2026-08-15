@@ -11,6 +11,7 @@ import { runWebSearchTest } from '../services/webSearchAI';
 import { runAgent } from '../services/aiAgent';
 import { getCommissionPercent, setCommissionPercent, createPayout, sellerBalance, getPayoutHoldDays, setPayoutHoldDays } from '../services/settlement';
 import { recordSettlement } from '../services/settlement';
+import { refundOrderSafe } from '../services/refunds';
 import { infobipStatus, testWhatsApp } from '../services/infobipWhatsApp';
 import { smsStatus, testSms } from '../services/infobipSms';
 import { otpChannel } from '../services/otp';
@@ -1100,6 +1101,69 @@ router.get('/admin/users/:id/full', requirePermission('users'), async (req: Auth
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }
+});
+
+// ── QAYTARILMALI PUL ──────────────────────────────────────────────────────
+// Şlüzə edilən qaytarma sorğusu uğursuz olsa pul ALICIDA DEYİL, BİZDƏDİR.
+// Bu siyahı həmin halları göstərir — heç bir sətir səssizcə itmir.
+router.get('/admin/refunds', requirePermission('finance'), async (req: AuthRequest, res: Response) => {
+  try {
+    const status = String(req.query.status || 'OPEN').toUpperCase(); // OPEN | DONE | ALL
+    const where: any = status === 'DONE' ? { status: 'DONE' }
+      : status === 'ALL' ? {}
+      : { status: { in: ['PENDING', 'FAILED'] } };
+    const rows = await prisma.refundAttempt.findMany({
+      where,
+      orderBy: { updatedAt: 'desc' },
+      take: 200,
+      include: {
+        order: {
+          select: {
+            id: true, total: true, status: true, paymentStatus: true, paymentMethod: true,
+            gatewayProvider: true, gatewayRef: true, createdAt: true,
+            buyer: { select: { id: true, name: true, phone: true } },
+            seller: { select: { id: true, name: true } },
+          },
+        },
+      },
+    });
+    const open = rows.filter((r) => r.status !== 'DONE');
+    res.json({
+      success: true,
+      rows,
+      totals: { openCount: open.length, openAmount: open.reduce((s, r) => s + r.amount, 0) },
+    });
+  } catch (error: any) { res.status(400).json({ success: false, message: error.message }); }
+});
+
+// Əl ilə təkrar cəhd — admin şlüz problemi həll olunandan sonra basır.
+router.post('/admin/refunds/:orderId/retry', requirePermission('finance'), async (req: AuthRequest, res: Response) => {
+  try {
+    const orderId = parseInt(String(req.params.orderId));
+    const row = await prisma.refundAttempt.findUnique({ where: { orderId } });
+    if (!row) { res.status(404).json({ success: false, message: 'Qeyd tapılmadı' }); return; }
+    // Cəhd sayğacı MAX-a çatıbsa avtomatik təkrar dayanır — əl ilə basılanda sıfırlanır.
+    await prisma.refundAttempt.update({ where: { orderId }, data: { attempts: 0, status: 'FAILED' } });
+    const r = await refundOrderSafe(orderId, row.reason as any, row.amount);
+    if (!r.ok) { res.status(502).json({ success: false, message: r.error || 'Yenə alınmadı' }); return; }
+    res.json({ success: true });
+  } catch (error: any) { res.status(400).json({ success: false, message: error.message }); }
+});
+
+// Əl ilə həll olundu (məs. bankdan köçürüldü) — sətir bağlanır.
+// Şlüz onsuz da qaytara bilmirsə tək çıxış yolu budur; qeyd audit üçün qalır.
+router.post('/admin/refunds/:orderId/resolve', requirePermission('finance'), async (req: AuthRequest, res: Response) => {
+  try {
+    const orderId = parseInt(String(req.params.orderId));
+    const note = String(req.body?.note || '').trim();
+    if (!note) { res.status(400).json({ success: false, message: 'Necə həll olunduğunu yazın' }); return; }
+    await prisma.refundAttempt.update({
+      where: { orderId },
+      data: { status: 'DONE', doneAt: new Date(), adminNote: `${note} (admin #${req.adminId})` },
+    });
+    await prisma.order.update({ where: { id: orderId }, data: { paymentStatus: 'REFUNDED', gatewayStatus: 'Refunded (manual)' } }).catch(() => {});
+    res.json({ success: true });
+  } catch (error: any) { res.status(400).json({ success: false, message: error.message }); }
 });
 
 // Create User (admin əl ilə istifadəçi əlavə edir)

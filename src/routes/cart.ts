@@ -3,6 +3,7 @@ import { rateLimit } from '../middleware/rateLimiter';
 import { PrismaClient, UserType } from '@prisma/client';
 import { adminAuth, requireType, AuthRequest } from '../middleware/auth';
 import { createPayment as createGatewayPayment, refundOrder as gatewayRefundOrder } from '../services/paymentGateway';
+import { refundOrderSafe, restoreStockForOrder } from '../services/refunds';
 import { recordSettlement, recordSettlementMany, sellerBalance } from '../services/settlement';
 import { markOrdersAwaitingConfirm } from '../services/orderExpiry';
 import { checkPrice as yangoCheckPrice, isYangoConfigured, YANGO_MAX_WEIGHT_KG } from '../services/yangoDelivery';
@@ -1053,18 +1054,19 @@ router.put('/orders/:id/status', adminAuth, async (req: AuthRequest, res: Respon
       dispatchOrderToYango(order.id).catch((e) => console.error('[cart] yango dispatch:', e?.message));
     }
 
-    // ÖDƏNİLMİŞ sifariş ləğv edilirsə (satıcı fulfil edə bilmir) → alıcıya AVTOMATİK refund
-    // + stok bərpası. Pul artıq çəkilib, ona görə ləğvdə geri qaytarılmalıdır.
-    if (next === 'CANCELLED' && order.paymentStatus === 'PAID' && (order.gatewayRef || order.gatewayOrderId)) {
-      try {
-        await gatewayRefundOrder(order as any, order.total);
-        await prisma.order.update({ where: { id }, data: { paymentStatus: 'REFUNDED', gatewayStatus: 'Refunded' } });
-        if (order.stockCommitted) {
-          const its = await prisma.orderItem.findMany({ where: { orderId: id }, select: { listingId: true, quantity: true } });
-          for (const it of its) await prisma.listing.update({ where: { id: it.listingId }, data: { stock: { increment: it.quantity } } }).catch(() => {});
-        }
-        await prisma.notification.create({ data: { userId: order.buyerId, type: 'ORDER', title: `Sifariş #${order.id}`, body: 'Sifariş ləğv edildi — ödənişiniz geri qaytarıldı.', link: '/orders' } }).catch(() => {});
-      } catch (e: any) { console.error('[cancel refund]', e?.message); }
+    // ── LƏĞV: stok bərpası + pulun qaytarılması ──
+    //
+    // Stok bərpası ödənişdən ASILI DEYİL. Əvvəl o, qaytarma try-blokunun
+    // içində idi: şlüz xəta versə məhsul anbara qayıtmırdı, nağd sifarişlərdə
+    // isə heç vaxt qayıtmırdı.
+    let refundFailed: string | null = null;
+    if (next === 'CANCELLED') {
+      await restoreStockForOrder(id).catch((e) => console.error('[cancel stock]', e?.message));
+
+      // Kartla ödənilibsə pul geri qaytarılır. Nəticə ARTIQ udulmur —
+      // uğursuzluq qeyd olunur, təkrar cəhd edilir və cavabda bildirilir.
+      const r = await refundOrderSafe(id, 'CANCELLED');
+      if (!r.ok) refundFailed = r.error || 'Qaytarma alınmadı';
     }
 
     // Sifariş ləğv edildikdə referal komissiyasını ləğv et (ləğv olunan sifariş üçün komissiya ödənilmir).
@@ -1099,7 +1101,13 @@ router.put('/orders/:id/status', adminAuth, async (req: AuthRequest, res: Respon
       });
     }
 
-    res.json({ success: true, order: updated });
+    // Ləğv baş tutdu, amma pul qaytarıla bilmədisə bunu GİZLƏTMİRİK — həm
+    // satıcı/alıcı bilməlidir, həm də admin panelinə düşür və təkrar cəhd olunur.
+    res.json({
+      success: true,
+      order: updated,
+      ...(refundFailed ? { refundPending: true, refundError: refundFailed, message: 'Sifariş ləğv edildi, lakin ödənişin qaytarılması alınmadı — avtomatik təkrar cəhd ediləcək və admin xəbərdar edildi.' } : {}),
+    });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }

@@ -34,7 +34,7 @@ enum ListingType {
 // Default APPROVED-dur ki, `db push` zamanı MÖVCUD elanlar itməsin;
 // yeni elanlar yaradılanda status açıq şəkildə PENDING qoyulur.
 enum ListingStatus {
-  PENDING  // gözləmədə — yalnız sahibi və admin görür
+  PENDING // gözləmədə — yalnız sahibi və admin görür
   APPROVED // təsdiqlənib — saytda görünür
   REJECTED // rədd edilib — sahibi səbəbi görür
 }
@@ -125,14 +125,14 @@ enum ReturnReason {
 }
 
 model User {
-  id                    Int                   @id @default(autoincrement())
-  name                  String                @default("")
-  phone                 String
-  email                 String?
-  emailVerified         Boolean               @default(false) // email doğrulama kodu ilə təsdiqlənib
-  telegramId            String?               @unique
-  type                  UserType              @default(CAR_OWNER)
-  role                  UserRole              @default(USER)
+  id            Int      @id @default(autoincrement())
+  name          String   @default("")
+  phone         String
+  email         String?
+  emailVerified Boolean  @default(false) // email doğrulama kodu ilə təsdiqlənib
+  telegramId    String?  @unique
+  type          UserType @default(CAR_OWNER)
+  role          UserRole @default(USER)
   // Admin icazə modulları (RBAC) — məs. ["listings","orders"]. Super-admin
   // (ADMIN_PHONES) bu siyahıdan asılı olmadan hər şeyə girə bilir; adi adminlər
   // yalnız burada sadalanan modullara. role=ADMIN olmayanlarda mənasızdır.
@@ -140,8 +140,8 @@ model User {
   // ADMIN GİRİŞİNİN KİLİDLƏNMƏSİ — ardıcıl səhv kod cəhdləri sayılır.
   // Limit aşılanda hesab müəyyən müddət kilidlənir (IP limitindən asılı deyil,
   // ona görə fərqli IP-lərdən yavaş hücum da dayanır).
-  adminFailedLogins Int       @default(0)
-  adminLockedUntil  DateTime?
+  adminFailedLogins     Int                   @default(0)
+  adminLockedUntil      DateTime?
   adminPermissions      String[]              @default([])
   password              String?
   verified              Boolean               @default(false)
@@ -336,72 +336,72 @@ model PhoneNumber {
 }
 
 model Listing {
-  id               Int             @id @default(autoincrement())
-  userId           Int
-  title            String
-  description      String
-  price            Float
-  category         String
-  type             ListingType
-  images           String[]
-  location         String?
-  phone            String?
-  condition        Condition       @default(NEW)
+  id                Int             @id @default(autoincrement())
+  userId            Int
+  title             String
+  description       String
+  price             Float
+  category          String
+  type              ListingType
+  images            String[]
+  location          String?
+  phone             String?
+  condition         Condition       @default(NEW)
   // Elana özəl konum — hər elanın öz xəritə nöqtəsi ola bilər (məs. ayrı-ayrı ev/mənzil).
   // Yoxdursa satıcının default konumu istifadə olunur.
-  latitude         Float?
-  longitude        Float?
-  country          String?
-  brand            String?
-  stock            Int             @default(1)
-  forVehicle       String?
-  unit             String?
-  unitValue        Float?
-  year             Int?
-  model            String?
-  city             String?
-  fuelType         FuelType?
-  attributes       Json? // kateqoriyaya xüsusi sahələr (otaq sayı, sahə, ölçü, yürüş...)
-  paymentType      PaymentType?
-  barter           Boolean         @default(false) // dəyiş-düş (barter) qəbul olunur
-  forRent          Boolean         @default(false) // satış yox, icarə/kirayə
+  latitude          Float?
+  longitude         Float?
+  country           String?
+  brand             String?
+  stock             Int             @default(1)
+  forVehicle        String?
+  unit              String?
+  unitValue         Float?
+  year              Int?
+  model             String?
+  city              String?
+  fuelType          FuelType?
+  attributes        Json? // kateqoriyaya xüsusi sahələr (otaq sayı, sahə, ölçü, yürüş...)
+  paymentType       PaymentType?
+  barter            Boolean         @default(false) // dəyiş-düş (barter) qəbul olunur
+  forRent           Boolean         @default(false) // satış yox, icarə/kirayə
   // Bron / rezervasiya — restoran, otel, bağ evi, məkan və s. bron edilə bilər
-  bookable         Boolean         @default(false)
+  bookable          Boolean         @default(false)
   // Satıcı VÖEN elanda "məhsulu özüm də çatdıra bilərəm" seçimini aktiv edə bilər.
   // Yango (kuryer) və mağazadan götürmə həmişə mümkündür; bunu satıcı açır.
-  allowSelfDelivery Boolean        @default(false)
+  allowSelfDelivery Boolean         @default(false)
   // Yalnız alıcı gəlib götürsün — Yango və satıcı çatdırması bağlıdır (məs. avtomobil).
-  pickupOnly        Boolean        @default(false)
+  pickupOnly        Boolean         @default(false)
   // Satıcı özü çatdıranda qeyd/qiymət (məs. "Şəhər içi 10 AZN, kənar 20 AZN").
   selfDeliveryNote  String?
   // Məhsulun çəkisi (kq, bir ədəd). Yango yük limiti (50 kq) yoxlanışı üçün.
-  weightKg         Float?
-  bookingType      BookingType? // RESERVATION (tarix+saat) | STAY (giriş-çıxış)
-  maxGuests        Int? // maksimum qonaq / nəfər sayı
-  openTime         String? // rezervasiya üçün açılış saatı "10:00"
-  closeTime        String? // rezervasiya üçün bağlanış saatı "23:00"
-  viewCount        Int             @default(0)
+  weightKg          Float?
+  bookingType       BookingType? // RESERVATION (tarix+saat) | STAY (giriş-çıxış)
+  maxGuests         Int? // maksimum qonaq / nəfər sayı
+  openTime          String? // rezervasiya üçün açılış saatı "10:00"
+  closeTime         String? // rezervasiya üçün bağlanış saatı "23:00"
+  viewCount         Int             @default(0)
   // Moderasiya — bax: ListingStatus. Default APPROVED (köhnə elanlar üçün),
   // yeni elanlar create zamanı PENDING olaraq yazılır.
-  status           ListingStatus   @default(APPROVED)
-  rejectReason     String?         // rədd edilibsə səbəb (sahibi görür)
-  reviewedAt       DateTime?       // admin nə vaxt baxdı
-  expiresAt        DateTime?
+  status            ListingStatus   @default(APPROVED)
+  rejectReason      String? // rədd edilibsə səbəb (sahibi görür)
+  reviewedAt        DateTime? // admin nə vaxt baxdı
+  expiresAt         DateTime?
   // Biznes bağlantısı — elan bir obyektə (filiala) aiddirsə kart ödənişi mümkün olur.
-  businessId       Int?
-  businessObjectId Int?
-  createdAt        DateTime        @default(now())
-  updatedAt        DateTime        @updatedAt
-  user             User            @relation(fields: [userId], references: [id], onDelete: Cascade)
-  business         Business?       @relation(fields: [businessId], references: [id], onDelete: SetNull)
-  businessObject   BusinessObject? @relation(fields: [businessObjectId], references: [id], onDelete: SetNull)
-  messages         Message[]
-  comments         Comment[]
-  cartItems        CartItem[]
-  orderItems       OrderItem[]
-  inquiryOffers    InquiryOffer[]
-  favorites        Favorite[]
-  bookings         Booking[]
+  businessId        Int?
+  businessObjectId  Int?
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+  user              User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  business          Business?       @relation(fields: [businessId], references: [id], onDelete: SetNull)
+  businessObject    BusinessObject? @relation(fields: [businessObjectId], references: [id], onDelete: SetNull)
+  messages          Message[]
+  comments          Comment[]
+  cartItems         CartItem[]
+  orderItems        OrderItem[]
+  inquiryOffers     InquiryOffer[]
+  favorites         Favorite[]
+  bookings          Booking[]
 
   @@index([userId, createdAt])
   @@index([category])
@@ -427,11 +427,11 @@ enum MessageType {
 }
 
 model Message {
-  id             Int                  @id @default(autoincrement())
-  senderId       Int
-  receiverId     Int? // 1:1 mesaj üçün alıcı; qrup mesajında null
-  conversationId Int? // qrup mesajı üçün; 1:1-də null
-  listingId      Int?
+  id               Int                  @id @default(autoincrement())
+  senderId         Int
+  receiverId       Int? // 1:1 mesaj üçün alıcı; qrup mesajında null
+  conversationId   Int? // qrup mesajı üçün; 1:1-də null
+  listingId        Int?
   // Mesaj hansı BİZNES OBYEKTİNƏ (filial/mağaza) aiddir.
   // Yazılma anında elandan götürülür və SABİT qalır — elan sonradan başqa
   // obyektə köçürülsə, keçmiş mesajlar yanlış obyekti göstərməsin.
@@ -442,37 +442,37 @@ model Message {
   // çıxarıla bilir, amma həmişə yox: sifariş səhifəsindən başlanan yazışmada
   // hələ məhsul konteksti olmur. Açıq sahə olmasa belə mesaj səssizcə şəxsi
   // söhbətə düşərdi. Köhnə sətirlərdə false-dur — onlar kontekstdən tanınır.
-  isBusiness     Boolean              @default(false)
-  consultationId Int? // dolu olarsa bu mesaj "Rəy" konsultasiyasına aiddir (ayrı icon)
-  content        String
-  type           MessageType          @default(TEXT)
-  mediaUrl       String? // yüklənmiş faylın adı (şəkil/fayl/audio/video)
-  mediaName      String? // orijinal fayl adı, və ya paylaşılan kontaktın adı
-  mediaMime      String?
-  mediaSize      Int? // bayt
-  mediaDuration  Int? // saniyə (audio/video)
-  contactPhone   String? // paylaşılan kontaktın nömrəsi
-  contactUserId  Int? // paylaşılan kontakt qeydiyyatlı istifadəçidirsə
-  callKind       String? // CALL tipində: "audio" | "video"
-  callStatus     String? // CALL tipində: "ANSWERED" | "MISSED" (müddət mediaDuration-da)
-  latitude       Float? // paylaşılan konum (LOCATION)
-  longitude      Float? // paylaşılan konum (LOCATION)
-  read           Boolean              @default(false)
-  deliveredAt    DateTime? // qarşı tərəf onlayn olub aldı (tək ✓ → ✓✓)
-  editedAt       DateTime? // redaktə olunubsa
-  deletedAt      DateTime? // "hamı üçün sil" — sətir qalır, mətn boşalır
-  deletedForIds  Int[]     @default([]) // "yalnız məndə sil" — bu istifadəçilər üçün gizlədilib
-  replyToId      Int? // cavab verilən mesaj
-  createdAt      DateTime             @default(now())
-  businessObject BusinessObject?      @relation(fields: [businessObjectId], references: [id], onDelete: SetNull)
-  sender         User                 @relation("SentMessages", fields: [senderId], references: [id], onDelete: Cascade)
-  receiver       User?                @relation("ReceivedMessages", fields: [receiverId], references: [id], onDelete: Cascade)
-  conversation   Conversation?        @relation(fields: [conversationId], references: [id], onDelete: Cascade)
-  listing        Listing?             @relation(fields: [listingId], references: [id], onDelete: SetNull)
-  consultation   ConsultationSession? @relation(fields: [consultationId], references: [id], onDelete: SetNull)
-  replyTo        Message?             @relation("MessageReplies", fields: [replyToId], references: [id], onDelete: SetNull)
-  replies        Message[]            @relation("MessageReplies")
-  reactions      MessageReaction[]
+  isBusiness       Boolean              @default(false)
+  consultationId   Int? // dolu olarsa bu mesaj "Rəy" konsultasiyasına aiddir (ayrı icon)
+  content          String
+  type             MessageType          @default(TEXT)
+  mediaUrl         String? // yüklənmiş faylın adı (şəkil/fayl/audio/video)
+  mediaName        String? // orijinal fayl adı, və ya paylaşılan kontaktın adı
+  mediaMime        String?
+  mediaSize        Int? // bayt
+  mediaDuration    Int? // saniyə (audio/video)
+  contactPhone     String? // paylaşılan kontaktın nömrəsi
+  contactUserId    Int? // paylaşılan kontakt qeydiyyatlı istifadəçidirsə
+  callKind         String? // CALL tipində: "audio" | "video"
+  callStatus       String? // CALL tipində: "ANSWERED" | "MISSED" (müddət mediaDuration-da)
+  latitude         Float? // paylaşılan konum (LOCATION)
+  longitude        Float? // paylaşılan konum (LOCATION)
+  read             Boolean              @default(false)
+  deliveredAt      DateTime? // qarşı tərəf onlayn olub aldı (tək ✓ → ✓✓)
+  editedAt         DateTime? // redaktə olunubsa
+  deletedAt        DateTime? // "hamı üçün sil" — sətir qalır, mətn boşalır
+  deletedForIds    Int[]                @default([]) // "yalnız məndə sil" — bu istifadəçilər üçün gizlədilib
+  replyToId        Int? // cavab verilən mesaj
+  createdAt        DateTime             @default(now())
+  businessObject   BusinessObject?      @relation(fields: [businessObjectId], references: [id], onDelete: SetNull)
+  sender           User                 @relation("SentMessages", fields: [senderId], references: [id], onDelete: Cascade)
+  receiver         User?                @relation("ReceivedMessages", fields: [receiverId], references: [id], onDelete: Cascade)
+  conversation     Conversation?        @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  listing          Listing?             @relation(fields: [listingId], references: [id], onDelete: SetNull)
+  consultation     ConsultationSession? @relation(fields: [consultationId], references: [id], onDelete: SetNull)
+  replyTo          Message?             @relation("MessageReplies", fields: [replyToId], references: [id], onDelete: SetNull)
+  replies          Message[]            @relation("MessageReplies")
+  reactions        MessageReaction[]
 
   @@index([businessObjectId])
   @@index([senderId, receiverId])
@@ -548,26 +548,26 @@ model Cart {
 // Paylaşılan səbət — istifadəçi səbəti link kimi paylaşır, linki açan şəxs
 // məhsulları öz səbətinə alıb sifariş verir (məhsuldan anlayan başqasına kömək edir).
 model SharedCart {
-  id           Int      @id @default(autoincrement())
-  token        String   @unique
-  userId       Int // yaradan
-  title        String? // ixtiyari ad ("Anama hədiyyə" və s.)
-  items        Json // [{ listingId, quantity }]
+  id              Int      @id @default(autoincrement())
+  token           String   @unique
+  userId          Int // yaradan
+  title           String? // ixtiyari ad ("Anama hədiyyə" və s.)
+  items           Json // [{ listingId, quantity }]
   // Çatdırılma rejimi: RECIPIENT = alıcı öz ünvanını seçir; SENDER = göndərənin (aşağıdakı) ünvanına gedir.
-  deliveryMode String   @default("RECIPIENT")
-  address      String? // SENDER rejimində göndərənin çatdırılma ünvanı
-  city         String?
-  latitude     Float?
-  longitude    Float?
-  phone        String?
+  deliveryMode    String   @default("RECIPIENT")
+  address         String? // SENDER rejimində göndərənin çatdırılma ünvanı
+  city            String?
+  latitude        Float?
+  longitude       Float?
+  phone           String?
   // Məhsulu KİM alacaq. null → paylaşanın özü. Dost seçilibsə o, saytda
   // QEYDİYYATLI olmalıdır (ünvan/bildiriş/sifariş tarixçəsi ona bağlanır).
   // Ödəyən isə qeydiyyatlı olmaya bilər — link hamıya açıqdır.
   recipientUserId Int?
   // Bu linkdən yaradılmış sifarişlər — link təkrar ödənilməsin deyə yoxlanılır.
-  orderIds     Int[]    @default([])
-  createdAt    DateTime @default(now())
-  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  orderIds        Int[]    @default([])
+  createdAt       DateTime @default(now())
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
 }
@@ -665,6 +665,7 @@ model Order {
   promoCode           PromoCode?      @relation(fields: [promoCodeId], references: [id], onDelete: SetNull)
   items               OrderItem[]
   returnRequests      ReturnRequest[]
+  refundAttempt       RefundAttempt?
   sellerRating        SellerRating?
 
   @@index([buyerId, createdAt])
@@ -1266,15 +1267,15 @@ model Setting {
 model AdminAuditLog {
   id         Int      @id @default(autoincrement())
   adminId    Int
-  adminName  String   // anlıq surət (admin sonradan silinsə/adı dəyişsə də qalır)
-  method     String   // POST/PUT/PATCH/DELETE
-  path       String   // /api/admin/...
-  action     String   // törədilmiş etiket, məs. "listing.status"
-  targetType String?  // listing/user/order/...
+  adminName  String // anlıq surət (admin sonradan silinsə/adı dəyişsə də qalır)
+  method     String // POST/PUT/PATCH/DELETE
+  path       String // /api/admin/...
+  action     String // törədilmiş etiket, məs. "listing.status"
+  targetType String? // listing/user/order/...
   targetId   String?
-  status     Int      // HTTP status kodu
-  summary    String   // oxunaqlı izah
-  meta       Json?    // əlavə (redaktə olunmuş body və s.)
+  status     Int // HTTP status kodu
+  summary    String // oxunaqlı izah
+  meta       Json? // əlavə (redaktə olunmuş body və s.)
   ip         String?
   createdAt  DateTime @default(now())
 
@@ -1286,10 +1287,10 @@ model AdminAuditLog {
 
 // ── Satıcı hesablaşması (ledger) — hər ödənilmiş sifariş üçün qazanc qeydi ─────
 enum LedgerStatus {
-  PENDING   // ödənilib, amma hələ çatdırılmayıb (buyer protection pəncərəsi)
+  PENDING // ödənilib, amma hələ çatdırılmayıb (buyer protection pəncərəsi)
   AVAILABLE // çatdırılıb — satıcıya ödənilə bilər
-  PAID_OUT  // satıcıya ödənilib
-  REVERSED  // qaytarma/ləğv — geri alınıb
+  PAID_OUT // satıcıya ödənilib
+  REVERSED // qaytarma/ləğv — geri alınıb
 }
 
 model SellerLedger {
@@ -1297,10 +1298,10 @@ model SellerLedger {
   sellerId       Int
   orderId        Int          @unique
   buyerId        Int
-  grossAmount    Float        // sifarişin ümumi məbləği
-  commissionRate Float        // tətbiq olunan komissiya faizi (surət)
-  commission     Float        // platforma komissiyası
-  netAmount      Float        // satıcının qazancı (gross - commission)
+  grossAmount    Float // sifarişin ümumi məbləği
+  commissionRate Float // tətbiq olunan komissiya faizi (surət)
+  commission     Float // platforma komissiyası
+  netAmount      Float // satıcının qazancı (gross - commission)
   heldByPlatform Boolean      @default(true) // KART: platforma pulu saxlayır. NAĞD: satıcı özü alıb (komissiya borcu)
   status         LedgerStatus @default(PENDING)
   // Hansı BİZNESƏ aiddir — ödəniş biznesin bank hesabına (BankAccount.isPrimary)
@@ -1328,17 +1329,17 @@ model SellerLedger {
 
 // ── Payout — satıcıya edilmiş ödəniş (bir neçə ledger-i əhatə edir) ────────────
 model Payout {
-  id          Int      @id @default(autoincrement())
-  sellerId    Int
+  id             Int       @id @default(autoincrement())
+  sellerId       Int
   // Ödəniş hansı biznesin bank hesabına getdi (varsa).
-  businessId  Int?
-  iban        String?  // köçürmə anındakı IBAN — sonradan dəyişsə tarixçə pozulmasın
-  amount      Float
-  method      String?  // bank köçürməsi / nağd / digər
-  reference   String?  // köçürmə referansı / admin qeydi
-  createdById Int      // əməliyyatı edən admin
-  createdName String
-  createdAt   DateTime @default(now())
+  businessId     Int?
+  iban           String? // köçürmə anındakı IBAN — sonradan dəyişsə tarixçə pozulmasın
+  amount         Float
+  method         String? // bank köçürməsi / nağd / digər
+  reference      String? // köçürmə referansı / admin qeydi
+  createdById    Int // əməliyyatı edən admin
+  createdName    String
+  createdAt      DateTime  @default(now())
   // Səhvən edilmiş ödəniş geri alına bilər — sətirlər yenidən ödəniləcək olur.
   reversedAt     DateTime?
   reversedById   Int?
@@ -1351,48 +1352,48 @@ model Payout {
 
 // ── CMS səhifələri — admin paneldən redaktə olunan statik məzmun (about/terms/faq) ──
 model Page {
-  id        Int      @id @default(autoincrement())
-  slug      String   @unique
-  title     String
-  content   String   // HTML / markdown mətn
-  published Boolean  @default(true)
+  id          Int      @id @default(autoincrement())
+  slug        String   @unique
+  title       String
+  content     String // HTML / markdown mətn
+  published   Boolean  @default(true)
   updatedById Int?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
 }
 
 // ── Dəstək ticket sistemi ────────────────────────────────────────────────────
 enum TicketStatus {
-  OPEN        // istifadəçi açdı, admin cavabı gözlənir
-  PENDING     // admin cavab verdi, istifadəçidən gözlənir
-  RESOLVED    // həll olundu
-  CLOSED      // bağlandı
+  OPEN // istifadəçi açdı, admin cavabı gözlənir
+  PENDING // admin cavab verdi, istifadəçidən gözlənir
+  RESOLVED // həll olundu
+  CLOSED // bağlandı
 }
 
 model SupportTicket {
-  id         Int             @id @default(autoincrement())
-  userId     Int
-  subject    String
-  category   String          @default("OTHER") // ORDER/PAYMENT/ACCOUNT/LISTING/OTHER
-  status     TicketStatus    @default(OPEN)
-  lastReplyAt DateTime       @default(now())
-  createdAt  DateTime        @default(now())
-  messages   TicketMessage[]
+  id          Int             @id @default(autoincrement())
+  userId      Int
+  subject     String
+  category    String          @default("OTHER") // ORDER/PAYMENT/ACCOUNT/LISTING/OTHER
+  status      TicketStatus    @default(OPEN)
+  lastReplyAt DateTime        @default(now())
+  createdAt   DateTime        @default(now())
+  messages    TicketMessage[]
 
   @@index([userId, createdAt])
   @@index([status, lastReplyAt])
 }
 
 model TicketMessage {
-  id        Int           @id @default(autoincrement())
-  ticketId  Int
-  senderId  Int
-  isAdmin   Boolean       @default(false)
+  id         Int           @id @default(autoincrement())
+  ticketId   Int
+  senderId   Int
+  isAdmin    Boolean       @default(false)
   senderName String
-  body      String
-  images    String[]      @default([])
-  createdAt DateTime      @default(now())
-  ticket    SupportTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  body       String
+  images     String[]      @default([])
+  createdAt  DateTime      @default(now())
+  ticket     SupportTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
 
   @@index([ticketId, createdAt])
 }
@@ -1401,8 +1402,8 @@ model TicketMessage {
 // İstifadəçi websearch-də tapdığı şəxsə mesaj yazır; mesaj ADMİN PANELƏ düşür,
 // admin həmin sosial media hesabına ƏLLƏ göndərir və nəticəni qeyd edir.
 enum OutreachStatus {
-  PENDING  // admin göndərməyi gözləyir
-  SENT     // admin göndərdi
+  PENDING // admin göndərməyi gözləyir
+  SENT // admin göndərdi
   REJECTED // admin rədd etdi (uyğunsuz/spam)
 }
 
@@ -1428,4 +1429,33 @@ model SocialOutreach {
 
   @@index([status, createdAt])
   @@index([requesterId, createdAt])
+}
+
+// PULUN GERİ QAYTARILMASI — hər cəhdin qeydi.
+//
+// Niyə ayrıca cədvəl: şlüzə edilən qaytarma sorğusu uğursuz ola bilər (şəbəkə,
+// şlüz sınıb, token bitib). Əvvəl bu hal yalnız konsola yazılırdı — sifariş
+// ləğv olunmuş görünür, `paymentStatus` isə PAID qalırdı: alıcının pulu geri
+// qayıtmır, heç kim də bilmirdi. İndi hər cəhd sətir kimi qalır, uğursuzlar
+// avtomatik təkrarlanır və admin panelində "qaytarılmalı pul" siyahısına düşür.
+//
+// orderId UNİKALDIR — eyni sifariş üçün iki qaytarma sətri yaranmır. Bu, həm
+// audit, həm də İKİQAT QAYTARMA qıfılıdır (iki ləğv sorğusu eyni anda gəlsə
+// yalnız biri şlüzə çatır).
+model RefundAttempt {
+  id        Int       @id @default(autoincrement())
+  orderId   Int       @unique
+  amount    Float
+  reason    String // CANCELLED | TIMEOUT | RETURN | ADMIN
+  status    String    @default("PENDING") // PENDING | DONE | FAILED
+  attempts  Int       @default(0)
+  lastError String?
+  provider  String?
+  adminNote String? // admin əl ilə həll edibsə (məs. bankdan köçürüldü)
+  doneAt    DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  order     Order     @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([status])
 }

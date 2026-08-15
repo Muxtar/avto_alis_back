@@ -34,10 +34,29 @@ async function syncOrderStatus(orderId: number, current: string, yangoStatus: st
   // Kuryer ləğv olunubsa sifariş öz statusunda qalır; satıcı yeni kuryer çağırır
   // və ya özü çatdırır. Sifarişi yalnız satıcı/alıcı özü ləğv edə bilər.
   if (mapped === 'CANCELLED') {
-    await prisma.order.update({
-      where: { id: orderId },
+    const upd = await prisma.order.updateMany({
+      where: { id: orderId, yangoError: null },   // yalnız BİR dəfə xəbər ver
       data: { yangoError: 'Çatdırılma ləğv edildi — yeni kuryer çağıra bilərsiniz' },
-    }).catch(() => {});
+    }).catch(() => ({ count: 0 }));
+    // Alıcı ilişib qalmasın: çatdırılma pozulubsa o, sifarişi ləğv edib pulunu
+    // geri ala bilər. Bunu bilmədən aylarla gözləyə bilərdi.
+    if (upd.count > 0) {
+      const o = await prisma.order.findUnique({ where: { id: orderId }, select: { buyerId: true, sellerId: true, paymentStatus: true } });
+      if (o) {
+        await prisma.notification.create({
+          data: {
+            userId: o.buyerId, type: 'ORDER', title: `Sifariş #${orderId}`,
+            body: o.paymentStatus === 'PAID'
+              ? 'Kuryer çatdırılması baş tutmadı. Satıcı yeni kuryer çağıra bilər — gözləmək istəmirsinizsə sifarişi ləğv edib ödənişinizi geri ala bilərsiniz.'
+              : 'Kuryer çatdırılması baş tutmadı. Satıcı yeni kuryer çağıracaq.',
+            link: '/orders',
+          },
+        }).catch(() => {});
+        await prisma.notification.create({
+          data: { userId: o.sellerId, type: 'ORDER', title: `Sifariş #${orderId}`, body: 'Kuryer çatdırılması ləğv oldu — yenidən kuryer çağırın və ya özünüz çatdırın.', link: '/orders?tab=selling' },
+        }).catch(() => {});
+      }
+    }
     return;
   }
   if ((RANK[mapped] ?? 0) > (RANK[current] ?? 0)) {

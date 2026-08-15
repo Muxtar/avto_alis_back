@@ -3,6 +3,7 @@ import { PrismaClient } from '@prisma/client';
 import { adminAuth, requirePermission, AuthRequest } from '../middleware/auth';
 import { getOrderStatus, isPaidStatus } from '../services/kapital';
 import { refundOrder } from '../services/paymentGateway';
+import { refundOrderSafe } from '../services/refunds';
 import { getPaymentStatus as yigimStatus, isPaidStatus as yigimPaid } from '../services/yigimPay';
 import { settleConsultation } from './consultations';
 import { recordSettlement, recordSettlementMany } from '../services/settlement';
@@ -25,8 +26,17 @@ async function settleOrders(where: { gatewayProvider?: string; gatewayRef?: stri
     // qaytarılır (orderExpiry). Deadline aşağıda markOrdersAwaitingConfirm ilə qoyulur.
     // KART: stok yalnız İNDİ (ödəniş təsdiqi) azalır — bir dəfə (stockCommitted).
     // Beləliklə ödənilməmiş/tərk edilmiş kart sifarişi stoku bloklamır.
+    // GEC GƏLƏN ÖDƏNİŞ: sifariş artıq ləğv olunubsa (satıcı rədd etdi, kuryer
+    // tapılmadı, vaxt keçdi) pul indi gəlir — həmin pul saxlanıla bilməz.
+    // Stok da bağlanmamalıdır. Belə sifarişlər dərhal geri qaytarılır.
+    const cancelledLate = orders.filter((o) => o.status === 'CANCELLED');
+    for (const o of cancelledLate) {
+      console.warn(`[settleOrders] ləğv olunmuş sifariş #${o.id} üçün gec ödəniş gəldi — avtomatik qaytarılır`);
+      await refundOrderSafe(o.id, 'CANCELLED', o.total).catch((e) => console.error('[settleOrders] gec ödəniş qaytarması:', e?.message));
+    }
+
     for (const o of orders) {
-      if (o.stockCommitted) continue;
+      if (o.stockCommitted || o.status === 'CANCELLED') continue;
       for (const it of o.items) {
         const r = await prisma.listing.updateMany({
           where: { id: it.listingId, stock: { gte: it.quantity } },
@@ -223,14 +233,11 @@ router.post('/payment/refund/:orderId', requirePermission('finance'), async (req
     // Eyni gateway-order altındakı bütün order-lər birlikdə ödənildiyi üçün,
     // qismən iadə bu order-in məbləği qədər; məbləç verilməsə bu order-in totalı.
     const refundAmount = amount !== undefined ? parseFloat(amount) : order.total;
-    await refundOrder(order, refundAmount);
-
-    await prisma.order.update({
-      where: { id: order.id },
-      data: { paymentStatus: 'REFUNDED', gatewayStatus: 'Refunded' },
-    });
+    // Ortaq servis: ikiqat qaytarma qıfılı + qeyd + uğursuzluqda təkrar cəhd.
+    const r = await refundOrderSafe(order.id, 'ADMIN', refundAmount);
+    if (!r.ok) { res.status(502).json({ success: false, message: r.error || 'Qaytarma alınmadı', retrying: true }); return; }
     await recordSettlement(order.id).catch(() => {});   // ledger geri al
-    res.json({ success: true });
+    res.json({ success: true, skipped: r.skipped || null });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }
