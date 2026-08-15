@@ -5,7 +5,7 @@ import { adminAuth, requireType, AuthRequest } from '../middleware/auth';
 import { createPayment as createGatewayPayment, refundOrder as gatewayRefundOrder } from '../services/paymentGateway';
 import { refundOrderSafe, restoreStockForOrder } from '../services/refunds';
 import { recordSettlement, recordSettlementMany, sellerBalance } from '../services/settlement';
-import { markOrdersAwaitingConfirm } from '../services/orderExpiry';
+import { markOrdersAwaitingConfirm, getDeliveryDeadlineHours } from '../services/orderExpiry';
 import { checkPrice as yangoCheckPrice, isYangoConfigured, YANGO_MAX_WEIGHT_KG } from '../services/yangoDelivery';
 import { dispatchOrderToYango } from './yango';
 
@@ -1041,10 +1041,26 @@ router.put('/orders/:id/status', adminAuth, async (req: AuthRequest, res: Respon
         return;
       }
     }
+    // Təsdiqdən sonra malın yola düşməsi üçün son tarix qoyulur. Bu keçsə
+    // sifariş avtomatik ləğv olunub pul qaytarılır (kuryer tapılmadı, satıcı
+    // göndərmədi, sistemdə problem oldu — alıcının pulu ilişib qalmasın).
+    // Yalnız KARTLA ödənilmiş sifarişlərə lazımdır: nağdda pul bizdə deyil.
+    let deliveryDeadline: Date | null | undefined;
+    if (next === 'CONFIRMED' && order.paymentMethod === 'CARD') {
+      const h = await getDeliveryDeadlineHours();
+      deliveryDeadline = new Date(Date.now() + h * 3600 * 1000);
+    } else if (next === 'DELIVERED' || next === 'CANCELLED') {
+      deliveryDeadline = null; // iş bitdi — nəzarətçi bir daha toxunmasın
+    }
+
     const updated = await prisma.order.update({
       where: { id },
       // Satıcı təsdiqləyəndə (CONFIRMED) təsdiq son vaxtını təmizlə — daha timeout refund olmaz.
-      data: { status: next as any, ...(next === 'CONFIRMED' ? { confirmDeadline: null } : {}) },
+      data: {
+        status: next as any,
+        ...(next === 'CONFIRMED' ? { confirmDeadline: null } : {}),
+        ...(deliveryDeadline !== undefined ? { deliveryDeadline } : {}),
+      },
     });
 
     // Satıcı təsdiqləyəndə Yango kuryerinə göndər. isYangoConfigured() yoxlaması BURADA

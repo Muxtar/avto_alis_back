@@ -648,6 +648,14 @@ model Order {
   stockCommitted      Boolean         @default(false) // KART: stok ödəniş təsdiqlənəndə (PAID) bir dəfə azaldılır (idempotentlik)
   paidAt              DateTime? // kartla ödənişin təsdiq olunduğu an
   confirmDeadline     DateTime? // satıcının təsdiq etməli olduğu son vaxt (keçsə avtomatik refund)
+  // Satıcı təsdiqlədikdən sonra malın yola düşməli olduğu son vaxt.
+  // Kuryer tapılmasa, satıcı göndərməsə və ya sistemdə problem olsa sifariş
+  // burada ilişib qalırdı: alıcının pulu çəkilmiş, mal yoxdur, heç nə hərəkət
+  // etmir. Bu tarix keçəndə sifariş avtomatik ləğv olunur və pul qaytarılır.
+  deliveryDeadline    DateTime?
+  // Göndərilmiş, amma çatdırılmayan sifariş üçün admin bir dəfə xəbərdar edilir
+  // (mal yolda ola bilər — avtomatik ləğv TƏHLÜKƏLİDİR, ona görə yalnız işarə).
+  stuckFlaggedAt      DateTime?
   autoRefunded        Boolean         @default(false) // satıcı vaxtında təsdiqləmədiyi üçün avtomatik geri ödənildi
   // Canli takip icin
   latitude            Float?

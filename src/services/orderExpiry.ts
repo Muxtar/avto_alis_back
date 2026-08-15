@@ -18,6 +18,17 @@ export async function getSellerConfirmHours(): Promise<number> {
   return Number(process.env.SELLER_CONFIRM_HOURS) || 24;
 }
 
+// Satıcının təsdiqdən SONRA malı yola salmaq üçün vaxtı (saat) — Setting
+// `delivery_deadline_hours`, default 72 saat. 2..720 (30 gün) aralığında.
+export async function getDeliveryDeadlineHours(): Promise<number> {
+  try {
+    const row = await prisma.setting.findUnique({ where: { key: 'delivery_deadline_hours' } });
+    const n = row ? parseFloat(row.value) : NaN;
+    if (Number.isFinite(n) && n >= 2 && n <= 720) return n;
+  } catch { /* keç */ }
+  return Number(process.env.DELIVERY_DEADLINE_HOURS) || 72;
+}
+
 // Kartla ödənilən (gateway) sifarişlər PAID olanda çağırılır: təsdiq son vaxtını
 // təyin edir. Yalnız hələ PENDING olan və deadline təyin olunmamış sifarişlərə.
 export async function markOrdersAwaitingConfirm(orderIds: number[]): Promise<void> {
@@ -84,10 +95,108 @@ export async function expireUnconfirmedOrders(): Promise<number> {
   return done;
 }
 
+// ── İLİŞİB QALMIŞ SİFARİŞLƏR ───────────────────────────────────────────────
+//
+// Satıcı təsdiqləyir, sonra heç nə olmur: kuryer tapılmır, Yango xəta verir,
+// satıcı göndərmir. Alıcının pulu çəkilib, mal yoxdur, sifariş də ləğv olunmayıb —
+// çünki ləğvi kimsə ƏL İLƏ etməlidir. Heç kim etməsə pul bizdə qalır.
+//
+// Bu funksiya həmin halı bağlayır:
+//   • CONFIRMED, heç vaxt göndərilməyib, vaxt keçib → AVTOMATİK ləğv + pul geri
+//   • SHIPPED, çatdırılmayıb, vaxt keçib → yalnız ADMİN İŞARƏSİ.
+//     Göndərilmiş sifarişi avtomatik ləğv etmək təhlükəlidir: mal yolda və ya
+//     artıq alıcıda ola bilər. Belə halda insan qərar verməlidir.
+export async function expireUndeliveredOrders(): Promise<number> {
+  let cancelled = 0;
+  try {
+    const now = new Date();
+
+    // Bu düzəlişdən ƏVVƏL təsdiqlənmiş sifarişlərdə `deliveryDeadline` yoxdur —
+    // nəzarətçi onları görməzdi və pul yenə ilişib qalardı. Onlara son tarix
+    // İNDİDƏN verilir (yaradılma tarixindən yox): satıcı hazırda o sifarişlə
+    // məşğul ola bilər, gözlənilmədən ləğv etmək düzgün olmazdı.
+    const backfillHours = await getDeliveryDeadlineHours();
+    await prisma.order.updateMany({
+      where: { status: 'CONFIRMED', paymentStatus: 'PAID', paymentMethod: 'CARD', deliveryDeadline: null },
+      data: { deliveryDeadline: new Date(now.getTime() + backfillHours * 3600 * 1000) },
+    }).catch(() => {});
+
+    // 1) Təsdiqlənib, amma yola düşməyib.
+    const stuck = await prisma.order.findMany({
+      where: {
+        status: 'CONFIRMED', paymentStatus: 'PAID', paymentMethod: 'CARD',
+        deliveryDeadline: { not: null, lt: now },
+      },
+      take: 100,
+    });
+    for (const order of stuck) {
+      try {
+        const r = await refundOrderSafe(order.id, 'CANCELLED', order.total);
+        await prisma.order.update({
+          where: { id: order.id },
+          data: { status: 'CANCELLED', autoRefunded: r.ok, deliveryDeadline: null },
+        });
+        await restoreStockForOrder(order.id).catch(() => {});
+        await recordSettlement(order.id).catch(() => {});
+        await prisma.notification.create({
+          data: {
+            userId: order.buyerId, type: 'ORDER', title: `Sifariş #${order.id}`,
+            body: r.ok
+              ? 'Sifariş vaxtında göndərilmədiyi üçün ləğv edildi və ödənişiniz geri qaytarıldı.'
+              : 'Sifariş vaxtında göndərilmədiyi üçün ləğv edildi. Ödənişin qaytarılması emal olunur.',
+            link: '/orders',
+          },
+        }).catch(() => {});
+        await prisma.notification.create({
+          data: {
+            userId: order.sellerId, type: 'ORDER', title: `Sifariş #${order.id}`,
+            body: 'Sifariş vaxtında göndərilmədiyi üçün avtomatik ləğv edildi və ödəniş alıcıya qaytarıldı.',
+            link: '/orders?tab=selling',
+          },
+        }).catch(() => {});
+        cancelled++;
+      } catch (e) {
+        console.error(`[orderExpiry] ilişmiş sifariş #${order.id}:`, (e as any)?.message);
+      }
+    }
+
+    // 2) Göndərilib, amma çatdırılmayıb — yalnız bir dəfə admin işarəsi.
+    const late = await prisma.order.findMany({
+      where: {
+        status: 'SHIPPED', paymentStatus: 'PAID',
+        deliveryDeadline: { not: null, lt: now },
+        stuckFlaggedAt: null,
+      },
+      take: 50,
+    });
+    if (late.length) {
+      const admins = await prisma.user.findMany({ where: { role: 'ADMIN' }, select: { id: true }, take: 20 });
+      for (const order of late) {
+        for (const a of admins) {
+          await prisma.notification.create({
+            data: {
+              userId: a.id, type: 'ORDER', title: '⚠️ Çatdırılmayan sifariş',
+              body: `Sifariş #${order.id} (${order.total.toFixed(2)} AZN) göndərilib, amma vaxtında çatdırılmayıb. Yoxlayın — pul alıcıya qaytarılmalı ola bilər.`,
+              link: '/admin/orders',
+            },
+          }).catch(() => {});
+        }
+        await prisma.order.update({ where: { id: order.id }, data: { stuckFlaggedAt: now } }).catch(() => {});
+      }
+      console.log(`[orderExpiry] ${late.length} çatdırılmayan sifariş admin üçün işarələndi.`);
+    }
+
+    if (cancelled) console.log(`[orderExpiry] ${cancelled} ilişmiş sifariş ləğv edilib pulu qaytarıldı.`);
+  } catch (e) { console.error('[orderExpiry] expireUndeliveredOrders:', (e as any)?.message); }
+  return cancelled;
+}
+
 // Server başlayanda periodik yoxlama qur (hər 10 dəqiqə) + dərhal bir dəfə.
 export function startOrderExpiryJob() {
   const run = () => {
     expireUnconfirmedOrders().catch(() => {});
+    // Təsdiqlənib, amma göndərilməyən sifarişlər — pul alıcıda ilişib qalmasın.
+    expireUndeliveredOrders().catch(() => {});
     // Yarımçıq qalmış qaytarma qıfıllarını aç, sonra uğursuzları təkrar cəhd et.
     // Alıcının pulu şlüzün müvəqqəti nasazlığına görə bizdə qalmasın.
     unstickPendingRefunds().then(() => retryFailedRefunds()).catch(() => {});
