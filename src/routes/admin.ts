@@ -12,6 +12,7 @@ import { runAgent } from '../services/aiAgent';
 import { getCommissionPercent, setCommissionPercent, createPayout, sellerBalance, getPayoutHoldDays, setPayoutHoldDays } from '../services/settlement';
 import { recordSettlement } from '../services/settlement';
 import { refundOrderSafe } from '../services/refunds';
+import { checkPrice, isYangoConfigured, YANGO_TAXI_CLASS } from '../services/yangoDelivery';
 import { infobipStatus, testWhatsApp } from '../services/infobipWhatsApp';
 import { smsStatus, testSms } from '../services/infobipSms';
 import { otpChannel } from '../services/otp';
@@ -1101,6 +1102,68 @@ router.get('/admin/users/:id/full', requirePermission('users'), async (req: Auth
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }
+});
+
+// ── YANGO TARİF MÜQAYİSƏSİ ────────────────────────────────────────────────
+// Eyni marşrut üçün bütün tarif siniflərinin qiymətini yan-yana göstərir.
+// Qiymətin niyə baha olduğunu TƏXMİN etmək əvəzinə Yango-nun özündən soruşuruq.
+//
+// Marşrut verilməsə real bir sifarişin (ən sonuncu Yango sifarişi) marşrutu
+// götürülür — süni koordinatla müqayisə aldadıcı olardı.
+router.get('/admin/yango/tariffs', requirePermission('ai'), async (req: AuthRequest, res: Response) => {
+  try {
+    if (!isYangoConfigured()) { res.json({ success: false, message: 'YANGO_TOKEN qurulmayıb' }); return; }
+    const num = (v: any) => (v != null && v !== '' && Number.isFinite(parseFloat(String(v))) ? parseFloat(String(v)) : null);
+    let fromLat = num(req.query.fromLat), fromLng = num(req.query.fromLng);
+    let toLat = num(req.query.toLat), toLng = num(req.query.toLng);
+    let sourceNote = 'əl ilə verilmiş koordinatlar';
+
+    if (fromLat == null || fromLng == null || toLat == null || toLng == null) {
+      // Son real Yango sifarişindən marşrutu götür.
+      const o = await prisma.order.findFirst({
+        where: { yangoClaimId: { not: null }, latitude: { not: null }, longitude: { not: null } },
+        orderBy: { id: 'desc' },
+        select: {
+          id: true, latitude: true, longitude: true, yangoPrice: true,
+          seller: { select: { latitude: true, longitude: true } },
+          items: { select: { listing: { select: { weightKg: true, businessObject: { select: { latitude: true, longitude: true } } } }, quantity: true } },
+        },
+      });
+      if (!o) { res.json({ success: false, message: 'Müqayisə üçün Yango sifarişi tapılmadı — koordinatları əl ilə verin' }); return; }
+      const obj = o.items.map((i) => i.listing?.businessObject).find((b) => b && b.latitude != null);
+      fromLat = obj?.latitude ?? o.seller?.latitude ?? null;
+      fromLng = obj?.longitude ?? o.seller?.longitude ?? null;
+      toLat = o.latitude; toLng = o.longitude;
+      sourceNote = `sifariş #${o.id} marşrutu (ödənilmiş Yango qiyməti: ${o.yangoPrice ?? '—'})`;
+    }
+    if (fromLat == null || fromLng == null || toLat == null || toLng == null) {
+      res.json({ success: false, message: 'Marşrut koordinatları tapılmadı' }); return;
+    }
+
+    const weight = num(req.query.weight) ?? 1;
+    // Sinif adları API-dən soruşulur: hansı qəbul olunmursa xətası göstərilir.
+    const classes = ['courier', 'express', 'cargo', 'cargocorp'];
+    const rows = await Promise.all(classes.map(async (taxiClass) => {
+      const q = await checkPrice({
+        source: [fromLng!, fromLat!], destination: [toLng!, toLat!], weightKg: weight, taxiClass,
+      });
+      return {
+        taxiClass,
+        ok: q.ok && !!q.data?.price,
+        price: q.data?.price ? parseFloat(String(q.data.price)) : null,
+        currency: q.data?.currency_rules?.code || null,
+        eta: q.data?.eta ?? null,
+        error: q.ok ? null : q.error,
+      };
+    }));
+
+    res.json({
+      success: true,
+      active: YANGO_TAXI_CLASS,           // hazırda hansı sinif işlədilir
+      route: { fromLat, fromLng, toLat, toLng, weight, note: sourceNote },
+      rows,
+    });
+  } catch (error: any) { res.status(400).json({ success: false, message: error.message }); }
 });
 
 // ── QAYTARILMALI PUL ──────────────────────────────────────────────────────

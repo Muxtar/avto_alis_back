@@ -21,6 +21,17 @@ export function isYangoConfigured(): boolean {
 // Yango yük limiti (kq). Bundan ağır sifarişlər kuryerlə göndərilə bilməz.
 export const YANGO_MAX_WEIGHT_KG = Number(process.env.YANGO_MAX_WEIGHT_KG || 50);
 
+// TARİF SİNFİ — qiymətə ƏN ÇOX TƏSİR EDƏN parametr.
+//
+// Əvvəl hər yerdə sabit `express` yazılırdı. `express` sürətli/prioritet
+// tarifdir və `courier`-dən xeyli bahadır: eyni məsafə üçün bir neçə dəfə
+// fərq çıxa bilər. Adi mağaza çatdırılması üçün düzgün sinif `courier`-dir.
+//
+// Dəyişdirmək üçün Railway-də YANGO_TAXI_CLASS qoyun (courier | express | cargo).
+// Hansının nə qiymət verdiyini admin → "Yango tarifləri" ekranından
+// CANLI müqayisə etmək olar — təxmin etməyə ehtiyac yoxdur.
+export const YANGO_TAXI_CLASS = process.env.YANGO_TAXI_CLASS || 'courier';
+
 // [longitude, latitude] — Yango koordinatları belə gözləyir.
 export type Geo = [number, number];
 
@@ -91,7 +102,7 @@ export async function checkPrice(params: {
     items: [
       { size: { length: 0.2, width: 0.2, height: 0.2 }, weight: params.weightKg || 1, quantity: 1, pickup_point: 1, dropoff_point: 2 },
     ],
-    requirements: { taxi_class: params.taxiClass || 'express' },
+    requirements: { taxi_class: params.taxiClass || YANGO_TAXI_CLASS },
   };
   return yreq('/check-price', { body });
 }
@@ -128,7 +139,7 @@ export async function createClaim(params: {
       pickup_point: 1,
       droppof_point: 2, // Yango API-də sahə adı belə yazılıb (sic)
     })),
-    client_requirements: { taxi_class: params.taxiClass || 'express' },
+    client_requirements: { taxi_class: params.taxiClass || YANGO_TAXI_CLASS },
     emergency_contact: params.emergencyContact,
   };
   if (params.comment) body.comment = params.comment;
