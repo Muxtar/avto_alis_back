@@ -438,6 +438,11 @@ model Message {
   // Obyektin əlaqə şəxsi bir neçə obyektə baxırsa, hansı filialdan gəldiyini
   // yalnız bu sahə ilə ayırd edə bilir.
   businessObjectId Int?
+  // Mesaj İŞ (biznes) axınına aiddirmi. Adətən listingId/businessObjectId-dən
+  // çıxarıla bilir, amma həmişə yox: sifariş səhifəsindən başlanan yazışmada
+  // hələ məhsul konteksti olmur. Açıq sahə olmasa belə mesaj səssizcə şəxsi
+  // söhbətə düşərdi. Köhnə sətirlərdə false-dur — onlar kontekstdən tanınır.
+  isBusiness     Boolean              @default(false)
   consultationId Int? // dolu olarsa bu mesaj "Rəy" konsultasiyasına aiddir (ayrı icon)
   content        String
   type           MessageType          @default(TEXT)
