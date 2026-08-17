@@ -4,6 +4,7 @@ import { adminAuth, requirePermission, AuthRequest } from '../middleware/auth';
 import { getOrderStatus, isPaidStatus } from '../services/kapital';
 import { refundOrder } from '../services/paymentGateway';
 import { refundOrderSafe } from '../services/refunds';
+import { isCardReference, finishCardLink, startCardLink, PUBLIC_CARD_FIELDS, CARD_VERIFY_AMOUNT } from '../services/savedCards';
 import { getPaymentStatus as yigimStatus, isPaidStatus as yigimPaid } from '../services/yigimPay';
 import { settleConsultation } from './consultations';
 import { recordSettlement, recordSettlementMany } from '../services/settlement';
@@ -13,9 +14,11 @@ const router = Router();
 const prisma = new PrismaClient();
 
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000';
+// Kart bağlama callback-i bu ünvana gəlir (cart.ts-dəki ilə eyni).
+const PUBLIC_BACKEND_URL = process.env.PUBLIC_BACKEND_URL || `http://localhost:${process.env.PORT || 5001}`;
 
 // Ödəniş təsdiqi nəticəsini order-lərə tətbiq edir (idempotent) — hər iki şlüz üçün.
-async function settleOrders(where: { gatewayProvider?: string; gatewayRef?: string; gatewayOrderId?: number }, status: string, paid: boolean) {
+export async function settleOrders(where: { gatewayProvider?: string; gatewayRef?: string; gatewayOrderId?: number }, status: string, paid: boolean) {
   const orders = await prisma.order.findMany({ where, include: { items: true } });
   if (orders.length === 0) return;
   const wasPaid = orders.some((o) => o.paymentStatus === 'PAID');
@@ -150,6 +153,12 @@ router.get('/payment/yigim/callback', async (req: Request, res: Response) => {
   const reference = String(req.query.reference || '');
   if (!reference) { res.status(400).send('reference required'); return; }
   try {
+    // KART BAĞLAMA callback-i — sifariş deyil. Referansın prefiksindən bilinir.
+    if (isCardReference(reference)) {
+      res.status(200).send('OK');                       // YIĞIM 200 gözləyir
+      setImmediate(() => { finishCardLink(reference).catch((e) => console.error('[card link]', e?.message)); });
+      return;
+    }
     const order = await prisma.order.findFirst({ where: { gatewayRef: reference }, select: { id: true } });
     const consultCount = await prisma.consultationSession.count({ where: { gatewayRef: reference } });
     if (!order && consultCount === 0) { res.status(404).send('not found'); return; }
@@ -241,6 +250,70 @@ router.post('/payment/refund/:orderId', requirePermission('finance'), async (req
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }
+});
+
+
+// ====================== SAXLANMIŞ KARTLAR ======================
+// DİQQƏT: bu endpointlərin heç biri `token` qaytarmır (PUBLIC_CARD_FIELDS).
+// Token serverdə qalır; ödəniş kartın `id`-si ilə icra olunur.
+
+// Kartlarımın siyahısı.
+router.get('/me/cards', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const cards = await prisma.savedCard.findMany({
+      where: { userId: req.adminId!, status: 'ACTIVE' },
+      select: PUBLIC_CARD_FIELDS,
+      orderBy: [{ isDefault: 'desc' }, { createdAt: 'desc' }],
+    });
+    res.json({ success: true, cards });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
+// Yeni kart bağla — YIĞIM kart səhifəsinin linkini qaytarır.
+router.post('/me/cards/init', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const r = await startCardLink(req.adminId!, PUBLIC_BACKEND_URL);
+    res.json({ success: true, url: r.url, verifyAmount: CARD_VERIFY_AMOUNT });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
+// Bağlamanın nəticəsi — brauzer qayıdandan sonra soruşur (callback gec gələ bilər).
+router.get('/me/cards/last', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const row = await prisma.savedCard.findFirst({
+      where: { userId: req.adminId! },
+      orderBy: { createdAt: 'desc' },
+      select: { ...PUBLIC_CARD_FIELDS, status: true },
+    });
+    res.json({ success: true, card: row });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
+// Kartı sil.
+router.delete('/me/cards/:id', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const id = parseInt(String(req.params.id));
+    const del = await prisma.savedCard.deleteMany({ where: { id, userId: req.adminId! } });
+    if (!del.count) { res.status(404).json({ success: false, message: 'Kart tapılmadı' }); return; }
+    // Əsas kart silinibsə qalanlardan biri əsas olsun.
+    const rest = await prisma.savedCard.findFirst({ where: { userId: req.adminId!, status: 'ACTIVE' }, orderBy: { createdAt: 'desc' } });
+    if (rest && !(await prisma.savedCard.count({ where: { userId: req.adminId!, status: 'ACTIVE', isDefault: true } }))) {
+      await prisma.savedCard.update({ where: { id: rest.id }, data: { isDefault: true } });
+    }
+    res.json({ success: true });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
+// Əsas kartı dəyiş.
+router.patch('/me/cards/:id/default', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const id = parseInt(String(req.params.id));
+    const mine = await prisma.savedCard.findFirst({ where: { id, userId: req.adminId!, status: 'ACTIVE' } });
+    if (!mine) { res.status(404).json({ success: false, message: 'Kart tapılmadı' }); return; }
+    await prisma.savedCard.updateMany({ where: { userId: req.adminId! }, data: { isDefault: false } });
+    await prisma.savedCard.update({ where: { id }, data: { isDefault: true } });
+    res.json({ success: true });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
 
 export default router;

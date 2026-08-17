@@ -5,6 +5,8 @@ import { adminAuth, requireType, AuthRequest } from '../middleware/auth';
 import { createPayment as createGatewayPayment, refundOrder as gatewayRefundOrder } from '../services/paymentGateway';
 import { refundOrderSafe, restoreStockForOrder } from '../services/refunds';
 import { isValidMonths, installmentAllowed } from '../services/installment';
+import { chargeSavedCard } from '../services/savedCards';
+import { settleOrders } from './payment';
 import { recordSettlement, recordSettlementMany, sellerBalance } from '../services/settlement';
 import { markOrdersAwaitingConfirm, getDeliveryDeadlineHours } from '../services/orderExpiry';
 import { checkPrice as yangoCheckPrice, isYangoConfigured, YANGO_MAX_WEIGHT_KG } from '../services/yangoDelivery';
@@ -497,6 +499,7 @@ router.post('/cart/checkout', requireType(BUYER_TYPES), async (req: AuthRequest,
       usePoints = 0,
       latitude, longitude,
       installmentMonths,     // hissəli alış planı (yalnız biznes məhsulları + kart)
+      savedCardId,           // saxlanmış kartla ödəniş (yönləndirmə olmadan)
     } = req.body;
     const buyerLat = latitude != null && latitude !== '' ? parseFloat(latitude) : null;
     const buyerLng = longitude != null && longitude !== '' ? parseFloat(longitude) : null;
@@ -839,6 +842,25 @@ router.post('/cart/checkout', requireType(BUYER_TYPES), async (req: AuthRequest,
         await prisma.order.updateMany({ where: { id: { in: orders.map((o) => o.id) } }, data: { paymentStatus: 'PAID' } });
         await recordSettlementMany(orders.map((o) => o.id)).catch(() => {});
         await markOrdersAwaitingConfirm(orders.map((o) => o.id)).catch(() => {});
+      } else if (savedCardId) {
+        // ── SAXLANMIŞ KARTLA ÖDƏNİŞ ──
+        // Yönləndirmə yoxdur: YIĞIM tokenlə sinxron çəkir, cavab dərhal gəlir.
+        const ref = `TX${orders[0].id}`;
+        await prisma.order.updateMany({
+          where: { id: { in: orders.map((o) => o.id) } },
+          data: { gatewayProvider: 'yigim', gatewayRef: ref },
+        });
+        const r = await chargeSavedCard(req.adminId!, parseInt(String(savedCardId)), grandTotal, ref, `Sifariş #${orders.map((o) => o.id).join(',')}`)
+          .catch((e: any) => ({ ok: false, status: '', message: e?.message } as any));
+        if (r.ok) {
+          // Ödəniş baş tutdu — adi kart callback-i ilə eyni emal.
+          await settleOrders({ gatewayRef: ref }, '00', true);
+        } else {
+          // Kart rədd etdi — sifarişlər ödənilməmiş qalır, alıcı yenidən cəhd edir.
+          await prisma.order.updateMany({ where: { id: { in: orders.map((o) => o.id) } }, data: { paymentStatus: 'FAILED', gatewayStatus: r.status || null } });
+          res.status(402).json({ success: false, message: r.message || 'Kartdan ödəniş alınmadı', orders: orders.map((o) => o.id) });
+          return;
+        }
       } else {
         try {
           // Şlüz facade YIĞIM (MAGNET) və ya Kapital-ı seçir (PAYMENT_GATEWAY env).

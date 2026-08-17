@@ -230,6 +230,7 @@ model User {
   blockedBy     BlockedUser[]  @relation("Blocked") // məni bloklayanlar
   notifications Notification[]
   sessions      Session[]      @relation("UserSessions")
+  savedCards    SavedCard[]
 
   // Default location — used on listings + city-search browsing.
   city      String?
@@ -1474,4 +1475,35 @@ model RefundAttempt {
   order     Order     @relation(fields: [orderId], references: [id], onDelete: Cascade)
 
   @@index([status])
+}
+
+// SAXLANMIŞ KART (YIĞIM tokenizasiyası).
+//
+// Kartın ÖZÜ bizdə saxlanmır — nə nömrə, nə CVV. YIĞIM kartı öz tərəfində
+// saxlayır və bizə `token` verir; biz yalnız tokeni, maskalanmış nömrəni və
+// bitmə tarixini yazırıq. PCI DSS yükü şlüzdə qalır.
+//
+// TƏHLÜKƏSİZLİK: `token` faktiki olaraq kartın açarıdır — onunla bizim
+// merchant üzərindən pul çəkmək olar. Ona görə BRAUZERƏ HEÇ VAXT
+// GÖNDƏRİLMİR: müştəri yalnız `id`-ni görür, ödəniş serverdə həmin id ilə
+// icra olunur.
+model SavedCard {
+  id         Int       @id @default(autoincrement())
+  userId     Int
+  // Kart bağlama sorğusunun referansı — callback bu sətri bununla tapır.
+  reference  String    @unique
+  // PENDING = kart daxil edilməsi gözlənilir, ACTIVE = istifadəyə hazır,
+  // FAILED = bağlama alınmadı.
+  status     String    @default("PENDING")
+  token      String? // YIĞIM kart tokeni — serverdən çıxmır
+  maskedPan  String? // 510068******0966
+  expiry     String? // mmyy
+  brand      String? // Visa / MasterCard
+  issuer     String? // kartı verən bank
+  isDefault  Boolean   @default(false)
+  lastUsedAt DateTime?
+  createdAt  DateTime  @default(now())
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, status])
 }
