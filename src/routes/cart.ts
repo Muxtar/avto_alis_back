@@ -4,6 +4,7 @@ import { PrismaClient, UserType } from '@prisma/client';
 import { adminAuth, requireType, AuthRequest } from '../middleware/auth';
 import { createPayment as createGatewayPayment, refundOrder as gatewayRefundOrder } from '../services/paymentGateway';
 import { refundOrderSafe, restoreStockForOrder } from '../services/refunds';
+import { isValidMonths, installmentAllowed } from '../services/installment';
 import { recordSettlement, recordSettlementMany, sellerBalance } from '../services/settlement';
 import { markOrdersAwaitingConfirm, getDeliveryDeadlineHours } from '../services/orderExpiry';
 import { checkPrice as yangoCheckPrice, isYangoConfigured, YANGO_MAX_WEIGHT_KG } from '../services/yangoDelivery';
@@ -495,6 +496,7 @@ router.post('/cart/checkout', requireType(BUYER_TYPES), async (req: AuthRequest,
       promoCode,
       usePoints = 0,
       latitude, longitude,
+      installmentMonths,     // hissəli alış planı (yalnız biznes məhsulları + kart)
     } = req.body;
     const buyerLat = latitude != null && latitude !== '' ? parseFloat(latitude) : null;
     const buyerLng = longitude != null && longitude !== '' ? parseFloat(longitude) : null;
@@ -742,6 +744,14 @@ router.post('/cart/checkout', requireType(BUYER_TYPES), async (req: AuthRequest,
             paymentMethod,
             // CARD → bank təsdiqləyənə qədər PENDING; WALLET → PAID; CASH → PENDING (çatdırılanda).
             paymentStatus: paymentMethod === 'WALLET' ? 'PAID' : 'PENDING',
+            // Hissəli alış — yalnız kartla və yalnız BİZNES məhsullarında.
+            // Şərtlər ödənmirsə səssizcə boş qalır (sifariş adi qaydada gedir).
+            installmentMonths:
+              paymentMethod === 'CARD' && isValidMonths(installmentMonths)
+                && items.every((i) => !!(i.listing as any).businessObjectId)
+                && installmentAllowed(total, true)
+                ? Number(installmentMonths)
+                : null,
             promoCodeId: promoCodeRecord?.id || null,
             latitude: latitude ? parseFloat(latitude) : null,
             longitude: longitude ? parseFloat(longitude) : null,
