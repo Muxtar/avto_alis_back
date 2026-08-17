@@ -4,12 +4,9 @@
 // `token` verir; biz yalnız tokeni + maskalanmış nömrəni + bitmə tarixini
 // yazırıq. Beləliklə PCI DSS yükü şlüzdə qalır.
 //
-// Kart bağlama axını (YIĞIM-in öz sənədindəki ardıcıllıq):
-//   1. /payment/create → type=DMS, amount=0.05, save=y   → kart səhifəsi açılır
-//   2. istifadəçi kartı daxil edir
-//   3. callback gəlir → /payment/status
-//   4. status=0 və code='00' → token/pan/expiry yazılır
-//   5. /payment/cancel → bloklanmış 5 qəpik geri açılır
+// Kart NECƏ saxlanılır: alıcı səbətdə "Kartı yadda saxla" seçir → şlüzə
+// `save=y` göndərilir → ödəniş baş tutanda /payment/status cavabında `token`
+// gəlir → burada yazılır. Ayrıca kart bağlama səhifəsi və sınaq bloku YOXDUR.
 //
 // TƏHLÜKƏSİZLİK QAYDASI: `token` heç vaxt brauzerə göndərilmir. Onunla bizim
 // merchant üzərindən pul çəkmək mümkündür — sızması kart nömrəsinin sızması
@@ -19,9 +16,6 @@ import { PrismaClient } from '@prisma/client';
 import * as yigim from './yigimPay';
 
 const prisma = new PrismaClient();
-
-// Kartı yoxlamaq üçün bloklanan məbləğ (AZN). Dərhal geri açılır.
-export const CARD_VERIFY_AMOUNT = Number(process.env.YIGIM_CARD_VERIFY_AMOUNT || 0.05);
 
 // Saxlanmış kartla ödənişin rejimi. YIĞIM axın sənədi DMS göstərir, spesifikasiya
 // isə hər ikisinə icazə verir. SMS = dərhal çəkilir (bizim indiki sifariş axını
@@ -35,67 +29,40 @@ export const PUBLIC_CARD_FIELDS = {
   isDefault: true, lastUsedAt: true, createdAt: true,
 } as const;
 
-// Referansdan kart bağlama sorğusu olduğunu bilmək üçün prefiks.
-export const CARD_REF_PREFIX = 'card-';
-export const isCardReference = (ref: string) => ref.startsWith(CARD_REF_PREFIX);
+/**
+ * Ödəniş uğurlu olandan sonra kartı saxla.
+ *
+ * Ayrıca "kart bağlama" axını YOXDUR — alıcı səbətdə "Kartı yadda saxla"
+ * seçir, biz şlüzə `save=y` göndəririk, ödəniş baş tutanda şlüz cavabında
+ * `token` gəlir və burada yazılır. Yəni kart REAL ALIŞ zamanı saxlanılır;
+ * istifadəçidən əlavə addım və ya sınaq bloku tələb olunmur.
+ *
+ * İdempotentdir: eyni kart təkrar saxlanarsa sətir yenilənir, dublikat yaranmır.
+ */
+export async function saveCardFromPayment(reference: string, raw: any): Promise<void> {
+  const token = raw?.token ? String(raw.token) : '';
+  if (!token) return;                       // şlüz token qaytarmayıb — saxlanacaq bir şey yoxdur
 
-/** 1) Kart bağlamanı başlat — YIĞIM kart səhifəsinin URL-ini qaytarır. */
-export async function startCardLink(userId: number, callbackBase: string): Promise<{ url: string; reference: string }> {
-  if (!yigim.isConfigured()) throw new Error('YIĞIM qoşulmayıb');
-  // Referans unikal olmalıdır; təsadüfi hissə təxmin edilməsin deyə uzundur.
-  const reference = `${CARD_REF_PREFIX}${userId}-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
-  await prisma.savedCard.create({ data: { userId, reference, status: 'PENDING' } });
-
-  const fe = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/$/, '');
-  const r = await yigim.createPayment({
-    reference,
-    amount: CARD_VERIFY_AMOUNT,
-    description: 'Kartın yadda saxlanması',
-    // DMS — pul çəkilmir, yalnız bloklanır və dərhal geri açılır.
-    type: 'DMS',
-    saveCard: true,
-    callbackUrl: `${callbackBase}/api/payment/yigim/callback`,
-    extra: `back-url=${fe}/account?card=ok;fail-url=${fe}/account?card=fail`,
+  // Bu referans hansı sifarişə (və alıcıya) aiddir və saxlama istənilibmi?
+  const order = await prisma.order.findFirst({
+    where: { gatewayRef: reference, saveCardRequested: true },
+    select: { buyerId: true },
   });
-  return { url: r.url, reference };
-}
+  if (!order) return;
 
-/** 2) Callback gələndə — statusu oxu, tokeni yaz, bloku aç. */
-export async function finishCardLink(reference: string): Promise<void> {
-  const row = await prisma.savedCard.findUnique({ where: { reference } });
-  if (!row || row.status !== 'PENDING') return; // təkrar callback — idempotent
-
-  let ok = false;
-  try {
-    const { status, raw } = await yigim.getPaymentStatus(reference);
-    // Kart yalnız əməliyyat təsdiqlənəndə saxlanılır. DMS-də blok statusu
-    // "S1"-dir; hər ikisi uğurlu bağlama sayılır.
-    ok = yigim.isPaidStatus(status) || String(status) === 'S1';
-    if (ok && raw?.token) {
-      await prisma.savedCard.update({
-        where: { reference },
-        data: {
-          status: 'ACTIVE',
-          token: String(raw.token),
-          maskedPan: raw.pan ? String(raw.pan) : null,
-          expiry: raw.expiry ? String(raw.expiry) : null,
-          brand: raw.system ? String(raw.system) : null,
-          issuer: raw.issuer ? String(raw.issuer) : null,
-          // İlk kart avtomatik əsas olur.
-          isDefault: (await prisma.savedCard.count({ where: { userId: row.userId, status: 'ACTIVE' } })) === 0,
-        },
-      });
-    } else {
-      ok = false;
-      await prisma.savedCard.update({ where: { reference }, data: { status: 'FAILED' } });
-    }
-  } catch (e: any) {
-    console.error('[savedCards] status oxunmadı:', e?.message);
-    await prisma.savedCard.update({ where: { reference }, data: { status: 'FAILED' } }).catch(() => {});
-  }
-
-  // Bloklanmış 5 qəpiyi hər halda geri aç — kart saxlanmasa da pul qalmasın.
-  try { await yigim.cancel(reference); } catch (e: any) { console.error('[savedCards] blok açılmadı:', e?.message); }
+  const data = {
+    maskedPan: raw.pan ? String(raw.pan) : null,
+    expiry: raw.expiry ? String(raw.expiry) : null,
+    brand: raw.system ? String(raw.system) : null,
+    issuer: raw.issuer ? String(raw.issuer) : null,
+    status: 'ACTIVE',
+  };
+  const first = (await prisma.savedCard.count({ where: { userId: order.buyerId, status: 'ACTIVE' } })) === 0;
+  await prisma.savedCard.upsert({
+    where: { userId_token: { userId: order.buyerId, token } },
+    create: { userId: order.buyerId, token, reference, isDefault: first, ...data },
+    update: data,                            // maska/tarix yenilənə bilər
+  }).catch((e) => console.error('[savedCards] saxlanmadı:', e?.message));
 }
 
 /** 3) Saxlanmış kartla ödəniş. Yönləndirmə yoxdur — cavab dərhal gəlir. */

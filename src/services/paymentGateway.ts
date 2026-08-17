@@ -21,6 +21,9 @@ export interface CreateInput {
   description?: string;
   callbackBase: string;  // PUBLIC_BACKEND_URL
   language?: string;
+  // Alıcı "kartı yadda saxla" seçibsə şlüzə save=y gedir və ödəniş
+  // təsdiqlənəndə cavabda kart tokeni qayıdır. Yalnız YIĞIM dəstəkləyir.
+  saveCard?: boolean;
 }
 
 export interface CreatedPayment {
@@ -46,6 +49,7 @@ export async function createPayment(input: CreateInput): Promise<CreatedPayment>
       language: input.language,
       callbackUrl: `${input.callbackBase}/api/payment/yigim/callback`,
       type: 'SMS',
+      saveCard: input.saveCard,
       extra,
     });
     return { provider, redirectUrl: r.url, ref: input.reference, gatewayOrderId: null, password: null, status: null };

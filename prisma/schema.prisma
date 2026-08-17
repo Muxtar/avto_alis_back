@@ -662,6 +662,10 @@ model Order {
   // Bu sahə alıcının seçimini qeyd edir ki, satıcı və admin nə razılaşdığını
   // görsün; pulun bizə gəlişi dəyişmir.
   installmentMonths   Int?
+  // Alıcı bu ödənişdə "kartı yadda saxla" seçibmi. Ödəniş uğurlu olanda
+  // şlüzün qaytardığı token saxlanılır — ayrıca kart bağlama axını yoxdur,
+  // kart REAL ALIŞ zamanı saxlanılır.
+  saveCardRequested   Boolean         @default(false)
   // Göndərilmiş, amma çatdırılmayan sifariş üçün admin bir dəfə xəbərdar edilir
   // (mal yolda ola bilər — avtomatik ləğv TƏHLÜKƏLİDİR, ona görə yalnız işarə).
   stuckFlaggedAt      DateTime?
@@ -1490,11 +1494,9 @@ model RefundAttempt {
 model SavedCard {
   id         Int       @id @default(autoincrement())
   userId     Int
-  // Kart bağlama sorğusunun referansı — callback bu sətri bununla tapır.
-  reference  String    @unique
-  // PENDING = kart daxil edilməsi gözlənilir, ACTIVE = istifadəyə hazır,
-  // FAILED = bağlama alınmadı.
-  status     String    @default("PENDING")
+  // Kartın saxlandığı ödənişin referansı (audit üçün).
+  reference  String?   @unique
+  status     String    @default("ACTIVE")
   token      String? // YIĞIM kart tokeni — serverdən çıxmır
   maskedPan  String? // 510068******0966
   expiry     String? // mmyy
@@ -1505,5 +1507,6 @@ model SavedCard {
   createdAt  DateTime  @default(now())
   user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
 
+  @@unique([userId, token])
   @@index([userId, status])
 }

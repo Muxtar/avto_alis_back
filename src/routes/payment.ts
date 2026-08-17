@@ -4,7 +4,7 @@ import { adminAuth, requirePermission, AuthRequest } from '../middleware/auth';
 import { getOrderStatus, isPaidStatus } from '../services/kapital';
 import { refundOrder } from '../services/paymentGateway';
 import { refundOrderSafe } from '../services/refunds';
-import { isCardReference, finishCardLink, startCardLink, PUBLIC_CARD_FIELDS, CARD_VERIFY_AMOUNT } from '../services/savedCards';
+import { PUBLIC_CARD_FIELDS, saveCardFromPayment } from '../services/savedCards';
 import { getPaymentStatus as yigimStatus, isPaidStatus as yigimPaid } from '../services/yigimPay';
 import { settleConsultation } from './consultations';
 import { recordSettlement, recordSettlementMany } from '../services/settlement';
@@ -153,12 +153,6 @@ router.get('/payment/yigim/callback', async (req: Request, res: Response) => {
   const reference = String(req.query.reference || '');
   if (!reference) { res.status(400).send('reference required'); return; }
   try {
-    // KART BAĞLAMA callback-i — sifariş deyil. Referansın prefiksindən bilinir.
-    if (isCardReference(reference)) {
-      res.status(200).send('OK');                       // YIĞIM 200 gözləyir
-      setImmediate(() => { finishCardLink(reference).catch((e) => console.error('[card link]', e?.message)); });
-      return;
-    }
     const order = await prisma.order.findFirst({ where: { gatewayRef: reference }, select: { id: true } });
     const consultCount = await prisma.consultationSession.count({ where: { gatewayRef: reference } });
     if (!order && consultCount === 0) { res.status(404).send('not found'); return; }
@@ -174,9 +168,11 @@ router.get('/payment/yigim/callback', async (req: Request, res: Response) => {
     // 3) Cavab göndərildikdən SONRA get-payment + settle (fonda).
     setImmediate(async () => {
       try {
-        const { status } = await yigimStatus(reference);
+        const { status, raw } = await yigimStatus(reference);
         const paid = yigimPaid(status);
         if (order) await settleOrders({ gatewayRef: reference }, status, paid);
+        // Alıcı "kartı yadda saxla" seçibsə şlüzün qaytardığı tokeni yaz.
+        if (paid) await saveCardFromPayment(reference, raw).catch((e) => console.error('[card save]', e?.message));
         if (consultCount > 0) await settleConsultation({ gatewayRef: reference }, paid);
         console.log(`[yigim callback] ${reference} → status=${status} paid=${paid}`);
       } catch (e: any) {
@@ -266,26 +262,6 @@ router.get('/me/cards', adminAuth, async (req: AuthRequest, res: Response) => {
       orderBy: [{ isDefault: 'desc' }, { createdAt: 'desc' }],
     });
     res.json({ success: true, cards });
-  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
-});
-
-// Yeni kart bağla — YIĞIM kart səhifəsinin linkini qaytarır.
-router.post('/me/cards/init', adminAuth, async (req: AuthRequest, res: Response) => {
-  try {
-    const r = await startCardLink(req.adminId!, PUBLIC_BACKEND_URL);
-    res.json({ success: true, url: r.url, verifyAmount: CARD_VERIFY_AMOUNT });
-  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
-});
-
-// Bağlamanın nəticəsi — brauzer qayıdandan sonra soruşur (callback gec gələ bilər).
-router.get('/me/cards/last', adminAuth, async (req: AuthRequest, res: Response) => {
-  try {
-    const row = await prisma.savedCard.findFirst({
-      where: { userId: req.adminId! },
-      orderBy: { createdAt: 'desc' },
-      select: { ...PUBLIC_CARD_FIELDS, status: true },
-    });
-    res.json({ success: true, card: row });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
 

@@ -500,6 +500,7 @@ router.post('/cart/checkout', requireType(BUYER_TYPES), async (req: AuthRequest,
       latitude, longitude,
       installmentMonths,     // hissəli alış planı (yalnız biznes məhsulları + kart)
       savedCardId,           // saxlanmış kartla ödəniş (yönləndirmə olmadan)
+      saveCard,              // yeni kartla ödəyəndə "kartı yadda saxla"
     } = req.body;
     const buyerLat = latitude != null && latitude !== '' ? parseFloat(latitude) : null;
     const buyerLng = longitude != null && longitude !== '' ? parseFloat(longitude) : null;
@@ -749,6 +750,9 @@ router.post('/cart/checkout', requireType(BUYER_TYPES), async (req: AuthRequest,
             paymentStatus: paymentMethod === 'WALLET' ? 'PAID' : 'PENDING',
             // Hissəli alış — yalnız kartla və yalnız BİZNES məhsullarında.
             // Şərtlər ödənmirsə səssizcə boş qalır (sifariş adi qaydada gedir).
+            // Yeni kartla ödəyib "yadda saxla" seçilibsə şlüzə save=y gedir
+            // və ödəniş təsdiqlənəndə token yazılır.
+            saveCardRequested: paymentMethod === 'CARD' && !savedCardId && saveCard === true,
             installmentMonths:
               paymentMethod === 'CARD' && isValidMonths(installmentMonths)
                 && items.every((i) => !!(i.listing as any).businessObjectId)
@@ -871,6 +875,7 @@ router.post('/cart/checkout', requireType(BUYER_TYPES), async (req: AuthRequest,
             title: 'tradixai',
             description: `Sifariş #${orders.map((o) => o.id).join(',')}`,
             callbackBase: PUBLIC_BACKEND_URL,
+            saveCard: saveCard === true,
           });
           await prisma.order.updateMany({
             where: { id: { in: orders.map((o) => o.id) } },
