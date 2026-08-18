@@ -1412,7 +1412,13 @@ router.get('/admin/listings', requirePermission('listings'), async (req: AuthReq
       if (l.expiresAt && l.expiresAt <= now) reasons.push(`Müddəti bitib (${l.expiresAt.toLocaleDateString('az-AZ')})`);
       if (l.business && l.business.isActive === false) reasons.push(`Biznes deaktivdir: ${l.business.name}`);
       if (l.businessObject && l.businessObject.isActive === false) reasons.push(`Obyekt deaktivdir: ${l.businessObject.name}`);
-      return { ...l, visibility: { visible: reasons.length === 0, reasons } };
+      // Görünür, amma BAŞQA sekmede: ana səhifə default olaraq "Məhsullar"
+      // göstərir. Xidmət elanı orada heç vaxt çıxmır — "Xidmətlər"dədir.
+      // Bu, nasazlıq deyil, ona görə ayrıca qeyd kimi verilir.
+      const note = reasons.length === 0 && l.type === 'SERVICE'
+        ? 'Ana səhifədə "Xidmətlər" sekmesindədir — "Məhsullar"da görünmür'
+        : null;
+      return { ...l, visibility: { visible: reasons.length === 0, reasons, note } };
     });
 
     res.json({ listings: withVisibility, total, pendingCount, page: parseInt(page as string), totalPages: Math.ceil(total / take) });
