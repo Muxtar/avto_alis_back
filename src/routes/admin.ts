@@ -1410,8 +1410,9 @@ router.get('/admin/listings', requirePermission('listings'), async (req: AuthReq
       const reasons: string[] = [];
       if (l.status !== 'APPROVED') reasons.push(l.status === 'PENDING' ? 'Təsdiqlənməyib (gözləmədə)' : 'Rədd edilib');
       if (l.expiresAt && l.expiresAt <= now) reasons.push(`Müddəti bitib (${l.expiresAt.toLocaleDateString('az-AZ')})`);
-      if (l.business && l.business.isActive === false) reasons.push(`Biznes deaktivdir: ${l.business.name}`);
-      if (l.businessObject && l.businessObject.isActive === false) reasons.push(`Obyekt deaktivdir: ${l.businessObject.name}`);
+      // Səbəbi göstərməklə kifayətlənmirik — nə etməli olduğunu da yazırıq.
+      if (l.business && l.business.isActive === false) reasons.push(`Biznes deaktivdir: ${l.business.name} — Biznes bölməsindən yenidən təsdiqləyin`);
+      if (l.businessObject && l.businessObject.isActive === false) reasons.push(`Obyekt deaktivdir: ${l.businessObject.name} — sahibi obyekti aktiv etməlidir`);
       // Görünür, amma BAŞQA sekmede: ana səhifə default olaraq "Məhsullar"
       // göstərir. Xidmət elanı orada heç vaxt çıxmır — "Xidmətlər"dədir.
       // Bu, nasazlıq deyil, ona görə ayrıca qeyd kimi verilir.

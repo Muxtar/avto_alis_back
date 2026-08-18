@@ -279,7 +279,17 @@ router.get('/listings/exist', async (req: Request, res: Response) => {
       .split(',').map((s) => parseInt(s.trim(), 10)).filter((n) => Number.isInteger(n) && n > 0);
     if (!ids.length) { res.json({ ids: [] }); return; }
     const rows = await prisma.listing.findMany({
-      where: { id: { in: ids.slice(0, 50) }, status: 'APPROVED', OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }] },
+      // Süzgəc ictimai siyahı ilə EYNİ olmalıdır — əks halda təsdiqlənməmiş
+      // və ya deaktiv biznesin məhsulu "Ən son baxdıqlarınız"da qalır.
+      where: {
+        id: { in: ids.slice(0, 50) },
+        status: 'APPROVED',
+        AND: [
+          { OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }] },
+          { OR: [{ businessId: null }, { business: { isActive: true } }] },
+          { OR: [{ businessObjectId: null }, { businessObject: { isActive: true } }] },
+        ],
+      },
       select: { id: true },
     });
     res.json({ ids: rows.map((r) => r.id) });
@@ -332,6 +342,18 @@ router.get('/listings/:id', async (req: Request, res: Response) => {
     if (listing.expiresAt && listing.expiresAt <= new Date()) {
       res.status(404).json({ success: false, message: 'Elan tapılmadı' });
       return;
+    }
+    // Deaktiv biznes/obyektin elanı saytın HEÇ BİR yerində açılmamalıdır —
+    // birbaşa link və ya "ən son baxdıqlarınız" vasitəsilə də.
+    if (listing.businessObject?.business) {
+      const owner = await prisma.businessObject.findUnique({
+        where: { id: listing.businessObjectId! },
+        select: { isActive: true, business: { select: { isActive: true } } },
+      });
+      if (owner && (!owner.isActive || owner.business?.isActive === false)) {
+        res.status(404).json({ success: false, message: 'Elan tapılmadı' });
+        return;
+      }
     }
     // Moderasiyadan keçməmiş elanı yalnız sahibi və admin görə bilər.
     if (listing.status !== 'APPROVED') {

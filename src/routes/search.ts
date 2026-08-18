@@ -460,10 +460,15 @@ router.get('/objects/:id', async (req: Request, res: Response) => {
         latitude: true, longitude: true, activityAreas: true, isActive: true,
         referralEnabled: true,
         referralRules: { select: { profession: true, commissionPercent: true, requiredDoc: true } },
-        business: { select: { id: true, name: true, status: true, website: true, instagram: true, facebook: true, tiktok: true, youtube: true, linkedin: true } },
+        business: { select: { id: true, name: true, status: true, isActive: true, website: true, instagram: true, facebook: true, tiktok: true, youtube: true, linkedin: true } },
       },
     });
-    if (!object || !object.isActive) { res.status(404).json({ success: false, message: 'Obyekt tapılmadı' }); return; }
+    // Obyekt aktiv olsa da ANA BİZNES deaktivdirsə səhifə açılmır.
+    // Əvvəl yalnız obyektin özü yoxlanırdı: deaktiv biznesin məhsulları ümumi
+    // siyahıda gizlənir, amma obyektin səhifəsində görünüb səbətə atıla bilirdi.
+    if (!object || !object.isActive || object.business?.isActive === false) {
+      res.status(404).json({ success: false, message: 'Obyekt tapılmadı' }); return;
+    }
     const listings = await prisma.listing.findMany({
       where: { businessObjectId: id, status: 'APPROVED', OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] },
       include: {

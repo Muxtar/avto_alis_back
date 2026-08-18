@@ -904,7 +904,11 @@ router.put('/admin/businesses/:id/approve', requirePermission('businesses'), asy
   try {
     const id = parseInt(req.params.id);
     const biz = await prisma.business.update({
-      where: { id }, data: { status: 'APPROVED', reviewedAt: new Date(), rejectionReason: null },
+      where: { id },
+      // Təsdiq həm də AKTİVLƏŞDİRİR. Əvvəl yalnız `status` dəyişirdi; `isActive`
+      // ayrı sahədir və toxunulmurdu — nəticədə admin "təsdiqlədim" deyirdi,
+      // sayt isə elanları "biznes deaktivdir" deyə gizlədirdi.
+      data: { status: 'APPROVED', isActive: true, reviewedAt: new Date(), rejectionReason: null },
     });
     await prisma.user.update({ where: { id: biz.userId }, data: { sellerVerified: true, sellerVerifiedAt: new Date() } });
     await prisma.notification.create({
