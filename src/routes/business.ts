@@ -136,14 +136,23 @@ router.post('/me/businesses', adminAuth, docFields, processImages, async (req: A
       where: { id: req.adminId! },
       select: { idVerifyStatus: true, name: true, idCardImage: true, selfieImage: true, faceMatchScore: true, idAiFaceMatch: true, idAiFaceScore: true },
     });
-    if (!me?.idVerifyStatus) {
-      res.status(403).json({ success: false, code: 'ID_NOT_VERIFIED', message: 'Biznes yaratmaq üçün əvvəlcə profil səhifəsində kimliyinizi Veriff ilə təsdiqləyin.' });
+    // Kimlik TAM TƏSDİQLƏNMİŞ olmalıdır. Əvvəl şərt `!me?.idVerifyStatus` idi —
+    // yəni istənilən dolu status keçirdi: Veriff-i sadəcə BAŞLADAN, hətta RƏDD
+    // EDİLƏN istifadəçi də biznes yarada bilirdi. Kimlik yoxlaması bu halda
+    // heç nə qorumurdu.
+    if (me?.idVerifyStatus !== 'APPROVED') {
+      const msg = me?.idVerifyStatus === 'PENDING'
+        ? 'Kimlik yoxlamanız hələ davam edir. Təsdiqləndikdən sonra biznes yarada biləcəksiniz.'
+        : me?.idVerifyStatus === 'REJECTED'
+          ? 'Kimlik təsdiqiniz rədd edilib. Profil səhifəsindən yenidən cəhd edin.'
+          : 'Biznes yaratmaq üçün əvvəlcə profil səhifəsində kimliyinizi Veriff ilə təsdiqləyin.';
+      res.status(403).json({ success: false, code: 'ID_NOT_VERIFIED', message: msg });
       return;
     }
     // Kimlik profildə edilib (Veriff/AI) — biznesdə təkrar kimlik+selfie istənilmir.
     // (Veriff test rejimində APPROVED-a çatmaya bilər — status set olması kifayətdir.)
     const faceOk = (me.faceMatchScore ?? 0) > 0.5 || me.idAiFaceMatch === true || (me.idAiFaceScore ?? 0) > 0.5;
-    const identityReusable = !!me.idVerifyStatus || (!!me.idCardImage && !!me.selfieImage && faceOk);
+    const identityReusable = me.idVerifyStatus === 'APPROVED' || (!!me.idCardImage && !!me.selfieImage && faceOk);
     const { proofType, name, voen, ownerName, founderName, phone, banks } = req.body;
     // Şirkət məlumatları sənəddən oxunur. Təsisçi sənəddə olmaya bilər — sahibə bərabər götürülür.
     const founder = (founderName?.trim() || ownerName?.trim() || '');
