@@ -21,6 +21,17 @@ router.get('/favorites', adminAuth, async (req: AuthRequest, res: Response) => {
   }
 });
 
+// Yalnız SAY — header nişanı üçün. Tam siyahı (elanlarla birlikdə) ağırdır,
+// hər səhifə yüklənməsində onu çəkmək lazım deyil.
+router.get('/favorites/count', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const count = await prisma.favorite.count({ where: { userId: req.adminId! } });
+    res.json({ success: true, count });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
 // Add to favorites
 router.post('/favorites', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
