@@ -1386,7 +1386,12 @@ router.get('/admin/listings', requirePermission('listings'), async (req: AuthReq
     const [listings, total] = await Promise.all([
       prisma.listing.findMany({
         where,
-        include: { user: { select: { id: true, name: true, phone: true, type: true } } },
+        include: {
+          user: { select: { id: true, name: true, phone: true, type: true } },
+          // Görünmə diaqnostikası üçün — aşağıda izah var.
+          business: { select: { isActive: true, name: true } },
+          businessObject: { select: { isActive: true, name: true } },
+        },
         orderBy: { createdAt: 'desc' },
         skip,
         take,
@@ -1395,7 +1400,22 @@ router.get('/admin/listings', requirePermission('listings'), async (req: AuthReq
     ]);
     const pendingCount = await prisma.listing.count({ where: { status: 'PENDING' } });
 
-    res.json({ listings, total, pendingCount, page: parseInt(page as string), totalPages: Math.ceil(total / take) });
+    // NİYƏ SAYTDA GÖRÜNMÜR — hər elan üçün konkret səbəb.
+    //
+    // Təsdiqləmək TƏK şərt deyil: elan ictimai siyahıya düşmək üçün eyni anda
+    // dörd şərti ödəməlidir. Admin bunu bilmədən "təsdiqlədim, amma görünmür"
+    // vəziyyətində qalırdı. İndi səbəb sətrin yanında yazılır.
+    const now = new Date();
+    const withVisibility = listings.map((l: any) => {
+      const reasons: string[] = [];
+      if (l.status !== 'APPROVED') reasons.push(l.status === 'PENDING' ? 'Təsdiqlənməyib (gözləmədə)' : 'Rədd edilib');
+      if (l.expiresAt && l.expiresAt <= now) reasons.push(`Müddəti bitib (${l.expiresAt.toLocaleDateString('az-AZ')})`);
+      if (l.business && l.business.isActive === false) reasons.push(`Biznes deaktivdir: ${l.business.name}`);
+      if (l.businessObject && l.businessObject.isActive === false) reasons.push(`Obyekt deaktivdir: ${l.businessObject.name}`);
+      return { ...l, visibility: { visible: reasons.length === 0, reasons } };
+    });
+
+    res.json({ listings: withVisibility, total, pendingCount, page: parseInt(page as string), totalPages: Math.ceil(total / take) });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }
