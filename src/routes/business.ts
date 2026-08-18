@@ -348,6 +348,29 @@ router.delete('/me/businesses/:id', adminAuth, async (req: AuthRequest, res: Res
     const id = parseInt(req.params.id);
     const biz = await prisma.business.findUnique({ where: { id } });
     if (!biz || biz.userId !== req.adminId) { res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return; }
+    // Yalnız hələ TƏSDİQLƏNMƏMİŞ biznes silinə bilər.
+    //
+    // Təsdiqlənmiş biznesin arxasında satış, sifariş və hesablaşma dayanır.
+    // Sətri silmək SellerLedger.businessId-ni null edir (FK SetNull) — yəni
+    // "hansı biznesə nə qədər borcluyuq" itir; obyektlər FK Cascade ilə gedir,
+    // elanlar isə sahibsiz qalıb saytda görünməyə davam edir.
+    if (biz.status === 'APPROVED') {
+      res.status(400).json({
+        success: false,
+        message: 'Təsdiqlənmiş biznes silinmir — satış və hesablaşma tarixçəsi ona bağlıdır. Deaktiv edin və ya admindən silinməsini istəyin.',
+      });
+      return;
+    }
+    // Gözləmədə/rədd edilmiş biznesdə elan ola bilməz (elan yaratmaq üçün
+    // təsdiq tələb olunur), amma ehtiyat üçün yoxlayırıq.
+    const objIds = (await prisma.businessObject.findMany({ where: { businessId: id }, select: { id: true } })).map((o) => o.id);
+    const hasListings = await prisma.listing.count({
+      where: { OR: [{ businessId: id }, ...(objIds.length ? [{ businessObjectId: { in: objIds } }] : [])] },
+    });
+    if (hasListings > 0) {
+      res.status(400).json({ success: false, message: `Bu biznesə bağlı ${hasListings} elan var — əvvəlcə onları silin` });
+      return;
+    }
     await prisma.business.delete({ where: { id } });
     res.json({ success: true });
   } catch (error: any) {
@@ -365,6 +388,20 @@ router.post('/me/businesses/:id/banks', adminAuth, async (req: AuthRequest, res:
   try {
     const businessId = parseInt(req.params.id);
     if (!(await ownsBiz(businessId, req.adminId!))) { res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return; }
+    // Biznes admin tərəfindən TƏSDİQLƏNMƏYİNCƏ ona obyekt əlavə edilə bilməz.
+    // Əvvəl yalnız sahiblik yoxlanırdı: gözləmədə olan biznesə obyekt qurmaq,
+    // sonra isə həmin obyektə məhsul bağlamaq mümkün idi.
+    const ownerBiz = await prisma.business.findUnique({
+      where: { id: businessId },
+      select: { status: true, isActive: true, deletedAt: true },
+    });
+    if (!ownerBiz || ownerBiz.deletedAt) { res.status(404).json({ success: false, message: 'Biznes tapılmadı' }); return; }
+    if (ownerBiz.status !== 'APPROVED') {
+      res.status(400).json({ success: false, message: 'Biznes hələ təsdiqlənməyib — təsdiqdən sonra obyekt əlavə edə bilərsiniz' }); return;
+    }
+    if (!ownerBiz.isActive) {
+      res.status(400).json({ success: false, message: 'Biznes deaktivdir — əvvəlcə aktiv edin' }); return;
+    }
     const { iban, title } = req.body;
     if (!iban?.trim()) { res.status(400).json({ success: false, message: 'IBAN tələb olunur' }); return; }
     // Səhv IBAN → köçürmə bankda qayıdır və hesablaşma pozulur. Yazılan anda yoxlanır.
@@ -543,8 +580,20 @@ router.delete('/me/objects/:id', adminAuth, async (req: AuthRequest, res: Respon
   try {
     const id = parseInt(req.params.id);
     if (!(await ownsObject(id, req.adminId!))) { res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return; }
-    await prisma.businessObject.delete({ where: { id } });
-    res.json({ success: true });
+    // Obyektin elanları SAHİBSİZ QALMAMALIDIR. FK SetNull olduğu üçün əvvəl
+    // elan bazada qalır, obyekt bağı isə silinirdi — nəticədə elan adi şəxsi
+    // elan kimi saytda görünməyə davam edirdi. İndi arxivləşdirilir
+    // (satış tarixçəsi üçün sətir qalır, saytda görünmür).
+    const now = new Date();
+    const archived = await prisma.$transaction(async (tx) => {
+      const del = await tx.listing.updateMany({
+        where: { businessObjectId: id, status: { not: 'ARCHIVED' } },
+        data: { status: 'ARCHIVED', archivedAt: now },
+      });
+      await tx.businessObject.update({ where: { id }, data: { deletedAt: now, isActive: false } });
+      return del.count;
+    });
+    res.json({ success: true, archivedListings: archived });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }

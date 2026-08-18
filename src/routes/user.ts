@@ -279,7 +279,15 @@ async function resolveObjectForSelling(businessObjectId: any, userId: number): P
     allowed = !!mem;
   }
   if (!allowed) return { error: 'Bu obyektdə satış səlahiyyətiniz yoxdur', code: 403 };
+  // Yalnız statusa baxmaq AZDIR. Deaktiv və ya silinmiş biznes/obyektə YENİ
+  // məhsul bağlana bilməməlidir — əks halda deaktiv biznes satışa məhsul
+  // qoymağa davam edərdi (elan yaranır, sonra saytda gizlənir; istifadəçi
+  // "elanım niyə yoxdur?" deyə qalır).
   if (obj.business.status !== 'APPROVED') return { error: 'Biznes hələ təsdiqlənməyib', code: 400 };
+  if (obj.business.deletedAt) return { error: 'Bu biznes silinib', code: 400 };
+  if (!obj.business.isActive) return { error: 'Biznes deaktivdir — əvvəlcə aktiv edin', code: 400 };
+  if (obj.deletedAt) return { error: 'Bu obyekt silinib', code: 400 };
+  if (!obj.isActive) return { error: 'Obyekt deaktivdir — əvvəlcə aktiv edin', code: 400 };
   return { bizId: obj.businessId, bizObjId: obj.id, objCity: obj.city, objAddress: obj.address, objLat: obj.latitude, objLng: obj.longitude };
 }
 
