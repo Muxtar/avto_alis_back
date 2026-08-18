@@ -877,7 +877,9 @@ router.put('/me/business-orders/:orderId/status', adminAuth, async (req: AuthReq
 router.get('/admin/businesses', requirePermission('businesses'), async (req: AuthRequest, res: Response) => {
   try {
     const { status } = req.query;
-    const where: any = {};
+    // Silinmiş bizneslər siyahıda görünmür (sətir yalnız maliyyə tarixçəsi
+    // üçün bazada qalır). ?includeDeleted=1 ilə göstərmək olar.
+    const where: any = String(req.query.includeDeleted || '') === '1' ? {} : { deletedAt: null };
     if (status && status !== 'all') where.status = status;
     const businesses = await prisma.business.findMany({
       where,
@@ -1130,39 +1132,82 @@ router.delete('/admin/banks/:id', requirePermission('businesses'), async (req: A
   }
 });
 
-// Biznesi sil — ona aid BÜTÜN obyektlər (FK Cascade) və elanlar (əl ilə) silinir.
-// Listing.businessId/businessObjectId FK-ları SetNull olduğu üçün elanlar avtomatik
-// silinmir; ona görə biznesə və onun obyektlərinə aid elanları əvvəlcə silirik.
+// ── ADMIN: aktiv/deaktiv ─────────────────────────────────────────────────
+// Silmə DEYİL: elanlar bazada qalır, sadəcə saytda görünmür. Yenidən aktiv
+// ediləndə hər şey olduğu kimi qayıdır. Elanların statusuna TOXUNMURUQ —
+// ictimai sorğular onsuz da biznes/obyekt aktivliyini yoxlayır.
+router.patch('/admin/businesses/:id/active', requirePermission('businesses'), async (req: AuthRequest, res: Response) => {
+  try {
+    const id = parseInt(String(req.params.id));
+    const isActive = req.body?.isActive === true;
+    const biz = await prisma.business.update({ where: { id }, data: { isActive } });
+    res.json({ success: true, business: { id: biz.id, isActive: biz.isActive } });
+  } catch (error: any) { res.status(400).json({ success: false, message: error.message }); }
+});
+
+router.patch('/admin/objects/:id/active', requirePermission('businesses'), async (req: AuthRequest, res: Response) => {
+  try {
+    const id = parseInt(String(req.params.id));
+    const isActive = req.body?.isActive === true;
+    const obj = await prisma.businessObject.update({ where: { id }, data: { isActive } });
+    res.json({ success: true, object: { id: obj.id, isActive: obj.isActive } });
+  } catch (error: any) { res.status(400).json({ success: false, message: error.message }); }
+});
+
+// Biznesi sil — ona aid BÜTÜN obyektlər və elanlar da gedir.
+//
+// NİYƏ HƏQİQİ SİLMƏ YOX, ARXİVLƏŞDİRMƏ:
+// OrderItem.listingId FK-sı Cascade-dir. Elanı bazadan həqiqətən silsək,
+// həmin məhsulun SİFARİŞ SƏTİRLƏRİ də silinir — yəni "kim nə aldı, biz kimə
+// nə qədər borcluyuq" tarixçəsi itir. Eyni səbəbdən biznes sətri də qalır:
+// SellerLedger.businessId SetNull-dur, biznes silinsə hesablaşma hansı biznesə
+// aid olduğunu itirərdi.
+//
+// Ona görə: sətirlər bazada qalır, amma saytın heç bir yerində görünmür —
+// elanlar ARCHIVED statusuna keçir (bütün ictimai sorğular APPROVED tələb edir),
+// biznes/obyekt isə `deletedAt` alır və deaktiv edilir.
 router.delete('/admin/businesses/:id', requirePermission('businesses'), async (req: AuthRequest, res: Response) => {
   try {
     const id = parseInt(req.params.id);
     if (Number.isNaN(id)) { res.status(400).json({ success: false, message: 'Yanlış ID' }); return; }
     const objects = await prisma.businessObject.findMany({ where: { businessId: id }, select: { id: true } });
     const objectIds = objects.map((o) => o.id);
-    const deletedListings = await prisma.$transaction(async (tx) => {
-      const del = await tx.listing.deleteMany({
-        where: { OR: [{ businessId: id }, ...(objectIds.length ? [{ businessObjectId: { in: objectIds } }] : [])] },
+    const now = new Date();
+    const archived = await prisma.$transaction(async (tx) => {
+      const del = await tx.listing.updateMany({
+        where: {
+          OR: [{ businessId: id }, ...(objectIds.length ? [{ businessObjectId: { in: objectIds } }] : [])],
+          status: { not: 'ARCHIVED' },
+        },
+        data: { status: 'ARCHIVED', archivedAt: now },
       });
-      await tx.business.delete({ where: { id } }); // obyektlər FK Cascade ilə silinir
+      await tx.businessObject.updateMany({ where: { businessId: id }, data: { deletedAt: now, isActive: false } });
+      await tx.business.update({ where: { id }, data: { deletedAt: now, isActive: false } });
       return del.count;
     });
-    res.json({ success: true, deletedListings, deletedObjects: objectIds.length });
+    res.json({ success: true, deletedListings: archived, deletedObjects: objectIds.length });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }
 });
 
-// Obyekti sil — ona aid BÜTÜN elanlar (əl ilə) silinir.
+// Obyekti sil — ona aid BÜTÜN elanlar da gedir.
+// Yuxarıdakı izahla eyni səbəbdən sətirlər bazada qalır (satış tarixçəsi
+// itməsin), amma saytda görünmür.
 router.delete('/admin/objects/:id', requirePermission('businesses'), async (req: AuthRequest, res: Response) => {
   try {
     const id = parseInt(req.params.id);
     if (Number.isNaN(id)) { res.status(400).json({ success: false, message: 'Yanlış ID' }); return; }
-    const deletedListings = await prisma.$transaction(async (tx) => {
-      const del = await tx.listing.deleteMany({ where: { businessObjectId: id } });
-      await tx.businessObject.delete({ where: { id } });
+    const now = new Date();
+    const archived = await prisma.$transaction(async (tx) => {
+      const del = await tx.listing.updateMany({
+        where: { businessObjectId: id, status: { not: 'ARCHIVED' } },
+        data: { status: 'ARCHIVED', archivedAt: now },
+      });
+      await tx.businessObject.update({ where: { id }, data: { deletedAt: now, isActive: false } });
       return del.count;
     });
-    res.json({ success: true, deletedListings });
+    res.json({ success: true, deletedListings: archived });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }

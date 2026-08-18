@@ -37,6 +37,12 @@ enum ListingStatus {
   PENDING // gözləmədə — yalnız sahibi və admin görür
   APPROVED // təsdiqlənib — saytda görünür
   REJECTED // rədd edilib — sahibi səbəbi görür
+  // Obyekt/biznes silinəndə elan bu statusa keçir. Sətir BAZADA QALIR, çünki
+  // OrderItem.listingId FK-sı Cascade-dir: elanı həqiqətən silsək satılmış
+  // məhsulun sifariş sətri də silinər və "kim nə aldı, kimə nə qədər borcluyuq"
+  // tarixçəsi itərdi. Bütün ictimai sorğular `status = APPROVED` tələb etdiyi
+  // üçün ARCHIVED elan saytın heç bir yerində görünmür.
+  ARCHIVED
 }
 
 enum BookingType {
@@ -385,6 +391,7 @@ model Listing {
   // Moderasiya — bax: ListingStatus. Default APPROVED (köhnə elanlar üçün),
   // yeni elanlar create zamanı PENDING olaraq yazılır.
   status            ListingStatus   @default(APPROVED)
+  archivedAt        DateTime? // obyekt/biznes silinəndə arxivləşdirilib
   rejectReason      String? // rədd edilibsə səbəb (sahibi görür)
   reviewedAt        DateTime? // admin nə vaxt baxdı
   expiresAt         DateTime?
@@ -959,6 +966,7 @@ model Business {
   linkedin        String?
   status          VerificationStatus @default(PENDING)
   isActive        Boolean            @default(true) // sahibi tərəfindən aktiv/deaktiv
+  deletedAt       DateTime? // admin sildi — sətir maliyyə tarixçəsi üçün qalır
   rejectionReason String?
   createdAt       DateTime           @default(now())
   reviewedAt      DateTime?
@@ -1011,6 +1019,7 @@ model BusinessObject {
   phone           String? // obyekt telefonu
   activityAreas   String[]         @default([]) // fəaliyyət sahələri (16 kateqoriya adları)
   isActive        Boolean          @default(true) // aktiv/passiv
+  deletedAt       DateTime? // admin sildi — sətir tarixçə üçün qalır
   address         String
   city            String?
   latitude        Float?

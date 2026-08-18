@@ -355,6 +355,12 @@ router.get('/listings/:id', async (req: Request, res: Response) => {
         return;
       }
     }
+    // Arxivləşdirilmiş (obyekt/biznes silinib) elan HEÇ KİMƏ açılmır —
+    // sahibinə də. Sətir yalnız satış tarixçəsi üçün bazada qalır.
+    if (listing.status === 'ARCHIVED') {
+      res.status(404).json({ success: false, message: 'Elan tapılmadı' });
+      return;
+    }
     // Moderasiyadan keçməmiş elanı yalnız sahibi və admin görə bilər.
     if (listing.status !== 'APPROVED') {
       const viewerId = verifyTokenUserId(req.headers.authorization?.replace('Bearer ', ''));
