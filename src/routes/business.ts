@@ -939,6 +939,19 @@ router.get('/admin/businesses', requirePermission('businesses'), async (req: Aut
     // üçün bazada qalır). ?includeDeleted=1 ilə göstərmək olar.
     const where: any = String(req.query.includeDeleted || '') === '1' ? {} : { deletedAt: null };
     if (status && status !== 'all') where.status = status;
+    // Axtarış — şirkət adı, VÖEN, sahib/təsisçi və müraciəti göndərən şəxs.
+    const q = String(req.query.search || '').trim();
+    if (q) {
+      where.OR = [
+        { name: { contains: q, mode: 'insensitive' } },
+        { voen: { contains: q } },
+        { ownerName: { contains: q, mode: 'insensitive' } },
+        { founderName: { contains: q, mode: 'insensitive' } },
+        { phone: { contains: q } },
+        { user: { name: { contains: q, mode: 'insensitive' } } },
+        { user: { phone: { contains: q } } },
+      ];
+    }
     const businesses = await prisma.business.findMany({
       where,
       include: {
