@@ -1190,6 +1190,75 @@ router.delete('/admin/banks/:id', requirePermission('businesses'), async (req: A
   }
 });
 
+// ── ADMIN: BÜTÜN OBYEKTLƏR ───────────────────────────────────────────────
+// Obyektlər biznesin içində gizli qalırdı — hansı obyektin hansı biznesə aid
+// olduğunu görmək üçün hər biznesi açmaq lazım idi. Bu siyahı obyekt üzrə
+// baxış verir: sahib biznes, əlaqə, məkan, elan sayları, satış sayı.
+router.get('/admin/objects', requirePermission('businesses'), async (req: AuthRequest, res: Response) => {
+  try {
+    const q = String(req.query.search || '').trim();
+    const where: any = { deletedAt: null };
+    if (String(req.query.includeDeleted || '') === '1') delete where.deletedAt;
+    if (req.query.businessId) { const bid = parseInt(String(req.query.businessId)); if (bid) where.businessId = bid; }
+    if (q) {
+      where.OR = [
+        { name: { contains: q, mode: 'insensitive' } },
+        { address: { contains: q, mode: 'insensitive' } },
+        { city: { contains: q, mode: 'insensitive' } },
+        { phone: { contains: q } },
+        { business: { name: { contains: q, mode: 'insensitive' } } },
+        { business: { voen: { contains: q } } },
+      ];
+    }
+
+    const objects = await prisma.businessObject.findMany({
+      where,
+      include: {
+        business: { select: { id: true, name: true, voen: true, status: true, isActive: true, deletedAt: true, user: { select: { id: true, name: true, phone: true } } } },
+        _count: { select: { listings: true, managers: true, comments: true, purchases: true } },
+      },
+      orderBy: [{ businessId: 'asc' }, { createdAt: 'desc' }],
+      take: 500,
+    });
+
+    // Elanların statusa görə bölgüsü — bir sorğu ilə hamısı üçün.
+    const ids = objects.map((o) => o.id);
+    const grouped = ids.length
+      ? await prisma.listing.groupBy({ by: ['businessObjectId', 'status'], where: { businessObjectId: { in: ids } }, _count: { _all: true } })
+      : [];
+    const byObject = new Map<number, Record<string, number>>();
+    for (const g of grouped) {
+      const k = g.businessObjectId!;
+      const row = byObject.get(k) || {};
+      row[g.status] = g._count._all;
+      byObject.set(k, row);
+    }
+
+    res.json({
+      success: true,
+      objects: objects.map((o) => ({ ...o, listingStats: byObject.get(o.id) || {} })),
+      total: objects.length,
+    });
+  } catch (error: any) { res.status(400).json({ success: false, message: error.message }); }
+});
+
+// Bir obyektin elanları — sətir açılanda çəkilir (siyahını ağırlaşdırmasın).
+router.get('/admin/objects/:id/listings', requirePermission('businesses'), async (req: AuthRequest, res: Response) => {
+  try {
+    const id = parseInt(String(req.params.id));
+    const listings = await prisma.listing.findMany({
+      where: { businessObjectId: id },
+      select: {
+        id: true, title: true, price: true, images: true, category: true, type: true,
+        status: true, stock: true, createdAt: true, archivedAt: true,
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 200,
+    });
+    res.json({ success: true, listings });
+  } catch (error: any) { res.status(400).json({ success: false, message: error.message }); }
+});
+
 // ── ADMIN: aktiv/deaktiv ─────────────────────────────────────────────────
 // Silmə DEYİL: elanlar bazada qalır, sadəcə saytda görünmür. Yenidən aktiv
 // ediləndə hər şey olduğu kimi qayıdır. Elanların statusuna TOXUNMURUQ —
