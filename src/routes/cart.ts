@@ -6,6 +6,7 @@ import { createPayment as createGatewayPayment, refundOrder as gatewayRefundOrde
 import { refundOrderSafe, restoreStockForOrder } from '../services/refunds';
 import { isValidMonths, installmentAllowed } from '../services/installment';
 import { chargeSavedCard } from '../services/savedCards';
+import { missingRequiredConsents } from '../services/legal';
 import { settleOrders } from './payment';
 import { recordSettlement, recordSettlementMany, sellerBalance } from '../services/settlement';
 import { markOrdersAwaitingConfirm, getDeliveryDeadlineHours } from '../services/orderExpiry';
@@ -502,6 +503,21 @@ router.post('/cart/checkout', requireType(BUYER_TYPES), async (req: AuthRequest,
       savedCardId,           // saxlanmış kartla ödəniş (yönləndirmə olmadan)
       saveCard,              // yeni kartla ödəyəndə "kartı yadda saxla"
     } = req.body;
+
+    // HÜQUQİ QAPI: qaydalar qəbul edilməyibsə sifariş verilmir.
+    // Qeydiyyatda qəbul MƏCBURİ DEYİL (istifadəçi keçə bilər) — amma alış
+    // anında qarşısına çıxır və qəbul etmədən keçmək mümkün deyil.
+    const missingDocs = await missingRequiredConsents(req.adminId!);
+    if (missingDocs.length) {
+      res.status(451).json({
+        success: false,
+        code: 'CONSENT_REQUIRED',
+        message: 'Sifariş vermək üçün qaydaları qəbul etməlisiniz',
+        missing: missingDocs.map((d) => ({ slug: d.slug, title: d.title, version: d.version })),
+      });
+      return;
+    }
+
     const buyerLat = latitude != null && latitude !== '' ? parseFloat(latitude) : null;
     const buyerLng = longitude != null && longitude !== '' ? parseFloat(longitude) : null;
     const dMethod: 'COURIER' | 'SELF' = deliveryMethod === 'SELF' ? 'SELF' : 'COURIER';

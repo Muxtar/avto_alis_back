@@ -33,6 +33,7 @@ import complaintsRoutes from './routes/complaints';
 import businessRoutes from './routes/business';
 import bookingsRoutes from './routes/bookings';
 import yangoRoutes from './routes/yango';
+import legalRoutes from './routes/legal';
 import veriffRoutes from './routes/veriff';
 import contactsRoutes from './routes/contacts';
 import bannersRoutes from './routes/banners';
@@ -43,6 +44,7 @@ import outreachRoutes from './routes/outreach';
 import mediaRoutes from './routes/media';
 import { auditMiddleware } from './services/auditLog';
 import { startOrderExpiryJob } from './services/orderExpiry';
+import { seedLegalDocuments } from './services/legal';
 
 const app = express();
 const PORT = process.env.PORT || 5001;
@@ -101,6 +103,7 @@ app.use('/uploads', express.static(uploadsDir));
 // Admin audit jurnalı — bütün admin mutasiyalarını avtomatik qeyd edir.
 app.use(auditMiddleware);
 
+app.use('/api', legalRoutes);   // hüquqi sənədlər + qəbul qeydi
 app.use('/api', authRoutes);
 app.use('/api', verifyRoutes);
 app.use('/api', listingsRoutes);
@@ -293,4 +296,5 @@ server.listen(PORT, () => {
   backfillListingExpiresAt();
   backfillOptimizeImages();
   startOrderExpiryJob();   // satıcı təsdiqi timeout → avtomatik refund
+  seedLegalDocuments();    // hüquqi sənədlər bazada yoxdursa yazılsın
 });

@@ -237,6 +237,7 @@ model User {
   notifications Notification[]
   sessions      Session[]      @relation("UserSessions")
   savedCards    SavedCard[]
+  consents      UserConsent[]
 
   // Default location — used on listings + city-search browsing.
   city      String?
@@ -948,28 +949,40 @@ enum BusinessProofType {
 }
 
 model Business {
-  id              Int                @id @default(autoincrement())
-  userId          Int
-  kind            BusinessKind       @default(PHYSICAL)
-  proofType       BusinessProofType  @default(TAX_DOC)
-  name            String
-  voen            String
-  ownerName       String
-  founderName     String
-  phone           String? // şirkət telefonu
+  id                 Int                @id @default(autoincrement())
+  userId             Int
+  kind               BusinessKind       @default(PHYSICAL)
+  proofType          BusinessProofType  @default(TAX_DOC)
+  name               String
+  voen               String
+  ownerName          String
+  founderName        String
+  phone              String? // şirkət telefonu
   // Opsional əlaqə/onlayn — biznes əlavə edilərkən istəyə bağlı
-  website         String? // biznesin veb-saytı
-  instagram       String?
-  facebook        String?
-  tiktok          String?
-  youtube         String?
-  linkedin        String?
-  status          VerificationStatus @default(PENDING)
-  isActive        Boolean            @default(true) // sahibi tərəfindən aktiv/deaktiv
-  deletedAt       DateTime? // admin sildi — sətir maliyyə tarixçəsi üçün qalır
-  rejectionReason String?
-  createdAt       DateTime           @default(now())
-  reviewedAt      DateTime?
+  website            String? // biznesin veb-saytı
+  instagram          String?
+  facebook           String?
+  tiktok             String?
+  youtube            String?
+  linkedin           String?
+  status             VerificationStatus @default(PENDING)
+  // Müqavilədəki "Ünvan" xanası — hüquqi (qeydiyyat) ünvanı. Obyektin
+  // ünvanı ilə eyni olmaya bilər, ona görə ayrıca saxlanılır.
+  legalAddress       String?
+  // ── SATICI MÜQAVİLƏSİ (DocuSign) ──
+  // NOT_SENT → SENT (imzaya göndərilib) → SIGNED (hər iki tərəf imzaladı)
+  //          → DECLINED / VOIDED
+  contractStatus     String             @default("NOT_SENT")
+  contractEnvelopeId String? // DocuSign zərf id-si
+  contractSentAt     DateTime?
+  contractSignedAt   DateTime?
+  contractPdf        String? // imzalanmış PDF-in fayl adı
+  contractVersion    Int? // hansı şablon versiyası imzalanıb
+  isActive           Boolean            @default(true) // sahibi tərəfindən aktiv/deaktiv
+  deletedAt          DateTime? // admin sildi — sətir maliyyə tarixçəsi üçün qalır
+  rejectionReason    String?
+  createdAt          DateTime           @default(now())
+  reviewedAt         DateTime?
 
   // KYC sənədləri (fayl adları)
   taxDocImage          String? // vergi qeydiyyatı sənədi (TAX_DOC)
@@ -1518,4 +1531,44 @@ model SavedCard {
 
   @@unique([userId, token])
   @@index([userId, status])
+}
+
+// ── HÜQUQİ SƏNƏDLƏR VƏ QƏBUL QEYDİ ────────────────────────────────────────
+//
+// Sənədin MƏTNİ bazada saxlanılır ki, admin dəyişə bilsin; hər dəyişiklik yeni
+// VERSİYA yaradır. Versiya vacibdir: İstifadəçi Razılaşmasının 13-cü bəndi
+// dəyişikliyə icazə verir, mübahisədə isə "hansı mətni qəbul etmişdi?" sualına
+// cavab lazımdır.
+model LegalDocument {
+  id                  Int           @id @default(autoincrement())
+  slug                String // user-agreement | commission-rules | return-rules | seller-agreement | privacy
+  version             Int           @default(1)
+  title               String
+  body                String // sənədin tam mətni (olduğu kimi — dəyişdirilmir)
+  // Bu sənəd qəbul edilmədən alış mümkün olmasınmı.
+  requiredForPurchase Boolean       @default(false)
+  isActive            Boolean       @default(true) // qüvvədə olan versiya
+  publishedAt         DateTime      @default(now())
+  consents            UserConsent[]
+
+  @@unique([slug, version])
+  @@index([slug, isActive])
+}
+
+// Kim, hansı sənədin hansı versiyasını, nə vaxt, haradan qəbul edib.
+// IP və brauzer imzası mübahisədə sübut kimi saxlanılır.
+model UserConsent {
+  id         Int           @id @default(autoincrement())
+  userId     Int
+  documentId Int
+  slug       String // sürətli sorğu üçün surət
+  version    Int
+  ip         String?
+  userAgent  String?
+  acceptedAt DateTime      @default(now())
+  user       User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  document   LegalDocument @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, documentId])
+  @@index([userId, slug])
 }
