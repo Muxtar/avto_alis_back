@@ -6,8 +6,13 @@ import { adminAuth, requirePermission, AuthRequest } from '../middleware/auth';
 import { upload, docUpload, UPLOADS_DIR } from '../middleware/upload';
 import { processImages } from '../middleware/imageProcess';
 import { verifyBusinessAI, BusinessDoc, extractBankAccounts, extractBusinessInfo, nameOverlapScore } from '../services/credentialAI';
+import { createPayment as createGatewayPayment } from '../services/paymentGateway';
+import { consultationLimiter } from '../middleware/rateLimiter';
+import { feeState, feeAmount, consumeFee, releaseFee } from '../services/businessFee';
 import fs from 'fs';
 import path from 'path';
+
+const PUBLIC_BACKEND_URL = process.env.PUBLIC_BACKEND_URL || `http://localhost:${process.env.PORT || 5001}`;
 
 // Saxlanmış sənəd faylının (filename) diskdəki tam yolu.
 function storedPath(filename: string | null | undefined): string | null {
@@ -91,6 +96,50 @@ router.get('/me/businesses', adminAuth, async (req: AuthRequest, res: Response) 
   }
 });
 
+// ==================== BİZNES YARATMA HAQQI ====================
+// Birdəfəlik ödəniş. Məbləği admin paneldən dəyişilir (`business_fee_azn`).
+
+// Cari vəziyyət — səhifə açılanda göstərmək üçün.
+router.get('/me/business-fee', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    res.json({ success: true, ...(await feeState(req.adminId!)) });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
+// Ödənişi başlat — şlüz səhifəsinin linkini qaytarır.
+router.post('/me/business-fee/pay', consultationLimiter, adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    // Kimlik təsdiqlənməyibsə pul almağın mənası yoxdur — onsuz da biznes yarada bilməz.
+    const me = await prisma.user.findUnique({ where: { id: req.adminId! }, select: { idVerifyStatus: true } });
+    if (me?.idVerifyStatus !== 'APPROVED') {
+      res.status(403).json({ success: false, code: 'ID_NOT_VERIFIED', message: 'Əvvəlcə profil səhifəsində kimliyinizi təsdiqləyin — ondan sonra ödəniş edə bilərsiniz.' });
+      return;
+    }
+    const amount = await feeAmount();
+    if (amount <= 0) { res.status(400).json({ success: false, message: 'Hazırda biznes yaratmaq pulsuzdur — ödəniş tələb olunmur.' }); return; }
+
+    // Artıq ödənilmiş, istifadə olunmamış haqq varsa ikinci dəfə pul almırıq.
+    const st = await feeState(req.adminId!);
+    if (st.paid) { res.status(400).json({ success: false, code: 'ALREADY_PAID', message: 'Ödənilmiş haqqınız var — birbaşa biznes yarada bilərsiniz.' }); return; }
+
+    const reference = `BF${req.adminId}-${Date.now()}`;
+    const pay = await createGatewayPayment({
+      amount, reference,
+      title: 'Biznes yaratma haqqı',
+      description: 'Biznes hesabının açılması — birdəfəlik haqq',
+      callbackBase: PUBLIC_BACKEND_URL, language: 'az',
+    });
+    await prisma.businessFee.create({
+      data: {
+        userId: req.adminId!, amount, status: 'UNPAID',
+        gatewayProvider: pay.provider, gatewayRef: pay.ref,
+        gatewayOrderId: pay.gatewayOrderId, gatewayPassword: pay.password,
+      },
+    });
+    res.json({ success: true, amount, redirectUrl: pay.redirectUrl, reference: pay.ref });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
 // Vergi sənədindən (şəkil/PDF) şirkət məlumatlarını AI ilə oxu — forma avtomatik dolsun.
 router.post('/me/extract-business-info', adminAuth, docUpload.single('doc'), processImages, async (req: AuthRequest, res: Response) => {
   try {
@@ -149,6 +198,18 @@ router.post('/me/businesses', adminAuth, docFields, processImages, async (req: A
       res.status(403).json({ success: false, code: 'ID_NOT_VERIFIED', message: msg });
       return;
     }
+    // ── Birdəfəlik haqq ödənilibmi ──
+    // Tez yoxlanılır ki, istifadəçi bütün formanı doldurub sonda «ödə» xəbərini
+    // almasın. Haqq real olaraq aşağıda — biznes yarandıqdan sonra xərclənir.
+    const fee = await feeState(req.adminId!);
+    if (!fee.paid) {
+      res.status(402).json({
+        success: false, code: 'FEE_REQUIRED', amount: fee.amount,
+        message: `Biznes yaratmaq üçün birdəfəlik ${fee.amount.toFixed(2)} AZN ödəniş tələb olunur.`,
+      });
+      return;
+    }
+
     // Kimlik profildə edilib (Veriff/AI) — biznesdə təkrar kimlik+selfie istənilmir.
     // (Veriff test rejimində APPROVED-a çatmaya bilər — status set olması kifayətdir.)
     const faceOk = (me.faceMatchScore ?? 0) > 0.5 || me.idAiFaceMatch === true || (me.idAiFaceScore ?? 0) > 0.5;
@@ -210,6 +271,17 @@ router.post('/me/businesses', adminAuth, docFields, processImages, async (req: A
         // status: PENDING (default) — admin təsdiq edənə qədər.
       },
     });
+
+    // Haqqı indi xərclə — biznes qeydi artıq var, ona görə hansı biznesə
+    // getdiyi yazılır. Xərclənə bilmirsə (nadir yarış: eyni anda iki müraciət
+    // bir ödənişi tutmağa çalışıb) biznes geri silinir — ödənişsiz müraciət
+    // admin panelə düşməməlidir.
+    const spent = await consumeFee(req.adminId!, business.id);
+    if (!spent.ok) {
+      await prisma.business.delete({ where: { id: business.id } }).catch(() => {});
+      res.status(402).json({ success: false, code: 'FEE_REQUIRED', message: 'Ödəniş tapılmadı — biznes yaratma haqqını ödəyin.' });
+      return;
+    }
 
     // Admin panelə düşdü — istifadəçiyə "yoxlamaya göndərildi" bildirişi.
     await prisma.notification.create({
@@ -380,6 +452,9 @@ router.delete('/me/businesses/:id', adminAuth, async (req: AuthRequest, res: Res
       res.status(400).json({ success: false, message: `Bu biznesə bağlı ${hasListings} elan var — əvvəlcə onları silin` });
       return;
     }
+    // Ödənilmiş haqq bu biznesə xərclənmişdisə geri açılır — istifadəçi
+    // müraciətini ləğv edib yenidən göndərəndə ikinci dəfə ödəmir.
+    await releaseFee(id);
     await prisma.business.delete({ where: { id } });
     res.json({ success: true });
   } catch (error: any) {
@@ -1003,8 +1078,11 @@ router.put('/admin/businesses/:id/reject', requirePermission('businesses'), asyn
     });
     const stillApproved = await prisma.business.count({ where: { userId: biz.userId, status: 'APPROVED' } });
     if (stillApproved === 0) await prisma.user.update({ where: { id: biz.userId }, data: { sellerVerified: false } });
+    // Rədd → ödənilmiş haqq yenidən istifadəyə açılır. Pul alındı, amma biznes
+    // açılmadı: istifadəçi düzəldib yenidən göndərəndə təkrar ödəməməlidir.
+    await releaseFee(id);
     await prisma.notification.create({
-      data: { userId: biz.userId, type: 'SYSTEM', title: 'Biznes rədd edildi', body: `"${biz.name}": ${reason.trim()}`, link: '/business' },
+      data: { userId: biz.userId, type: 'SYSTEM', title: 'Biznes rədd edildi', body: `"${biz.name}": ${reason.trim()}\n\nÖdədiyiniz haqq qüvvədədir — düzəlişdən sonra əlavə ödəniş etmədən yenidən müraciət edə bilərsiniz.`, link: '/business' },
     }).catch(() => {});
     res.json({ success: true, business: biz });
   } catch (error: any) {

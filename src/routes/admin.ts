@@ -5,7 +5,7 @@ import { adminAuth, requireAdmin, requirePermission, requireSuperAdmin, AuthRequ
 import { authLimiter } from '../middleware/rateLimiter';
 import { createOtp } from '../services/otp';
 import { refund as kapitalRefund } from '../services/kapital';
-import { listFlags, setFlag } from '../services/settings';
+import { listFlags, setFlag, listNumbers, setNumber } from '../services/settings';
 import { checkAllServices } from '../services/serviceHealth';
 import { runWebSearchTest } from '../services/webSearchAI';
 import { runAgent } from '../services/aiAgent';
@@ -27,8 +27,48 @@ const prisma = new PrismaClient();
 // dəyər ilə qaytarılır; PATCH ilə tək açar aktiv/deaktiv edilir.
 router.get('/admin/settings', requirePermission('settings'), async (_req: AuthRequest, res: Response) => {
   try {
-    const flags = await listFlags();
-    res.json({ success: true, settings: flags });
+    const [flags, numbers] = await Promise.all([listFlags(), listNumbers()]);
+    res.json({ success: true, settings: flags, numbers });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+// Rəqəmli tənzimləmə (tarif) — məs. biznes yaratma haqqı.
+router.patch('/admin/settings/number', requirePermission('settings'), async (req: AuthRequest, res: Response) => {
+  try {
+    const key = String(req.body?.key || '');
+    const value = parseFloat(String(req.body?.value));
+    if (!key) { res.status(400).json({ success: false, message: 'key tələb olunur' }); return; }
+    if (!Number.isFinite(value)) { res.status(400).json({ success: false, message: 'Dəyər rəqəm olmalıdır' }); return; }
+    res.json({ success: true, key, value: await setNumber(key, value) });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+// Ödənilmiş biznes haqları — kim, nə vaxt, nə qədər ödəyib.
+router.get('/admin/business-fees', requirePermission('finance'), async (req: AuthRequest, res: Response) => {
+  try {
+    const q = String(req.query.search || '').trim();
+    const rows = await prisma.businessFee.findMany({
+      where: q ? { user: { OR: [{ name: { contains: q, mode: 'insensitive' } }, { phone: { contains: q } }] } } : {},
+      // DİQQƏT: `include: { user: true }` YAZMAYIN — Prisma bütün skalyar
+      // sahələri (parol heşi, kimlik şəkilləri) qaytarır. Yalnız lazım olanlar:
+      select: {
+        id: true, amount: true, status: true, businessId: true,
+        gatewayProvider: true, gatewayRef: true, paidAt: true, usedAt: true, createdAt: true,
+        user: { select: { id: true, name: true, phone: true } },
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 300,
+    });
+    const paid = rows.filter((r) => r.status === 'PAID' || r.status === 'USED');
+    res.json({
+      success: true, rows,
+      totalPaid: Math.round(paid.reduce((s, r) => s + r.amount, 0) * 100) / 100,
+      countPaid: paid.length,
+    });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }

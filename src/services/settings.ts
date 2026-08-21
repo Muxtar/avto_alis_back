@@ -101,6 +101,37 @@ export const FLAGS: FlagDef[] = [
 
 const FLAG_MAP = new Map(FLAGS.map((f) => [f.key, f]));
 
+// ── Rəqəmli tənzimləmələr (tariflər) ──
+// Açıq/bağlı deyil, DƏYƏR olan parametrlər. Eyni `Setting` cədvəlində saxlanılır,
+// eyni keşdən oxunur — ona görə dəyişiklik dərhal (ən çox 15 san) tətbiq olunur.
+export interface NumberDef {
+  key: string;
+  label: string;
+  description: string;
+  default: number;
+  min: number;
+  max: number;
+  unit: string;
+  /** Onluq rəqəm sayı — 2 = qəpik dəqiqliyi. */
+  decimals: number;
+}
+
+export const NUMBERS: NumberDef[] = [
+  {
+    key: 'business_fee_azn',
+    label: 'Biznes yaratma haqqı',
+    description:
+      'İstifadəçi biznes yaratmaq üçün birdəfəlik bu məbləği ödəyir. Ödəniş edilməyincə biznes müraciəti göndərilə bilmir. 0 yazılsa haqq tələb olunmur (pulsuz). Admin biznesi RƏDD etsə ödəniş yenidən istifadəyə açılır — istifadəçi ikinci dəfə ödəmir.',
+    default: 10,
+    min: 0,
+    max: 1000,
+    unit: 'AZN',
+    decimals: 2,
+  },
+];
+
+const NUMBER_MAP = new Map(NUMBERS.map((n) => [n.key, n]));
+
 // ── TTL keş ──
 let cache: Record<string, string> | null = null;
 let cachedAt = 0;
@@ -159,4 +190,51 @@ export async function setFlag(key: string, value: boolean): Promise<boolean> {
   if (cache) cache[key] = v;
   else { cache = { [key]: v }; cachedAt = Date.now(); }
   return value;
+}
+
+// ── Rəqəmli tənzimləmələr ──
+
+function clampNumber(def: NumberDef, raw: number): number {
+  const p = Math.pow(10, def.decimals);
+  return Math.max(def.min, Math.min(def.max, Math.round(raw * p) / p));
+}
+
+/** Bir rəqəmli tənzimləmənin effektiv dəyəri (DB → yoxdursa default). */
+export async function getNumber(key: string): Promise<number> {
+  const def = NUMBER_MAP.get(key);
+  if (!def) throw new Error('Naməlum tənzimləmə açarı: ' + key);
+  const store = await load();
+  const n = parseFloat(store[key] ?? '');
+  // Yararsız dəyər (əl ilə DB-yə səhv yazılıb) default-a qayıdır — sistem
+  // NaN tarifə görə ödənişi bloklamasın.
+  if (!Number.isFinite(n)) return def.default;
+  return clampNumber(def, n);
+}
+
+export async function listNumbers() {
+  const store = await load();
+  return NUMBERS.map((d) => {
+    const raw = parseFloat(store[d.key] ?? '');
+    const isDefault = !Number.isFinite(raw);
+    return {
+      key: d.key, label: d.label, description: d.description,
+      unit: d.unit, min: d.min, max: d.max, decimals: d.decimals,
+      value: isDefault ? d.default : clampNumber(d, raw),
+      isDefault,
+    };
+  });
+}
+
+export async function setNumber(key: string, value: number): Promise<number> {
+  const def = NUMBER_MAP.get(key);
+  if (!def) throw new Error('Naməlum tənzimləmə açarı: ' + key);
+  if (!Number.isFinite(value)) throw new Error('Dəyər rəqəm olmalıdır');
+  if (value < def.min || value > def.max) {
+    throw new Error(`${def.label}: ${def.min}–${def.max} ${def.unit} aralığında olmalıdır`);
+  }
+  const v = String(clampNumber(def, value));
+  await prisma.setting.upsert({ where: { key }, update: { value: v }, create: { key, value: v } });
+  if (cache) cache[key] = v;
+  else { cache = { [key]: v }; cachedAt = Date.now(); }
+  return parseFloat(v);
 }

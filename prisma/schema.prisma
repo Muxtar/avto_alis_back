@@ -238,6 +238,7 @@ model User {
   sessions      Session[]      @relation("UserSessions")
   savedCards    SavedCard[]
   consents      UserConsent[]
+  businessFees  BusinessFee[]
 
   // Default location — used on listings + city-search browsing.
   city      String?
@@ -1298,6 +1299,40 @@ model Banner {
 
 // Admin idarə edilən tənzimləmələr (feature-flags) — açar/dəyər. Dəyər mətn kimi
 // saxlanılır (boolean üçün "true"/"false"). Admin paneldə aktiv/deaktiv edilir.
+// ── Biznes yaratma haqqı ──────────────────────────────────────────────────────
+// Biznes yaratmaq birdəfəlik ödənişlidir (məbləğ: `business_fee_azn` setting-i,
+// admin paneldən dəyişilir; 0 = pulsuz). İstifadəçi ödəyir → PAID qeydi yaranır
+// → biznes forması göndəriləndə həmin qeyd USED olur.
+//
+// Niyə ayrı model: bu ödəniş Order deyil (məhsul yoxdur, çatdırılma yoxdur,
+// komissiya yoxdur). Order cədvəlinə saxta sifariş yazmaq bütün maliyyə
+// hesabatlarını korlayardı.
+model BusinessFee {
+  id     Int    @id @default(autoincrement())
+  userId Int
+  amount Float // ödəniş anındakı tarif (sonradan tarif dəyişsə də bu qalır)
+
+  // UNPAID → PAID (ödənildi, hələ istifadə olunmayıb) → USED (biznes yaradıldı)
+  // FAILED — şlüz ödənişi rədd etdi. REFUNDED — pul geri qaytarıldı.
+  status String @default("UNPAID")
+
+  gatewayProvider String?
+  gatewayRef      String? @unique // YIĞIM referansı — callback bununla tapır
+  gatewayOrderId  Int? // Kapital order id
+  gatewayPassword String?
+
+  businessId Int? // hansı biznes üçün xərclənib (rədd olunsa geri açılır)
+  paidAt     DateTime?
+  usedAt     DateTime?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, status])
+  @@index([gatewayOrderId])
+}
+
 model Setting {
   id        Int      @id @default(autoincrement())
   key       String   @unique

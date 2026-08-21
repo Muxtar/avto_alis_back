@@ -7,6 +7,7 @@ import { refundOrderSafe } from '../services/refunds';
 import { PUBLIC_CARD_FIELDS, saveCardFromPayment } from '../services/savedCards';
 import { getPaymentStatus as yigimStatus, isPaidStatus as yigimPaid } from '../services/yigimPay';
 import { settleConsultation } from './consultations';
+import { settleBusinessFee, isBusinessFeeRef } from '../services/businessFee';
 import { recordSettlement, recordSettlementMany } from '../services/settlement';
 import { markOrdersAwaitingConfirm } from '../services/orderExpiry';
 
@@ -85,7 +86,9 @@ router.get('/payment/callback', async (req: Request, res: Response) => {
     // Əvvəlki vəziyyəti bilmək üçün order-ləri item-lərlə birlikdə əvvəlcədən oxu (idempotentlik).
     const orders = await prisma.order.findMany({ where: { gatewayOrderId }, include: { items: true } });
     const consultCount = await prisma.consultationSession.count({ where: { gatewayOrderId } });
-    if (orders.length === 0 && consultCount === 0) {
+    // Biznes yaratma haqqı da bu callback-dən keçir (sifariş deyil, ayrı cədvəl).
+    const isFee = await isBusinessFeeRef({ gatewayOrderId });
+    if (orders.length === 0 && consultCount === 0 && !isFee) {
       return res.redirect(`${FRONTEND_URL}/payment/return?status=error`);
     }
     const wasPaid = orders.some((o) => o.paymentStatus === 'PAID');
@@ -95,6 +98,7 @@ router.get('/payment/callback', async (req: Request, res: Response) => {
     const paid = isPaidStatus(status);
     // Rəy konsultasiyası ödənişidirsə seansı da təsdiqlə.
     if (consultCount > 0) await settleConsultation({ gatewayOrderId }, paid);
+    if (isFee) await settleBusinessFee({ gatewayOrderId }, paid);
 
     await prisma.order.updateMany({
       where: { gatewayOrderId },
@@ -155,7 +159,8 @@ router.get('/payment/yigim/callback', async (req: Request, res: Response) => {
   try {
     const order = await prisma.order.findFirst({ where: { gatewayRef: reference }, select: { id: true } });
     const consultCount = await prisma.consultationSession.count({ where: { gatewayRef: reference } });
-    if (!order && consultCount === 0) { res.status(404).send('not found'); return; }
+    const isFee = await isBusinessFeeRef({ gatewayRef: reference });
+    if (!order && consultCount === 0 && !isFee) { res.status(404).send('not found'); return; }
 
     // 1) Callback-in gəldiyini qeyd et (status endpoint-i bundan sonra icazəlidir).
     if (order) {
@@ -174,6 +179,7 @@ router.get('/payment/yigim/callback', async (req: Request, res: Response) => {
         // Alıcı "kartı yadda saxla" seçibsə şlüzün qaytardığı tokeni yaz.
         if (paid) await saveCardFromPayment(reference, raw).catch((e) => console.error('[card save]', e?.message));
         if (consultCount > 0) await settleConsultation({ gatewayRef: reference }, paid);
+        if (isFee) await settleBusinessFee({ gatewayRef: reference }, paid);
         console.log(`[yigim callback] ${reference} → status=${status} paid=${paid}`);
       } catch (e: any) {
         console.error('[yigim callback settle]', e?.message);
