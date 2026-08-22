@@ -22,7 +22,7 @@ const LISTINGS: Seed[] = [
   { title: 'Mahle hava filtri', category: 'Avtomobil ehtiyat hissələri › Filtrlər və yağlar', type: 'PRODUCT', price: 18, brand: 'Mahle', desc: 'Universal hava filtri, topdan mövcuddur.', weightKg: 0.5 },
   // ── Daşınmaz əmlak ──
   { title: '2 otaqlı mənzil, Nizami (kirayə)', category: 'Daşınmaz əmlak › Mənzillər (yeni tikili)', type: 'PRODUCT', price: 700, desc: 'Aylıq kirayə, təmirli, mərkəzdə.', forRent: true, imgs: 3 },
-  { title: 'Həyət evi, Mərdəkan', category: 'Daşınmaz əmlak › Evlər və villalar', type: 'PRODUCT', price: 180000, desc: '4 otaqlı həyət evi, hovuzlu.', imgs: 2 },
+  { title: 'Həyət evi, Mərdəkan', category: 'Daşınmaz əmlak › Həyət evi, villa və bağ evləri', type: 'PRODUCT', price: 180000, desc: '4 otaqlı həyət evi, hovuzlu.', imgs: 2 },
   // ── Elektronika ──
   { title: 'iPhone 14 Pro 128GB', category: 'Elektronika › Telefonlar', type: 'PRODUCT', price: 1800, brand: 'Apple', desc: 'İdeal vəziyyətdə, qutulu.', imgs: 3, weightKg: 0.4 },
   { title: 'Lenovo IdeaPad noutbuk', category: 'Elektronika › Noutbuklar', type: 'PRODUCT', price: 950, brand: 'Lenovo', desc: 'i5, 16GB RAM, SSD 512GB.', weightKg: 2 },
@@ -54,7 +54,7 @@ const LISTINGS: Seed[] = [
 
   // ── BRON / REZERVASİYA (yeni funksiya) ──
   { title: 'Şəhər mərkəzində restoran — masa rezervasiyası', category: 'Turizm, istirahət və məkan › Restoran və kafe', type: 'PRODUCT', price: 0, desc: 'Masa rezerv edin, axşam üçün yerinizi tutun.', bookable: true, bookingType: 'RESERVATION', imgs: 2 },
-  { title: 'Dəniz kənarı bağ evi (günlük)', category: 'Turizm, istirahət və məkan › Bağ evi və villa (günlük)', type: 'PRODUCT', price: 250, desc: 'Günlük kirayə, hovuz + mangal.', bookable: true, bookingType: 'STAY', imgs: 3 },
+  { title: 'Dəniz kənarı bağ evi (günlük)', category: 'Turizm, istirahət və məkan › Villa və bağ evi (bron)', type: 'PRODUCT', price: 250, desc: 'Günlük kirayə, hovuz + mangal.', bookable: true, bookingType: 'STAY', imgs: 3 },
   { title: 'Butik otel — gecələmə', category: 'Turizm, istirahət və məkan › Otel və mehmanxana', type: 'PRODUCT', price: 90, desc: 'Bir gecə, səhər yeməyi daxil.', bookable: true, bookingType: 'STAY', imgs: 2 },
 
   // ── XİDMƏTLƏR ──
