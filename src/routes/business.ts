@@ -82,7 +82,9 @@ router.get('/me/businesses', adminAuth, async (req: AuthRequest, res: Response) 
   try {
     await ensurePublicId(req.adminId!);
     const businesses = await prisma.business.findMany({
-      where: { userId: req.adminId },
+      // Silinmiş biznes istifadəçiyə görünmür; sətir bazada YALNIZ maliyyə
+      // tarixçəsi (bizim ona borcumuz) üçün qalır — admin panelində görünür.
+      where: { userId: req.adminId, deletedAt: null },
       include: {
         banks: true,
         objects: { include: { _count: { select: { listings: true } } } },
@@ -424,39 +426,92 @@ router.patch('/me/businesses/:id/active', adminAuth, async (req: AuthRequest, re
   }
 });
 
+// ── İstifadəçi öz biznesini silir ────────────────────────────────────────────
+// İKİ HAL VAR:
+//  1) Biznes hələ təsdiqlənməyib və heç bir hesablaşma sətri yoxdur →
+//     sətir bazadan TAM silinir, ödənilmiş haqq geri açılır.
+//  2) Təsdiqlənmiş / satışı olmuş biznes → sətir bazada QALIR (`deletedAt`),
+//     saytın heç bir yerində görünmür, elanlar arxivlənir, obyektlər bağlanır.
+//     Səbəb: "bizim bu biznesə nə qədər pul borcumuz var" məlumatı
+//     SellerLedger.businessId üzərindən gedir. Sətri silsək bu bağ qırılır
+//     (FK SetNull) və satıcıya nə qədər köçürməli olduğumuz itir.
+//     Silindikdən sonra da admin panelindəki "Biznes hesablaşması" ekranında
+//     borc görünür və ödəniş edilə bilir (IBAN da sətirdə qalır).
+//
+// Bitməmiş sifariş varsa silmək OLMAZ — alıcı ödəyib, malı gözləyir.
 router.delete('/me/businesses/:id', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
     const id = parseInt(req.params.id);
     const biz = await prisma.business.findUnique({ where: { id } });
     if (!biz || biz.userId !== req.adminId) { res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return; }
-    // Yalnız hələ TƏSDİQLƏNMƏMİŞ biznes silinə bilər.
-    //
-    // Təsdiqlənmiş biznesin arxasında satış, sifariş və hesablaşma dayanır.
-    // Sətri silmək SellerLedger.businessId-ni null edir (FK SetNull) — yəni
-    // "hansı biznesə nə qədər borcluyuq" itir; obyektlər FK Cascade ilə gedir,
-    // elanlar isə sahibsiz qalıb saytda görünməyə davam edir.
-    if (biz.status === 'APPROVED') {
+    if (biz.deletedAt) { res.json({ success: true, alreadyDeleted: true }); return; }
+
+    const objects = await prisma.businessObject.findMany({ where: { businessId: id }, select: { id: true } });
+    const objectIds = objects.map((o) => o.id);
+    const listingFilter = { OR: [{ businessId: id }, ...(objectIds.length ? [{ businessObjectId: { in: objectIds } }] : [])] };
+
+    // Bitməmiş sifarişlər — alıcı ödəyib/gözləyir. Əvvəlcə onlar bağlanmalıdır.
+    const openOrders = await prisma.order.count({
+      where: {
+        status: { notIn: ['DELIVERED', 'CANCELLED'] },
+        OR: [{ paymentMethod: { not: 'CARD' } }, { paymentStatus: 'PAID' }],
+        items: { some: { listing: listingFilter } },
+      },
+    });
+    if (openOrders > 0) {
       res.status(400).json({
         success: false,
-        message: 'Təsdiqlənmiş biznes silinmir — satış və hesablaşma tarixçəsi ona bağlıdır. Deaktiv edin və ya admindən silinməsini istəyin.',
+        message: `Bu biznesdə ${openOrders} bitməmiş sifariş var — əvvəlcə onları çatdırın və ya ləğv edin, sonra biznesi silin.`,
       });
       return;
     }
-    // Gözləmədə/rədd edilmiş biznesdə elan ola bilməz (elan yaratmaq üçün
-    // təsdiq tələb olunur), amma ehtiyat üçün yoxlayırıq.
-    const objIds = (await prisma.businessObject.findMany({ where: { businessId: id }, select: { id: true } })).map((o) => o.id);
-    const hasListings = await prisma.listing.count({
-      where: { OR: [{ businessId: id }, ...(objIds.length ? [{ businessObjectId: { in: objIds } }] : [])] },
+
+    // Hesablaşma sətirləri — bizim bu biznesə borcumuz (ödənilməmiş qazanc).
+    const owedRows = await prisma.sellerLedger.findMany({
+      where: { businessId: id, heldByPlatform: true, status: { in: ['PENDING', 'AVAILABLE'] }, clawbackNeeded: false },
+      select: { netAmount: true },
     });
-    if (hasListings > 0) {
-      res.status(400).json({ success: false, message: `Bu biznesə bağlı ${hasListings} elan var — əvvəlcə onları silin` });
+    const owed = Math.round(owedRows.reduce((sum, l) => sum + l.netAmount, 0) * 100) / 100;
+    const anyLedger = owedRows.length > 0 || (await prisma.sellerLedger.count({ where: { businessId: id } })) > 0;
+
+    // ── HAL 1: təsdiqlənməmiş və maliyyə tarixçəsi olmayan biznes → tam silinir
+    if (biz.status !== 'APPROVED' && !anyLedger) {
+      const hasListings = await prisma.listing.count({ where: listingFilter });
+      if (hasListings > 0) {
+        res.status(400).json({ success: false, message: `Bu biznesə bağlı ${hasListings} elan var — əvvəlcə onları silin` });
+        return;
+      }
+      // Ödənilmiş haqq bu biznesə xərclənmişdisə geri açılır — istifadəçi
+      // müraciətini ləğv edib yenidən göndərəndə ikinci dəfə ödəmir.
+      await releaseFee(id);
+      await prisma.business.delete({ where: { id } });
+      res.json({ success: true, removed: true, owed: 0 });
       return;
     }
-    // Ödənilmiş haqq bu biznesə xərclənmişdisə geri açılır — istifadəçi
-    // müraciətini ləğv edib yenidən göndərəndə ikinci dəfə ödəmir.
-    await releaseFee(id);
-    await prisma.business.delete({ where: { id } });
-    res.json({ success: true });
+
+    // ── HAL 2: yumşaq silmə — sətir maliyyə tarixçəsi üçün qalır
+    const now = new Date();
+    const archived = await prisma.$transaction(async (tx) => {
+      const del = await tx.listing.updateMany({
+        where: { ...listingFilter, status: { not: 'ARCHIVED' } },
+        data: { status: 'ARCHIVED', archivedAt: now },
+      });
+      await tx.businessObject.updateMany({ where: { businessId: id }, data: { deletedAt: now, isActive: false } });
+      await tx.business.update({ where: { id }, data: { deletedAt: now, isActive: false } });
+      return del.count;
+    });
+    // Başqa təsdiqlənmiş biznesi qalmadısa satıcı nişanı götürülür.
+    const stillApproved = await prisma.business.count({ where: { userId: biz.userId, status: 'APPROVED', deletedAt: null } });
+    if (stillApproved === 0) await prisma.user.update({ where: { id: biz.userId }, data: { sellerVerified: false } }).catch(() => {});
+
+    res.json({
+      success: true,
+      soft: true,
+      archivedListings: archived,
+      archivedObjects: objectIds.length,
+      // Borc qalıbsa istifadəçiyə deyilir: pul silinmədi, ödəniləcək.
+      owed,
+    });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }
@@ -736,7 +791,7 @@ router.get('/businesses/search', adminAuth, async (req: AuthRequest, res: Respon
     if (q.length < 2) { res.json({ success: true, businesses: [] }); return; }
     const businesses = await prisma.business.findMany({
       where: {
-        status: 'APPROVED', isActive: true,
+        status: 'APPROVED', isActive: true, deletedAt: null,
         OR: [
           { name: { contains: q, mode: 'insensitive' } },
           { voen: { contains: q } },
@@ -753,8 +808,8 @@ router.get('/businesses/search', adminAuth, async (req: AuthRequest, res: Respon
 router.post('/businesses/:id/join-request', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
     const businessId = parseInt(req.params.id);
-    const biz = await prisma.business.findUnique({ where: { id: businessId }, select: { userId: true, name: true, status: true, isActive: true } });
-    if (!biz || biz.status !== 'APPROVED' || !biz.isActive) { res.status(404).json({ success: false, message: 'Biznes tapılmadı və ya aktiv deyil' }); return; }
+    const biz = await prisma.business.findUnique({ where: { id: businessId }, select: { userId: true, name: true, status: true, isActive: true, deletedAt: true } });
+    if (!biz || biz.deletedAt || biz.status !== 'APPROVED' || !biz.isActive) { res.status(404).json({ success: false, message: 'Biznes tapılmadı və ya aktiv deyil' }); return; }
     if (biz.userId === req.adminId) { res.status(400).json({ success: false, message: 'Öz biznesinizə sorğu göndərə bilməzsiniz' }); return; }
     const existing = await prisma.businessMember.findFirst({ where: { businessId, userId: req.adminId! } });
     if (existing) {
@@ -821,7 +876,8 @@ router.put('/me/businesses/:id/members/:memberId', adminAuth, async (req: AuthRe
 router.get('/me/employment', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
     const memberships = await prisma.businessMember.findMany({
-      where: { userId: req.adminId! },
+      // Silinmiş biznes işçinin "İş yerim" bölməsində görünmür.
+      where: { userId: req.adminId!, business: { deletedAt: null } },
       include: {
         // objects — "bütün biznes" üzvlüyündə alış üçün obyekt seçiminə lazımdır.
         business: { select: { id: true, name: true, voen: true, objects: { select: { id: true, name: true }, where: { isActive: true } } } },
@@ -880,7 +936,7 @@ router.delete('/me/members/:id', adminAuth, async (req: AuthRequest, res: Respon
 router.get('/me/managed', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
     const memberships = await prisma.businessMember.findMany({
-      where: { userId: req.adminId, status: 'ACTIVE' },
+      where: { userId: req.adminId, status: 'ACTIVE', business: { deletedAt: null } },
       include: {
         business: { select: { id: true, name: true, isActive: true, status: true } },
         object: { select: { id: true, name: true } },

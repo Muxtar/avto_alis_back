@@ -668,7 +668,9 @@ router.get('/admin/payouts/businesses', requirePermission('finance_payouts'), as
     const bizIds = Array.from(new Set(Array.from(map.values()).map((r) => r.businessId).filter(Boolean))) as number[];
     const userIds = Array.from(new Set(Array.from(map.values()).filter((r) => !r.businessId).map((r) => r.sellerId)));
     const [bizzes, users] = await Promise.all([
-      bizIds.length ? prisma.business.findMany({ where: { id: { in: bizIds } }, select: { id: true, name: true, voen: true, banks: { where: { isActive: true }, select: { iban: true, title: true, isPrimary: true } } } }) : [],
+      // `deletedAt` də seçilir: biznes silinsə belə ona olan BORCUMUZ qalır və
+      // bu ekranda ödənilməlidir — sətirdə "silinib" nişanı göstərilir.
+      bizIds.length ? prisma.business.findMany({ where: { id: { in: bizIds } }, select: { id: true, name: true, voen: true, deletedAt: true, phone: true, ownerName: true, banks: { where: { isActive: true }, select: { iban: true, title: true, isPrimary: true } } } }) : [],
       userIds.length ? prisma.user.findMany({ where: { id: { in: userIds } }, select: { id: true, name: true, phone: true } }) : [],
     ]);
     const bById = new Map(bizzes.map((b) => [b.id, b]));
@@ -684,6 +686,10 @@ router.get('/admin/payouts/businesses', requirePermission('finance_payouts'), as
         name: b?.name || uById.get(r.sellerId)?.name || '—',
         voen: b?.voen || null,
         isBusiness: !!r.businessId,
+        // Sahibi biznesi silib — pulu yenə də ona köçürməliyik.
+        deleted: !!b?.deletedAt,
+        ownerName: b?.ownerName || null,
+        phone: b?.phone || uById.get(r.sellerId)?.phone || null,
         iban: acc?.iban || null, bankTitle: acc?.title || null,
         unpaid: r2(r.unpaid), pending: r2(r.pending),
         commission: r2(r.commission), gross: r2(r.gross), orders: r.orders,
@@ -737,7 +743,7 @@ router.get('/admin/payouts/businesses/:key', requirePermission('finance_payouts'
     });
 
     const [biz, seller, payouts] = await Promise.all([
-      isBiz ? prisma.business.findUnique({ where: { id }, select: { id: true, name: true, voen: true, banks: { where: { isActive: true }, select: { id: true, iban: true, title: true, isPrimary: true } } } }) : null,
+      isBiz ? prisma.business.findUnique({ where: { id }, select: { id: true, name: true, voen: true, deletedAt: true, phone: true, ownerName: true, banks: { where: { isActive: true }, select: { id: true, iban: true, title: true, isPrimary: true } } } }) : null,
       !isBiz ? prisma.user.findUnique({ where: { id }, select: { id: true, name: true, phone: true } }) : null,
       prisma.payout.findMany({ where: isBiz ? { businessId: id } : { sellerId: id }, orderBy: { createdAt: 'desc' }, take: 30 }),
     ]);
@@ -746,6 +752,8 @@ router.get('/admin/payouts/businesses/:key', requirePermission('finance_payouts'
     res.json({
       success: true, key, isBusiness: isBiz,
       name: biz?.name || seller?.name || '—', voen: biz?.voen || null,
+      deleted: !!biz?.deletedAt, deletedAt: biz?.deletedAt || null,
+      ownerName: biz?.ownerName || null, phone: biz?.phone || seller?.phone || null,
       iban: acc?.iban || null, bankTitle: acc?.title || null,
       bankAccounts: biz?.banks || [],
       lines, payouts,
