@@ -1111,6 +1111,29 @@ router.get('/admin/businesses', requirePermission('businesses'), async (req: Aut
 router.put('/admin/businesses/:id/approve', requirePermission('businesses'), async (req: AuthRequest, res: Response) => {
   try {
     const id = parseInt(req.params.id);
+    // ── SAHİBİN KİMLİYİ TƏSDİQLİDİRMİ ──
+    // Biznes yaradarkən bu şərt yoxlanılır, amma köhnə (qayda sərtləşməmişdən
+    // əvvəlki) müraciətlərdə sahibi təsdiqsiz ola bilər; həmçinin istifadəçi
+    // sonradan kimliyini silmiş ola bilər. Təsdiqsiz profilə biznes açmaq
+    // bütün kimlik yoxlamasını mənasız edir — ona görə admin bunu bilərək
+    // (?force=1) təsdiqləməlidir.
+    const target = await prisma.business.findUnique({
+      where: { id },
+      select: { userId: true, user: { select: { idVerifyStatus: true, name: true } } },
+    });
+    if (!target) { res.status(404).json({ success: false, message: 'Biznes tapılmadı' }); return; }
+    if (target.user.idVerifyStatus !== 'APPROVED' && String(req.query.force || '') !== '1') {
+      res.status(409).json({
+        success: false,
+        code: 'OWNER_ID_NOT_VERIFIED',
+        ownerStatus: target.user.idVerifyStatus || null,
+        message: `Bu biznesin sahibinin (${target.user.name || 'ad yoxdur'}) kimliyi təsdiqlənməyib${target.user.idVerifyStatus ? ` (status: ${target.user.idVerifyStatus})` : ''}. Profil Veriff ilə doğrulanmayınca təsdiq etmək tövsiyə olunmur — davam etmək üçün təsdiqləyin.`,
+      });
+      return;
+    }
+    if (target.user.idVerifyStatus !== 'APPROVED') {
+      console.warn(`[admin] biznes ${id} SAHİBİ TƏSDİQSİZ olduğu halda təsdiqləndi (admin ${req.adminName || req.adminId})`);
+    }
     const biz = await prisma.business.update({
       where: { id },
       // Təsdiq həm də AKTİVLƏŞDİRİR. Əvvəl yalnız `status` dəyişirdi; `isActive`

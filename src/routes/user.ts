@@ -109,6 +109,25 @@ router.post('/me/identity', adminAuth, identityUpload, processImages, async (req
 // Bundan sonra ad/FIN/doğum tarixi/cins yenidən əl ilə dəyişdirilə bilər (profil təsdiqlənməmiş olur).
 router.delete('/me/identity', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
+    // ── BİZNES VARSA KİMLİK SİLİNMİR ──
+    // Qayda: biznes yalnız TƏSDİQLƏNMİŞ profildə mövcud ola bilər. Əvvəl bu
+    // yoxlama yox idi: istifadəçi Veriff ilə təsdiqlənib biznes yaradır, sonra
+    // «Təsdiqi sil» basırdı — biznes qalırdı, profil isə təsdiqsiz olurdu.
+    // Admin panelində "Kimlik təsdiqlənməyib" yazılırdı, halbuki biznes canlı idi.
+    const liveBiz = await prisma.business.findMany({
+      where: { userId: req.adminId!, deletedAt: null, status: { in: ['APPROVED', 'PENDING'] } },
+      select: { id: true, name: true, status: true },
+    });
+    if (liveBiz.length > 0) {
+      res.status(409).json({
+        success: false,
+        code: 'BUSINESS_EXISTS',
+        businesses: liveBiz,
+        message: `Kimliyi silmək olmaz: ${liveBiz.map((b) => `«${b.name || 'ad təyin olunmayıb'}»`).join(', ')} biznesiniz var. Biznes yalnız təsdiqlənmiş profillə işləyir — əvvəlcə biznesi silin, sonra kimliyi qaldırın.`,
+      });
+      return;
+    }
+
     const me = await prisma.user.findUnique({
       where: { id: req.adminId! },
       select: { idCardImage: true, idCardBackImage: true, selfieImage: true, selfieRightImage: true, selfieLeftImage: true },
@@ -122,6 +141,11 @@ router.delete('/me/identity', adminAuth, async (req: AuthRequest, res: Response)
         idAiNameMatch: null, idAiNameScore: null, idAiFaceMatch: null, idAiFaceScore: null, idAiReason: null,
         idVerifyStatus: null,
         veriffSessionId: null, veriffStatus: null,
+        // Doğrulamadan gələn məlumatlar da silinir — əks halda profil
+        // "təsdiqlənməyib" görünür, amma FIN/doğum/cins dolu qalırdı və
+        // admin panelində təsdiqlənmiş kimi oxunurdu.
+        idNumber: null, birthDate: null, gender: null,
+        sellerVerified: false,
       },
     });
     // Faylları sil (best-effort).
