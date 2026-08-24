@@ -105,10 +105,25 @@ router.post('/me/identity', adminAuth, identityUpload, processImages, async (req
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
 
-// Kimliyi qaldır — şəkilləri + AI nəticələrini + təsdiq statusunu sıfırla.
-// Bundan sonra ad/FIN/doğum tarixi/cins yenidən əl ilə dəyişdirilə bilər (profil təsdiqlənməmiş olur).
+// Kimliyi qaldır — YALNIZ təsdiqlənməmiş (köhnə/yarımçıq) doğrulama üçün.
+//
+// TƏSDİQLƏNMİŞ KİMLİK SİLİNMİR: Veriff doğrulaması bitibsə profil həmişəlik
+// «doğrulanmış profil»dir (Facebook/Instagram təsdiqi kimi). Doğrulanmış
+// kimliyi silmək nə istifadəçiyə fayda verir, nə də bizə — əksinə, satış
+// tarixçəsi olan profil bir gecədə "təsdiqsiz" olurdu. İstifadəçi hesabından
+// tamamilə imtina etmək istəyirsə profil silmə axını üçündür, kimlik üçün yox.
 router.delete('/me/identity', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
+    const cur = await prisma.user.findUnique({ where: { id: req.adminId! }, select: { idVerifyStatus: true } });
+    if (cur?.idVerifyStatus === 'APPROVED') {
+      res.status(403).json({
+        success: false,
+        code: 'IDENTITY_FINAL',
+        message: 'Təsdiqlənmiş kimlik silinmir — profiliniz doğrulanmış profil olaraq qalır.',
+      });
+      return;
+    }
+
     // ── BİZNES VARSA KİMLİK SİLİNMİR ──
     // Qayda: biznes yalnız TƏSDİQLƏNMİŞ profildə mövcud ola bilər. Əvvəl bu
     // yoxlama yox idi: istifadəçi Veriff ilə təsdiqlənib biznes yaradır, sonra
