@@ -50,11 +50,18 @@ export async function refundOrderSafe(
   const order = await prisma.order.findUnique({ where: { id: orderId } });
   if (!order) return { ok: false, error: 'Sifariş tapılmadı' };
 
-  // Qaytarılacaq pul varmı?
-  if (order.paymentStatus === 'REFUNDED') return { ok: true, skipped: 'ALREADY_REFUNDED' };
+  // Qaytarılacaq pul varmı? QİSMƏN iadə nəzərə alınır: sifarişin qalıq
+  // (hələ qaytarılmamış) məbləği hesablanır. Əvvəl yalnız `paymentStatus`
+  // yoxlanılırdı — bir məhsul qaytarılan kimi sifariş REFUNDED olur və
+  // ikinci qismən iadə heç vaxt icra olunmurdu.
+  const alreadyRefunded = order.refundedAmount || 0;
+  const remaining = Math.round((order.total - alreadyRefunded) * 100) / 100;
+  if (order.paymentStatus === 'REFUNDED' || remaining <= 0.009) return { ok: true, skipped: 'ALREADY_REFUNDED' };
   if (order.paymentStatus !== 'PAID') return { ok: true, skipped: 'NOT_PAID' };
   if (!order.gatewayRef && !order.gatewayOrderId) return { ok: true, skipped: 'NO_GATEWAY' }; // nağd
-  const sum = amount ?? order.total;
+  // Qalıqdan çox qaytarmırıq (səhv/ikiqat tələb qorunması).
+  const sum = Math.round(Math.min(amount ?? remaining, remaining) * 100) / 100;
+  if (sum <= 0.009) return { ok: true, skipped: 'ALREADY_REFUNDED' };
 
   // ── QIFIL: şlüzə müraciətdən ƏVVƏL sətri yarat ──
   // orderId unikal olduğu üçün ikinci paralel sorğu burada dayanır.
@@ -67,18 +74,31 @@ export async function refundOrderSafe(
   } catch {
     // Sətir artıq var — ya bitib, ya da təkrar cəhddir.
     const existing = await prisma.refundAttempt.findUnique({ where: { orderId } });
-    if (existing?.status === 'DONE') return { ok: true, skipped: 'ALREADY_REFUNDED' };
     if (existing?.status === 'PENDING') return { ok: false, skipped: 'IN_PROGRESS', error: 'Qaytarma artıq gedir' };
-    // FAILED — yenidən cəhd edirik.
-    await prisma.refundAttempt.update({ where: { orderId }, data: { status: 'PENDING', amount: sum } });
+    // DONE olsa belə sifarişdə qalıq varsa NÖVBƏTİ qismən iadəyə icazə verilir
+    // (sətir yenidən PENDING olur; `amount` cari cəhdin məbləğidir).
+    await prisma.refundAttempt.update({
+      where: { orderId },
+      data: { status: 'PENDING', amount: sum, reason, doneAt: null, lastError: null },
+    });
     claimed = true;
   }
   if (!claimed) return { ok: false, error: 'Qaytarma başladıla bilmədi' };
 
   try {
     await gatewayRefundOrder(order as any, sum);
+    const totalRefunded = Math.round((alreadyRefunded + sum) * 100) / 100;
+    const fullyRefunded = totalRefunded >= Math.round(order.total * 100) / 100 - 0.009;
     await prisma.$transaction([
-      prisma.order.update({ where: { id: orderId }, data: { paymentStatus: 'REFUNDED', gatewayStatus: 'Refunded' } }),
+      prisma.order.update({
+        where: { id: orderId },
+        data: {
+          refundedAmount: totalRefunded,
+          // Yalnız TAM qaytarılanda status dəyişir; qismən halda sifariş
+          // "ödənilmiş" qalır ki, satıcı qalan malların pulunu itirməsin.
+          ...(fullyRefunded ? { paymentStatus: 'REFUNDED' as const, gatewayStatus: 'Refunded' } : { gatewayStatus: 'PartiallyRefunded' }),
+        },
+      }),
       prisma.refundAttempt.update({
         where: { orderId },
         data: { status: 'DONE', doneAt: new Date(), lastError: null, attempts: { increment: 1 } },

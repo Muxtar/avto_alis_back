@@ -49,12 +49,18 @@ export function adminPhoneList(): string[] {
 }
 // Nömrə admin siyahısındadırmı? Format-dan asılı olmamaq üçün son 9 rəqəmlə
 // (milli nömrə) müqayisə edilir — +994, boşluq, 0 prefiksi fərqi problem olmasın.
-export function isAdminPhone(phone: string | null | undefined): boolean {
-  if (!phone) return false;
+// Nömrələr YALNIZ milli hissəyə (son 9 rəqəm) görə TAM müqayisə olunur.
+// Əvvəl `endsWith` işlədilirdi: siyahıda 7 rəqəmli qeyd olsaydı, həmin 7 rəqəmlə
+// bitən İSTƏNİLƏN nömrə (başqa ölkə də daxil) super-admin sayıla bilərdi.
+export function nationalPhone(phone: string | null | undefined): string | null {
+  if (!phone) return null;
   const d = String(phone).replace(/\D/g, '');
-  if (d.length < 7) return false;
-  const tail = d.slice(-9);
-  return adminPhoneList().some((a) => a === d || a.endsWith(tail) || d.endsWith(a.slice(-9)));
+  return d.length >= 9 ? d.slice(-9) : null;
+}
+export function isAdminPhone(phone: string | null | undefined): boolean {
+  const n = nationalPhone(phone);
+  if (!n) return false;
+  return adminPhoneList().some((a) => nationalPhone(a) === n);
 }
 
 // ── ADMİN PANELİNƏ GİRİŞ İCAZƏSİ ────────────────────────────────────────────
@@ -75,11 +81,9 @@ export function adminLoginPhoneList(): string[] {
   return [...adminPhoneList(), ...extra];
 }
 function matchesAny(phone: string | null | undefined, list: string[]): boolean {
-  if (!phone) return false;
-  const d = String(phone).replace(/\D/g, '');
-  if (d.length < 7) return false;
-  const tail = d.slice(-9);
-  return list.some((a) => a === d || a.endsWith(tail) || d.endsWith(a.slice(-9)));
+  const n = nationalPhone(phone);
+  if (!n) return false;
+  return list.some((a) => nationalPhone(a) === n);
 }
 // Bu nömrə ümumiyyətlə admin panelinə giriş cəhdi edə bilərmi?
 export function canAdminLogin(phone: string | null | undefined): boolean {
@@ -265,10 +269,18 @@ export type AdminModule = typeof ADMIN_MODULES[number];
 async function loadAdmin(req: AuthRequest, res: Response): Promise<{ id: number; isSuper: boolean; perms: string[] } | null> {
   const token = req.headers.authorization?.replace('Bearer ', '');
   if (!token) { res.status(401).json({ success: false, message: 'Token tələb olunur' }); return null; }
-  let decoded: { userId: number };
-  try { decoded = jwt.verify(token, SIGNING_KEY) as { userId: number }; }
+  let decoded: { userId: number; sid?: string };
+  try { decoded = jwt.verify(token, SIGNING_KEY) as { userId: number; sid?: string }; }
   catch { res.status(401).json({ success: false, message: 'Etibarsız token' }); return null; }
+  // Cihaz uzaqdan çıxarılıbsa admin endpointləri də bağlanmalıdır. Əvvəl bu
+  // yoxlama yalnız istifadəçi endpointlərində vardı: ləğv edilmiş admin cihazı
+  // token bitənə qədər (90 gün) panelə müraciət edə bilirdi.
+  if (!(await isSessionActive(decoded.sid))) {
+    res.status(401).json({ success: false, message: 'Bu cihazın girişi bağlanıb', sessionRevoked: true });
+    return null;
+  }
   req.adminId = decoded.userId;
+  req.sessionId = decoded.sid;
   const user = await prisma.user.findUnique({ where: { id: decoded.userId }, select: { role: true, phone: true, name: true, adminPermissions: true, isBlocked: true } });
   if (!user || user.role !== 'ADMIN' || user.isBlocked) {
     res.status(403).json({ success: false, message: 'Admin icazəsi tələb olunur' }); return null;
@@ -290,14 +302,19 @@ export function requireAdmin(req: AuthRequest, res: Response, next: NextFunction
 
 // Modul-səviyyəli icazə: super-admin hər şeyə, adi admin yalnız təyin olunmuş
 // modula girə bilər. İstifadə: router.get('/admin/x', requirePermission('listings'), ...)
+// İcazəsi TƏYİN EDİLMƏMİŞ (boş siyahı) admin köhnə/konfiqurasiya olunmamış
+// sayılır və adi modullara girə bilir — RBAC-dan əvvəlki adminlər bloklanmasın.
+// LAKİN pul və hesab təhlükəsizliyinə toxunan modullar bura daxil DEYİL:
+// yeni admin yaradılıb modul seçilməsə, o adam maliyyəyə və satıcı ödənişlərinə
+// də çıxış qazanırdı. Bunlar yalnız AÇIQ verilmiş icazə ilə açılır.
+export const SENSITIVE_MODULES: AdminModule[] = ['finance', 'finance_payouts', 'users', 'settings', 'audit', 'admins'];
+
 export function requirePermission(module: AdminModule) {
   return (req: AuthRequest, res: Response, next: NextFunction) => {
     loadAdmin(req, res).then((a) => {
       if (!a) return;
-      // İcazəsi TƏYİN EDİLMƏMİŞ admin (boş siyahı) köhnə/konfiqurasiya olunmamış
-      // sayılır və hər şeyə icazəlidir — RBAC-dan əvvəlki adminlər bloklanmasın.
-      // Yalnız super-admin başqasına konkret modul verəndə (siyahı dolur) məhdudlaşır.
-      if (a.isSuper || a.perms.length === 0 || a.perms.includes(module)) { next(); return; }
+      const unconfiguredOk = a.perms.length === 0 && !SENSITIVE_MODULES.includes(module);
+      if (a.isSuper || unconfiguredOk || a.perms.includes(module)) { next(); return; }
       res.status(403).json({ success: false, message: 'Bu bölmə üçün icazəniz yoxdur' });
     }).catch(() => { if (!res.headersSent) res.status(403).json({ success: false, message: 'İcazə yoxdur' }); });
   };

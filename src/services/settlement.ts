@@ -50,7 +50,7 @@ export async function recordSettlement(orderId: number): Promise<void> {
       where: { id: orderId },
       select: {
         id: true, sellerId: true, buyerId: true, total: true, status: true,
-        paymentStatus: true, paymentMethod: true,
+        paymentStatus: true, paymentMethod: true, refundedAmount: true,
         // Hesablaşma BİZNES üzrə qruplaşdırılır — ödəniş biznesin bank hesabına gedir.
         items: { select: { listing: { select: { businessId: true } } }, take: 1 },
       },
@@ -76,9 +76,14 @@ export async function recordSettlement(orderId: number): Promise<void> {
     const holdDays = delivered ? await getPayoutHoldDays() : 0;
     const availableAt = delivered ? new Date(Date.now() + holdDays * 24 * 60 * 60 * 1000) : null;
 
+    // QİSMƏN İADƏ: qaytarılan hissə satıcının qazancından çıxılır.
+    // (Tam iadədə status onsuz da REVERSED olur.)
+    const refunded = order.refundedAmount || 0;
+    const effectiveGross = Math.max(0, Math.round(((order.total || 0) - refunded) * 100) / 100);
+
     if (!existing) {
       const rate = await getCommissionPercent();
-      const gross = order.total || 0;
+      const gross = effectiveGross;
       const commission = Math.round(gross * rate) / 100;
       const net = Math.round((gross - commission) * 100) / 100;
       await prisma.sellerLedger.create({
@@ -116,6 +121,15 @@ export async function recordSettlement(orderId: number): Promise<void> {
     const nextStatus = delivered && holdDays > 0 ? 'PENDING' : targetStatus;
     const patch: any = {};
     if (existing.status !== nextStatus) patch.status = nextStatus;
+    // Qismən iadədən sonra məbləğlər yenidən hesablanır — satıcıya yalnız
+    // qaytarılmayan hissənin qazancı ödənilir.
+    if (!reversed && Math.abs(existing.grossAmount - effectiveGross) > 0.009) {
+      const commission = Math.round(effectiveGross * existing.commissionRate) / 100;
+      patch.grossAmount = effectiveGross;
+      patch.commission = commission;
+      patch.netAmount = Math.round((effectiveGross - commission) * 100) / 100;
+      console.log(`[settlement] sifariş #${order.id}: qismən iadə (${refunded} AZN) → satıcı qazancı ${patch.netAmount} AZN oldu`);
+    }
     if (delivered && !existing.availableAt) patch.availableAt = availableAt;
     if (reversed) patch.availableAt = null;
     if (Object.keys(patch).length) await prisma.sellerLedger.update({ where: { orderId }, data: patch });

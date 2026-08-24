@@ -632,6 +632,11 @@ model Order {
   scheduledAt         DateTime? // ileri tarihli siparis
   paymentMethod       PaymentMethod   @default(CASH)
   paymentStatus       PaymentStatus   @default(PENDING)
+  // QİSMƏN İADƏ: indiyə qədər alıcıya qaytarılmış cəm məbləğ. `paymentStatus`
+  // yalnız TAM qaytarılanda REFUNDED olur — əks halda 3 məhsuldan biri
+  // qaytarılanda bütün sifariş "iadə edilmiş" sayılırdı (satıcı qalan malların
+  // pulunu itirirdi, ikinci qismən iadə isə ümumiyyətlə icra olunmurdu).
+  refundedAmount      Float           @default(0)
   // Kapital Bank ödəniş şlüzü — kart ödənişində bir checkout-dakı bütün
   // order-lər eyni gatewayOrderId-ni paylaşır (müştəri bir dəfə ödəyir).
   gatewayOrderId      Int?

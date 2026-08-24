@@ -1,7 +1,7 @@
 import { Router, Response } from 'express';
 import { PrismaClient, Prisma, UserType } from '@prisma/client';
 import bcrypt from 'bcryptjs';
-import { adminAuth, requireAdmin, requirePermission, requireSuperAdmin, AuthRequest, generateToken, isAdminPhone, ADMIN_MODULES, canAdminLogin } from '../middleware/auth';
+import { adminAuth, requireAdmin, requirePermission, requireSuperAdmin, AuthRequest, generateToken, isAdminPhone, ADMIN_MODULES, SENSITIVE_MODULES, canAdminLogin, nationalPhone } from '../middleware/auth';
 import { authLimiter } from '../middleware/rateLimiter';
 import { createOtp } from '../services/otp';
 import { refund as kapitalRefund } from '../services/kapital';
@@ -129,7 +129,11 @@ router.post('/admin/login/phone', authLimiter, async (req: AuthRequest, res: Res
     const digits = raw.replace(/\D/g, '');
     const tail = digits.slice(-9);
     const superAdmin = isAdminPhone(raw);
-    let user = await prisma.user.findFirst({ where: { phone: { contains: tail } } });
+    // Nömrə formatları müxtəlif saxlanıla bilər (+994.., 0.., boşluqlu), ona görə
+    // əvvəlcə son 9 rəqəmə görə namizədlər tapılır, sonra TAM (milli hissə)
+    // müqayisə edilir — `contains` tək başına yanlış hesabı seçə bilərdi.
+    const candidates = await prisma.user.findMany({ where: { phone: { contains: tail } }, take: 20 });
+    let user = candidates.find((c) => nationalPhone(c.phone) === tail) || null;
 
     if (superAdmin) {
       // SUPER-ADMIN (ADMIN_PHONES): yoxdursa yaradılır, varsa admin edilir.
@@ -418,17 +422,89 @@ router.get('/admin/analytics/advanced', requireAdmin, async (_req: AuthRequest, 
 });
 
 // ── Toplu əməliyyatlar (bulk) ────────────────────────────────────────────────
+
+// ── İSTİFADƏÇİNİN TƏHLÜKƏSİZ SİLİNMƏSİ ──────────────────────────────────────
+// Həm tək (DELETE /admin/users/:id), həm toplu silmə bu funksiyadan keçir:
+//   1) ödəniş ünvanının arxivi götürülür (borc ödənilə bilsin),
+//   2) asılı sətirlər açıq şəkildə, düzgün sırayla silinir.
+async function unpaidOwed(userId: number): Promise<number> {
+  const rows = await prisma.sellerLedger.findMany({
+    where: { sellerId: userId, heldByPlatform: true, status: { in: ['PENDING', 'AVAILABLE'] }, clawbackNeeded: false },
+    select: { netAmount: true },
+  });
+  return Math.round(rows.reduce((s, l) => s + l.netAmount, 0) * 100) / 100;
+}
+
+async function deleteUserSafely(U: number, adminName?: string): Promise<{ archived: number; owed: number }> {
+  const archived = await archiveUserPayees(U).catch(() => 0);
+  const owed = await unpaidOwed(U);
+  if (owed > 0) console.warn(`[admin] user ${U} silinir — ödənilməmiş borc ${owed} AZN ödəniş ekranında qalır (admin ${adminName || '?'})`);
+  await prisma.$transaction(async (tx) => {
+    await tx.order.updateMany({ where: { courierId: U }, data: { courierId: null } });
+    await tx.order.updateMany({ where: { referrerId: U }, data: { referrerId: null } });
+    await tx.messageReaction.deleteMany({ where: { userId: U } });
+    await tx.returnRequest.deleteMany({ where: { OR: [{ buyerId: U }, { sellerId: U }] } });
+    await tx.inquiryOffer.deleteMany({ where: { sellerId: U } });
+    await tx.inquiryTarget.deleteMany({ where: { sellerId: U } });
+    await tx.sellerRating.deleteMany({ where: { OR: [{ sellerId: U }, { buyerId: U }] } });
+    await tx.comment.deleteMany({ where: { userId: U } });
+    await tx.conversationMember.deleteMany({ where: { userId: U } });
+    await tx.referralCart.deleteMany({ where: { referrerId: U } });
+    await tx.consultationOffer.deleteMany({ where: { userId: U } });
+    await tx.consultationSession.deleteMany({ where: { OR: [{ buyerId: U }, { professionalId: U }] } });
+    await tx.order.deleteMany({ where: { OR: [{ buyerId: U }, { sellerId: U }] } });
+    await tx.inquiry.deleteMany({ where: { buyerId: U } });
+    await tx.message.deleteMany({ where: { OR: [{ senderId: U }, { receiverId: U }] } });
+    await tx.cart.deleteMany({ where: { userId: U } });
+    await tx.sharedCart.deleteMany({ where: { userId: U } });
+    await tx.booking.deleteMany({ where: { OR: [{ guestId: U }, { hostId: U }] } });
+    await tx.complaint.deleteMany({ where: { OR: [{ complainantId: U }, { targetUserId: U }] } });
+    await tx.listing.deleteMany({ where: { userId: U } });
+    await tx.business.deleteMany({ where: { userId: U } });
+    await tx.vehicle.deleteMany({ where: { userId: U } });
+    await tx.workplace.deleteMany({ where: { userId: U } });
+    await tx.verificationCode.deleteMany({ where: { userId: U } });
+    await tx.phoneNumber.deleteMany({ where: { userId: U } });
+    await tx.emailVerification.deleteMany({ where: { userId: U } });
+    await tx.socialLink.deleteMany({ where: { userId: U } });
+    await tx.professionDocument.deleteMany({ where: { userId: U } });
+    await tx.favorite.deleteMany({ where: { userId: U } });
+    await tx.savedAddress.deleteMany({ where: { userId: U } });
+    await tx.sellerVerification.deleteMany({ where: { userId: U } });
+    await tx.notification.deleteMany({ where: { userId: U } });
+    await tx.businessMember.deleteMany({ where: { userId: U } });
+    await tx.contact.deleteMany({ where: { ownerId: U } });
+    await tx.session.deleteMany({ where: { userId: U } });
+    await tx.user.delete({ where: { id: U } });
+  }, { timeout: 20000 });
+  return { archived, owed };
+}
+
 router.post('/admin/listings/bulk', requirePermission('listings'), async (req: AuthRequest, res: Response) => {
   try {
     const ids = (Array.isArray(req.body?.ids) ? req.body.ids : []).map((x: any) => parseInt(String(x))).filter((n: number) => !Number.isNaN(n)).slice(0, 500);
     const action = String(req.body?.action || '');
     if (!ids.length) { res.status(400).json({ success: false, message: 'Elan seçilməyib' }); return; }
     let count = 0;
+    let archivedCount = 0;
     if (action === 'approve') count = (await prisma.listing.updateMany({ where: { id: { in: ids } }, data: { status: 'APPROVED' } })).count;
     else if (action === 'reject') count = (await prisma.listing.updateMany({ where: { id: { in: ids } }, data: { status: 'REJECTED' } })).count;
-    else if (action === 'delete') count = (await prisma.listing.deleteMany({ where: { id: { in: ids } } })).count;
+    else if (action === 'delete') {
+      // Sifarişdə keçən elanlar silinmir — arxivlənir (sifariş sətirləri qorunur).
+      const sold = await prisma.orderItem.findMany({ where: { listingId: { in: ids } }, select: { listingId: true }, distinct: ['listingId'] });
+      const soldIds = new Set(sold.map((x) => x.listingId));
+      const deletable = ids.filter((n: number) => !soldIds.has(n));
+      if (soldIds.size) {
+        const arch = await prisma.listing.updateMany({ where: { id: { in: Array.from(soldIds) } }, data: { status: 'ARCHIVED', archivedAt: new Date() } });
+        archivedCount = arch.count;
+      }
+      count = deletable.length ? (await prisma.listing.deleteMany({ where: { id: { in: deletable } } })).count : 0;
+    }
     else { res.status(400).json({ success: false, message: 'Yanlış əməliyyat' }); return; }
-    res.json({ success: true, count });
+    res.json({
+      success: true, count, archived: archivedCount,
+      ...(archivedCount ? { message: `${count} elan silindi, ${archivedCount} elan sifarişdə keçdiyi üçün arxivləndi.` } : {}),
+    });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
 
@@ -446,7 +522,26 @@ router.post('/admin/users/bulk', requirePermission('users'), async (req: AuthReq
     let count = 0;
     if (action === 'block') count = (await prisma.user.updateMany({ where: { id: { in: targetIds } }, data: { isBlocked: true } })).count;
     else if (action === 'unblock') count = (await prisma.user.updateMany({ where: { id: { in: targetIds } }, data: { isBlocked: false } })).count;
-    else if (action === 'delete') count = (await prisma.user.deleteMany({ where: { id: { in: targetIds } } })).count;
+    else if (action === 'delete') {
+      // ── TOPLU SİLMƏ ARTIQ "deleteMany" DEYİL ──
+      // Əvvəl bir sətirlə silinirdi: ödəniş ünvanının arxivi götürülmür,
+      // ödənilməmiş borc barədə xəbərdarlıq edilmirdi, sifarişlər isə kaskadla
+      // yox olurdu. İndi hər istifadəçi tək-tək eyni təhlükəsiz axından keçir.
+      const skipped: { id: number; owed: number }[] = [];
+      for (const uid of targetIds) {
+        const owed = await unpaidOwed(uid);
+        if (owed > 0 && String(req.body?.force || '') !== '1') { skipped.push({ id: uid, owed }); continue; }
+        await deleteUserSafely(uid, req.adminName);
+        count++;
+      }
+      if (skipped.length) {
+        res.status(409).json({
+          success: false, needsConfirm: true, deleted: count, skipped,
+          message: `${skipped.length} istifadəçiyə ödənilməmiş borcumuz var (${skipped.map((x) => `#${x.id}: ${x.owed} AZN`).join(', ')}). Hesab silinsə də borc ödəniş ekranında qalır — davam etmək üçün təsdiqləyin.`,
+        });
+        return;
+      }
+    }
     else { res.status(400).json({ success: false, message: 'Yanlış əməliyyat' }); return; }
     res.json({ success: true, count });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
@@ -480,9 +575,23 @@ router.get('/admin/finance/:orderId', requirePermission('finance'), async (req: 
 router.delete('/admin/finance/:orderId', requirePermission('finance'), async (req: AuthRequest, res: Response) => {
   try {
     const id = parseInt(String(req.params.orderId));
-    const order = await prisma.order.findUnique({ where: { id }, select: { id: true } });
+    const order = await prisma.order.findUnique({ where: { id }, select: { id: true, paymentStatus: true, total: true } });
     if (!order) { res.status(404).json({ success: false, message: 'Sifariş tapılmadı' }); return; }
-    await prisma.sellerLedger.deleteMany({ where: { orderId: id } }).catch(() => {});
+
+    // ── MALİYYƏ TARİXÇƏSİ SİLİNMİR ──
+    // Əvvəl bu endpoint sifarişlə birlikdə SellerLedger sətrini də silirdi:
+    // satıcıya olan borcumuz və ödəniş tarixçəsi izsiz yox olurdu (ödənilmiş
+    // sətir üçün Payout yetim qalırdı). Ödənilmiş və ya hesablaşması olan
+    // sifariş yalnız uçotda qalmalıdır.
+    const ledger = await prisma.sellerLedger.findUnique({ where: { orderId: id }, select: { status: true, netAmount: true } });
+    if (order.paymentStatus === 'PAID' || order.paymentStatus === 'REFUNDED' || ledger) {
+      res.status(409).json({
+        success: false,
+        code: 'FINANCIAL_RECORD',
+        message: `Bu sifariş silinmir — maliyyə qeydi var (ödəniş: ${order.paymentStatus}${ledger ? `, hesablaşma: ${ledger.status}, ${ledger.netAmount} AZN` : ''}). Uçotun bütövlüyü üçün sifariş saxlanılır; lazım gələrsə statusunu «Ləğv edildi» edin.`,
+      });
+      return;
+    }
     await prisma.order.delete({ where: { id } });   // OrderItem/returnRequest cascade ilə silinir
     res.json({ success: true });
   } catch (error: any) {
@@ -822,32 +931,48 @@ router.post('/admin/payouts/businesses/:key/pay', requirePermission('finance_pay
     }
 
     const amount = Math.round(ledgers.reduce((s, l) => s + l.netAmount, 0) * 100) / 100;
-    const sellerId = ledgers[0].sellerId;
     let iban: string | null = null;
     if (isBiz) {
       const acc = await prisma.bankAccount.findFirst({ where: { businessId: id, isActive: true }, orderBy: { isPrimary: 'desc' }, select: { iban: true } });
-      iban = acc?.iban || null;
+      // Hesab silinibsə bank sətri də yoxdur — ödəniş ünvanının arxiv surətindən götürülür.
+      iban = acc?.iban || ledgers.find((l) => l.payeeIban)?.payeeIban || null;
     }
 
-    const payout = await prisma.$transaction(async (tx) => {
-      const p = await tx.payout.create({
-        data: {
-          sellerId, businessId: isBiz ? id : null, iban,
-          amount,
-          method: req.body?.method ? String(req.body.method).slice(0, 40) : 'BANK',
-          reference: req.body?.reference ? String(req.body.reference).slice(0, 200) : null,
-          createdById: req.adminId!, createdName: req.adminName || 'Admin',
-        },
-      });
-      await tx.sellerLedger.updateMany({ where: { id: { in: ledgers.map((l) => l.id) } }, data: { status: 'PAID_OUT', payoutId: p.id } });
-      return p;
+    // ── HƏR SATICI ÜÇÜN AYRICA ÖDƏNİŞ QEYDİ ──
+    // Bir biznesdə bir neçə işçi sata bilər; əvvəl bütün məbləğ `ledgers[0]`-ın
+    // sahibinə yazılırdı və qalanların "qazancım" tarixçəsi natamam qalırdı.
+    const bySeller = new Map<number, typeof ledgers>();
+    for (const l of ledgers) {
+      const arr = bySeller.get(l.sellerId) || [];
+      arr.push(l);
+      bySeller.set(l.sellerId, arr);
+    }
+    const method = req.body?.method ? String(req.body.method).slice(0, 40) : 'BANK';
+    const reference = req.body?.reference ? String(req.body.reference).slice(0, 200) : null;
+
+    const payouts = await prisma.$transaction(async (tx) => {
+      const created = [];
+      for (const [sellerId, rows] of bySeller) {
+        const sum = Math.round(rows.reduce((acc, l) => acc + l.netAmount, 0) * 100) / 100;
+        const p = await tx.payout.create({
+          data: {
+            sellerId, businessId: isBiz ? id : null, iban, amount: sum, method, reference,
+            createdById: req.adminId!, createdName: req.adminName || 'Admin',
+          },
+        });
+        await tx.sellerLedger.updateMany({ where: { id: { in: rows.map((l) => l.id) } }, data: { status: 'PAID_OUT', payoutId: p.id } });
+        created.push({ payout: p, count: rows.length });
+      }
+      return created;
     });
 
-    await prisma.notification.create({
-      data: { userId: sellerId, type: 'SYSTEM', title: 'Ödəniş edildi 💸', body: `${amount} AZN bank hesabınıza köçürüldü (${ledgers.length} sifariş).`, link: '/earnings' },
-    }).catch(() => {});
+    for (const { payout: p, count } of payouts) {
+      await prisma.notification.create({
+        data: { userId: p.sellerId, type: 'SYSTEM', title: 'Ödəniş edildi 💸', body: `${p.amount} AZN bank hesabınıza köçürüldü (${count} sifariş).`, link: '/earnings' },
+      }).catch(() => {});
+    }
 
-    res.json({ success: true, payout, paidCount: ledgers.length, amount });
+    res.json({ success: true, payout: payouts[0]?.payout, payouts: payouts.map((x) => x.payout), paidCount: ledgers.length, amount });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
 
@@ -865,7 +990,7 @@ router.post('/admin/payouts/:id/reverse', requirePermission('finance_payouts'), 
     const reason = String(req.body?.reason || '').trim().slice(0, 300);
     if (!reason) { res.status(400).json({ success: false, message: 'Səbəb yazılmalıdır' }); return; }
 
-    const ledgers = await prisma.sellerLedger.findMany({ where: { payoutId: id }, select: { id: true } });
+    const ledgers = await prisma.sellerLedger.findMany({ where: { payoutId: id }, select: { id: true, orderId: true } });
     await prisma.$transaction(async (tx) => {
       await tx.sellerLedger.updateMany({
         where: { id: { in: ledgers.map((l) => l.id) } },
@@ -876,6 +1001,10 @@ router.post('/admin/payouts/:id/reverse', requirePermission('finance_payouts'), 
         data: { reversedAt: new Date(), reversedById: req.adminId!, reversedName: req.adminName || 'Admin', reversedReason: reason },
       });
     });
+    // Sətirləri şərtsiz AVAILABLE etmək düz deyil: sifariş bu arada ləğv/iadə
+    // olubsa pul yenidən ödəniş növbəsinə düşərdi. Hesablaşma hər sifariş üçün
+    // yenidən hesablanır və düzgün statusu özü təyin edir.
+    for (const l of ledgers) await recordSettlement(l.orderId).catch(() => {});
     console.warn(`[payouts] GERİ ALINDI: payout ${id}, ${payout.amount} AZN, ${ledgers.length} sətir, admin ${req.adminName}`);
     res.json({ success: true, restored: ledgers.length, amount: payout.amount });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
@@ -1003,9 +1132,12 @@ router.get('/admin/me', requireAdmin, async (req: AuthRequest, res: Response) =>
     // İcazəsi təyin edilməmiş (boş) admin köhnə/konfiqurasiya olunmamış sayılır —
     // 'admins' (yalnız super-admin) xaric hər modula girişi var (kimsə bloklanmasın).
     const unconfigured = !req.isSuperAdmin && perms.length === 0;
+    // Sidebar server icazəsi ilə eyni olmalıdır: icazəsi təyin edilməmiş admin
+    // HƏSSAS modulları (maliyyə, ödənişlər, istifadəçilər, tənzimləmə, audit,
+    // adminlər) görmür — onlar yalnız açıq verilən icazə ilə açılır.
     const effective = req.isSuperAdmin
       ? [...ADMIN_MODULES]
-      : unconfigured ? ADMIN_MODULES.filter((m) => m !== 'admins') : perms;
+      : unconfigured ? ADMIN_MODULES.filter((m) => !SENSITIVE_MODULES.includes(m)) : perms;
     res.json({
       success: true,
       id: me?.id, name: me?.name, avatar: me?.avatar,
@@ -1382,78 +1514,18 @@ router.delete('/admin/users/:id', requirePermission('users'), async (req: AuthRe
       res.status(403).json({ success: false, message: 'Öz hesabınızı silə bilməzsiniz' });
       return;
     }
-    const U = targetId;
-    // ── BORCUMUZ İTMİR ──
-    // Hesab silinsə də bizim bu satıcıya ödəyəcəyimiz pul qalır. Business və
-    // bank hesabları kaskadla silindiyi üçün ödəniş məlumatının (ad, VÖEN,
-    // telefon, IBAN) surətini ƏVVƏLCƏ hesablaşma sətirlərinə yazırıq.
-    const archived = await archiveUserPayees(U).catch(() => 0);
-    const owedRows = await prisma.sellerLedger.findMany({
-      where: { sellerId: U, heldByPlatform: true, status: { in: ['PENDING', 'AVAILABLE'] }, clawbackNeeded: false },
-      select: { netAmount: true },
-    });
-    const owed = Math.round(owedRows.reduce((s, l) => s + l.netAmount, 0) * 100) / 100;
     // Ödənilməmiş borc varsa admin bunu bilərək təsdiqləməlidir: hesab silinir,
     // borc isə ödəniş ekranında "hesab silinib" nişanı ilə qalır.
+    const owed = await unpaidOwed(targetId);
     if (owed > 0 && String(req.query.force || '') !== '1') {
       res.status(409).json({
-        success: false,
-        needsConfirm: true,
-        owed,
-        ledgerRows: owedRows.length,
-        message: `Bu satıcıya ödənilməmiş ${owed} AZN borcumuz var (${owedRows.length} sətir). Hesab silinsə də borc ödəniş ekranında qalacaq — davam etmək üçün təsdiqləyin.`,
+        success: false, needsConfirm: true, owed,
+        message: `Bu satıcıya ödənilməmiş ${owed} AZN borcumuz var. Hesab silinsə də borc ödəniş ekranında qalacaq — davam etmək üçün təsdiqləyin.`,
       });
       return;
     }
-    if (owed > 0) console.warn(`[admin] user ${U} silinir — ödənilməmiş borc ${owed} AZN (${owedRows.length} sətir) ödəniş ekranında qalır`);
-
-    // Açıq (explicit) cascade — DB-dəki FK onDelete "NO ACTION" qalmışsa belə
-    // (köhnə db push) silmə işləsin deyə bütün asılı qeydləri sıra ilə silirik.
-    await prisma.$transaction(async (tx) => {
-      // SetNull tərəflər: bu istifadəçi kuryer/referrer olan sifarişlərdə əlaqəni sıfırla
-      await tx.order.updateMany({ where: { courierId: U }, data: { courierId: null } });
-      await tx.order.updateMany({ where: { referrerId: U }, data: { referrerId: null } });
-      // 1) Başqa entity-lərə istinad edən uşaq cədvəllər (əvvəl silinir)
-      await tx.messageReaction.deleteMany({ where: { userId: U } });
-      await tx.returnRequest.deleteMany({ where: { OR: [{ buyerId: U }, { sellerId: U }] } });
-      await tx.inquiryOffer.deleteMany({ where: { sellerId: U } });
-      await tx.inquiryTarget.deleteMany({ where: { sellerId: U } });
-      await tx.sellerRating.deleteMany({ where: { OR: [{ sellerId: U }, { buyerId: U }] } });
-      await tx.comment.deleteMany({ where: { userId: U } });
-      await tx.conversationMember.deleteMany({ where: { userId: U } });
-      await tx.referralCart.deleteMany({ where: { referrerId: U } });
-      await tx.consultationOffer.deleteMany({ where: { userId: U } });
-      // 2) Orta səviyyə entity-lər
-      await tx.consultationSession.deleteMany({ where: { OR: [{ buyerId: U }, { professionalId: U }] } });
-      await tx.order.deleteMany({ where: { OR: [{ buyerId: U }, { sellerId: U }] } });
-      await tx.inquiry.deleteMany({ where: { buyerId: U } });
-      await tx.message.deleteMany({ where: { OR: [{ senderId: U }, { receiverId: U }] } });
-      await tx.cart.deleteMany({ where: { userId: U } });
-      await tx.sharedCart.deleteMany({ where: { userId: U } });
-      await tx.booking.deleteMany({ where: { OR: [{ guestId: U }, { hostId: U }] } });
-      await tx.complaint.deleteMany({ where: { OR: [{ complainantId: U }, { targetUserId: U }] } });
-      await tx.listing.deleteMany({ where: { userId: U } });   // OrderItem/Favorite/Comment cascade
-      await tx.business.deleteMany({ where: { userId: U } });   // BusinessObject/bank/member cascade
-      // 3) Sadə uşaq cədvəllər
-      await tx.vehicle.deleteMany({ where: { userId: U } });
-      await tx.workplace.deleteMany({ where: { userId: U } });
-      await tx.verificationCode.deleteMany({ where: { userId: U } });
-      await tx.phoneNumber.deleteMany({ where: { userId: U } });
-      await tx.emailVerification.deleteMany({ where: { userId: U } });
-      await tx.socialLink.deleteMany({ where: { userId: U } });
-      await tx.professionDocument.deleteMany({ where: { userId: U } });
-      await tx.favorite.deleteMany({ where: { userId: U } });
-      await tx.savedAddress.deleteMany({ where: { userId: U } });
-      await tx.sellerVerification.deleteMany({ where: { userId: U } });
-      await tx.notification.deleteMany({ where: { userId: U } });
-      await tx.businessMember.deleteMany({ where: { userId: U } });
-      await tx.contact.deleteMany({ where: { ownerId: U } });
-      await tx.session.deleteMany({ where: { userId: U } });
-      // 4) Nəhayət istifadəçinin özü
-      await tx.user.delete({ where: { id: U } });
-    }, { timeout: 20000 });
-    // Borc qalıbsa admin bunu dərhal görsün — ödəniş ekranında sətir qalır.
-    res.json({ success: true, archivedLedgers: archived, owed });
+    const r = await deleteUserSafely(targetId, req.adminName);
+    res.json({ success: true, archivedLedgers: r.archived, owed: r.owed });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }
@@ -1677,6 +1749,23 @@ router.delete('/admin/listings/:id', requirePermission('listings'), async (req: 
   try {
     const listing = await prisma.listing.findUnique({ where: { id: parseInt(req.params.id) } });
     if (!listing) { res.status(404).json({ success: false, message: 'Elan tapılmadı' }); return; }
+
+    // ── SİFARİŞİ OLAN ELAN SİLİNMİR, ARXİVLƏNİR ──
+    // `OrderItem.listing` kaskad olduğu üçün elan silinəndə sifarişin məhsul
+    // sətirləri də silinirdi: sifariş qalır, içi boşalırdı (maliyyə detalı və
+    // ödəniş ekranı boş görünürdü). Satılmış elan yalnız gizlədilir.
+    const soldCount = await prisma.orderItem.count({ where: { listingId: listing.id } });
+    if (soldCount > 0) {
+      const archived = await prisma.listing.update({
+        where: { id: listing.id },
+        data: { status: 'ARCHIVED', archivedAt: new Date() },
+      });
+      res.json({
+        success: true, archived: true, orderItems: soldCount, listing: archived,
+        message: `Bu elan ${soldCount} sifarişdə keçir — silinmədi, arxivləndi (saytda görünmür, sifariş tarixçəsi qorunur).`,
+      });
+      return;
+    }
 
     // Resimleri diskten sil
     if (listing.images && listing.images.length > 0) {
@@ -2218,11 +2307,20 @@ router.put('/admin/orders/:id/status', requirePermission('orders'), async (req: 
     if (!order) { res.status(404).json({ success: false, message: 'Sifariş tapılmadı' }); return; }
 
     // Ləğv olunduqda və əvvəl ləğv olunmayıbsa — stoku geri qaytar.
+    let refundFailed: string | null = null;
     if (status === 'CANCELLED' && order.status !== 'CANCELLED') {
       for (const item of order.items) {
         try {
           await prisma.listing.update({ where: { id: item.listingId }, data: { stock: { increment: item.quantity } } });
         } catch { /* listing silinmiş ola bilər */ }
+      }
+      // ALICIYA PULU QAYTAR. Əvvəl bu yox idi: admin paneldən ləğv edilən
+      // kart sifarişində pul bizdə qalırdı və heç bir qeyd yaranmırdı
+      // (istifadəçi özü ləğv edəndə isə qaytarılırdı).
+      const r = await refundOrderSafe(orderId, 'ADMIN');
+      if (!r.ok) {
+        refundFailed = r.error || 'Qaytarma alınmadı';
+        console.error(`[admin] sifariş #${orderId} ləğv edildi, LAKİN pul qaytarılmadı: ${refundFailed}`);
       }
     }
     const updated = await prisma.order.update({ where: { id: orderId }, data: { status } });
@@ -2233,7 +2331,10 @@ router.put('/admin/orders/:id/status', requirePermission('orders'), async (req: 
         data: { userId: order.buyerId, type: 'ORDER', title: 'Sifariş statusu yeniləndi', body: `Sifariş #${order.id}: ${status}`, link: `/orders/${order.id}` },
       });
     } catch { /* ignore */ }
-    res.json({ success: true, order: updated });
+    res.json({
+      success: true, order: updated,
+      ...(refundFailed ? { refundPending: true, refundError: refundFailed, message: 'Sifariş ləğv edildi, lakin ödənişin qaytarılması alınmadı — avtomatik təkrar cəhd ediləcək.' } : {}),
+    });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }

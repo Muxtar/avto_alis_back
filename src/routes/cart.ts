@@ -2,7 +2,7 @@ import { Router, Response } from 'express';
 import { rateLimit } from '../middleware/rateLimiter';
 import { PrismaClient, UserType } from '@prisma/client';
 import { adminAuth, requireType, AuthRequest } from '../middleware/auth';
-import { createPayment as createGatewayPayment, refundOrder as gatewayRefundOrder } from '../services/paymentGateway';
+import { createPayment as createGatewayPayment } from '../services/paymentGateway';
 import { refundOrderSafe, restoreStockForOrder } from '../services/refunds';
 import { isValidMonths, installmentAllowed } from '../services/installment';
 import { chargeSavedCard } from '../services/savedCards';
@@ -1400,15 +1400,16 @@ router.put('/returns/:id/refund', adminAuth, async (req: AuthRequest, res: Respo
     if (ret.status !== 'RETURN_RECEIVED') { res.status(400).json({ success: false, message: 'Məhsul hələ qəbul edilməyib' }); return; }
 
     // Kart ödənişidirsə — pulu BANK vasitəsilə geri qaytar (DB dəyişməzdən əvvəl).
+    // ORTAQ SERVİS işlədilir: ikiqat qaytarma qıfılı, uğursuzluqda təkrar cəhd,
+    // admin bildirişi və QİSMƏN iadə uçotu (Order.refundedAmount) oradadır.
+    // Əvvəl burada birbaşa `gatewayRefundOrder` çağırılırdı — nə qıfıl, nə
+    // təkrar cəhd vardı, sifariş isə qismən iadədə də tam REFUNDED olurdu.
     const ord = ret.order;
     const isCardPaid = !!((ord.gatewayRef || ord.gatewayOrderId) && ord.paymentStatus === 'PAID');
     if (isCardPaid) {
       const amt = ret.refundAmount ?? ord.total;
-      try {
-        await gatewayRefundOrder(ord, amt);
-      } catch (err: any) {
-        res.status(502).json({ success: false, message: 'Bank iadəsi alınmadı: ' + err.message }); return;
-      }
+      const r = await refundOrderSafe(ord.id, 'RETURN', amt);
+      if (!r.ok) { res.status(502).json({ success: false, message: 'Bank iadəsi alınmadı: ' + (r.error || ''), retrying: true }); return; }
     }
 
     const stockWarnings: string[] = [];
@@ -1441,10 +1442,6 @@ router.put('/returns/:id/refund', adminAuth, async (req: AuthRequest, res: Respo
         }
       }
 
-      if (isCardPaid) {
-        await tx.order.update({ where: { id: ord.id }, data: { paymentStatus: 'REFUNDED', gatewayStatus: 'Refunded' } });
-      }
-
       // Referal komissiyasını ləğv et (qaytarılmış mal üçün komissiya ödənilmir).
       if (ord.referrerId && !ord.referralVoided) {
         await tx.order.update({ where: { id: ord.id }, data: { referralVoided: true } });
@@ -1459,6 +1456,11 @@ router.put('/returns/:id/refund', adminAuth, async (req: AuthRequest, res: Respo
     if (stockWarnings.length > 0) {
       console.warn(`Refund #${ret.id} stock warnings:`, stockWarnings);
     }
+
+    // ƏN VACİBİ: hesablaşmanı yenilə. Bu çağırış olmasa ledger sətri
+    // "ödəniləcək" qalırdı və admin alıcıya qaytarılmış pulu ikinci dəfə
+    // satıcıya köçürə bilərdi.
+    await recordSettlement(ord.id).catch(() => {});
 
     res.json({ success: true, returnRequest: updated, stockWarnings: stockWarnings.length > 0 ? stockWarnings : undefined });
   } catch (error: any) {
