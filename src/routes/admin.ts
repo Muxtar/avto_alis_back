@@ -18,6 +18,7 @@ import { smsStatus, testSms } from '../services/infobipSms';
 import { otpChannel } from '../services/otp';
 import fs from 'fs';
 import path from 'path';
+import { archiveUserPayees } from '../services/payoutArchive';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -651,14 +652,24 @@ router.get('/admin/payouts/businesses', requirePermission('finance_payouts'), as
     const q = String(req.query.q || '').trim().toLowerCase();
     const ledgers = await prisma.sellerLedger.findMany({
       where: { heldByPlatform: true, status: { in: ['AVAILABLE', 'PENDING'] }, clawbackNeeded: false },
-      select: { id: true, orderId: true, businessId: true, sellerId: true, status: true, netAmount: true, commission: true, grossAmount: true },
+      select: {
+        id: true, orderId: true, businessId: true, sellerId: true, status: true,
+        netAmount: true, commission: true, grossAmount: true,
+        // Hesab/biznes silinibsə ödəniş məlumatı bu surətdən oxunur.
+        payeeName: true, payeeVoen: true, payeeOwner: true, payeePhone: true, payeeIban: true, payeeBank: true, payeeArchived: true,
+      },
     });
     await backfillLedgerBusiness(ledgers);
 
     type Row = { businessId: number | null; sellerId: number; unpaid: number; pending: number; commission: number; gross: number; orders: number };
     const map = new Map<string, Row>();
+    // Ödəniş ünvanının surəti (hesab silinibsə yeganə mənbədir).
+    const snapByKey = new Map<string, { name: string | null; voen: string | null; owner: string | null; phone: string | null; iban: string | null; bank: string | null; archivedAt: Date | null }>();
     for (const l of ledgers) {
       const key = l.businessId ? `b${l.businessId}` : `u${l.sellerId}`;
+      if (l.payeeArchived && !snapByKey.has(key)) {
+        snapByKey.set(key, { name: l.payeeName, voen: l.payeeVoen, owner: l.payeeOwner, phone: l.payeePhone, iban: l.payeeIban, bank: l.payeeBank, archivedAt: l.payeeArchived });
+      }
       const cur = map.get(key) || { businessId: l.businessId, sellerId: l.sellerId, unpaid: 0, pending: 0, commission: 0, gross: 0, orders: 0 };
       if (l.status === 'AVAILABLE') { cur.unpaid += l.netAmount; cur.orders++; cur.commission += l.commission; cur.gross += l.grossAmount; }
       else cur.pending += l.netAmount;
@@ -678,19 +689,28 @@ router.get('/admin/payouts/businesses', requirePermission('finance_payouts'), as
     const r2 = (n: number) => Math.round(n * 100) / 100;
 
     let rows = Array.from(map.values()).map((r) => {
+      const key = r.businessId ? `b${r.businessId}` : `u${r.sellerId}`;
       const b = r.businessId ? bById.get(r.businessId) : null;
+      const u = uById.get(r.sellerId);
+      const snap = snapByKey.get(key);
       const acc = b?.banks?.find((a: { isPrimary: boolean }) => a.isPrimary) || b?.banks?.[0] || null;
+      // HESAB TAM SİLİNİB: Business/User sətri yoxdur, yalnız surət qalıb —
+      // borc yenə ödənilməlidir, ona görə sətir siyahıdan çıxmır.
+      const accountDeleted = r.businessId ? !b : !u;
       return {
-        key: r.businessId ? `b${r.businessId}` : `u${r.sellerId}`,
+        key,
         businessId: r.businessId, sellerId: r.sellerId,
-        name: b?.name || uById.get(r.sellerId)?.name || '—',
-        voen: b?.voen || null,
+        name: b?.name || u?.name || snap?.name || '—',
+        voen: b?.voen || snap?.voen || null,
         isBusiness: !!r.businessId,
         // Sahibi biznesi silib — pulu yenə də ona köçürməliyik.
         deleted: !!b?.deletedAt,
-        ownerName: b?.ownerName || null,
-        phone: b?.phone || uById.get(r.sellerId)?.phone || null,
-        iban: acc?.iban || null, bankTitle: acc?.title || null,
+        accountDeleted,
+        archivedAt: snap?.archivedAt || null,
+        ownerName: b?.ownerName || snap?.owner || null,
+        phone: b?.phone || u?.phone || snap?.phone || null,
+        iban: acc?.iban || snap?.iban || null,
+        bankTitle: acc?.title || snap?.bank || null,
         unpaid: r2(r.unpaid), pending: r2(r.pending),
         commission: r2(r.commission), gross: r2(r.gross), orders: r.orders,
       };
@@ -749,12 +769,19 @@ router.get('/admin/payouts/businesses/:key', requirePermission('finance_payouts'
     ]);
     const r2 = (n: number) => Math.round(n * 100) / 100;
     const acc = biz?.banks?.find((a: { isPrimary: boolean }) => a.isPrimary) || biz?.banks?.[0] || null;
+    // Hesab tam silinibsə ödəniş məlumatı ledger-dəki surətdən oxunur.
+    const snapRow = ledgers.find((l) => l.payeeArchived) || null;
+    const accountDeleted = isBiz ? !biz : !seller;
     res.json({
       success: true, key, isBusiness: isBiz,
-      name: biz?.name || seller?.name || '—', voen: biz?.voen || null,
+      name: biz?.name || seller?.name || snapRow?.payeeName || '—',
+      voen: biz?.voen || snapRow?.payeeVoen || null,
       deleted: !!biz?.deletedAt, deletedAt: biz?.deletedAt || null,
-      ownerName: biz?.ownerName || null, phone: biz?.phone || seller?.phone || null,
-      iban: acc?.iban || null, bankTitle: acc?.title || null,
+      accountDeleted, archivedAt: snapRow?.payeeArchived || null,
+      ownerName: biz?.ownerName || snapRow?.payeeOwner || null,
+      phone: biz?.phone || seller?.phone || snapRow?.payeePhone || null,
+      iban: acc?.iban || snapRow?.payeeIban || null,
+      bankTitle: acc?.title || snapRow?.payeeBank || null,
       bankAccounts: biz?.banks || [],
       lines, payouts,
       totals: {
@@ -1355,9 +1382,33 @@ router.delete('/admin/users/:id', requirePermission('users'), async (req: AuthRe
       res.status(403).json({ success: false, message: 'Öz hesabınızı silə bilməzsiniz' });
       return;
     }
+    const U = targetId;
+    // ── BORCUMUZ İTMİR ──
+    // Hesab silinsə də bizim bu satıcıya ödəyəcəyimiz pul qalır. Business və
+    // bank hesabları kaskadla silindiyi üçün ödəniş məlumatının (ad, VÖEN,
+    // telefon, IBAN) surətini ƏVVƏLCƏ hesablaşma sətirlərinə yazırıq.
+    const archived = await archiveUserPayees(U).catch(() => 0);
+    const owedRows = await prisma.sellerLedger.findMany({
+      where: { sellerId: U, heldByPlatform: true, status: { in: ['PENDING', 'AVAILABLE'] }, clawbackNeeded: false },
+      select: { netAmount: true },
+    });
+    const owed = Math.round(owedRows.reduce((s, l) => s + l.netAmount, 0) * 100) / 100;
+    // Ödənilməmiş borc varsa admin bunu bilərək təsdiqləməlidir: hesab silinir,
+    // borc isə ödəniş ekranında "hesab silinib" nişanı ilə qalır.
+    if (owed > 0 && String(req.query.force || '') !== '1') {
+      res.status(409).json({
+        success: false,
+        needsConfirm: true,
+        owed,
+        ledgerRows: owedRows.length,
+        message: `Bu satıcıya ödənilməmiş ${owed} AZN borcumuz var (${owedRows.length} sətir). Hesab silinsə də borc ödəniş ekranında qalacaq — davam etmək üçün təsdiqləyin.`,
+      });
+      return;
+    }
+    if (owed > 0) console.warn(`[admin] user ${U} silinir — ödənilməmiş borc ${owed} AZN (${owedRows.length} sətir) ödəniş ekranında qalır`);
+
     // Açıq (explicit) cascade — DB-dəki FK onDelete "NO ACTION" qalmışsa belə
     // (köhnə db push) silmə işləsin deyə bütün asılı qeydləri sıra ilə silirik.
-    const U = targetId;
     await prisma.$transaction(async (tx) => {
       // SetNull tərəflər: bu istifadəçi kuryer/referrer olan sifarişlərdə əlaqəni sıfırla
       await tx.order.updateMany({ where: { courierId: U }, data: { courierId: null } });
@@ -1401,7 +1452,8 @@ router.delete('/admin/users/:id', requirePermission('users'), async (req: AuthRe
       // 4) Nəhayət istifadəçinin özü
       await tx.user.delete({ where: { id: U } });
     }, { timeout: 20000 });
-    res.json({ success: true });
+    // Borc qalıbsa admin bunu dərhal görsün — ödəniş ekranında sətir qalır.
+    res.json({ success: true, archivedLedgers: archived, owed });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }

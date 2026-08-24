@@ -11,6 +11,7 @@ import { consultationLimiter } from '../middleware/rateLimiter';
 import { feeState, feeAmount, consumeFee, releaseFee } from '../services/businessFee';
 import fs from 'fs';
 import path from 'path';
+import { archiveBusinessPayee } from '../services/payoutArchive';
 
 const PUBLIC_BACKEND_URL = process.env.PUBLIC_BACKEND_URL || `http://localhost:${process.env.PORT || 5001}`;
 
@@ -490,6 +491,9 @@ router.delete('/me/businesses/:id', adminAuth, async (req: AuthRequest, res: Res
     }
 
     // ── HAL 2: yumşaq silmə — sətir maliyyə tarixçəsi üçün qalır
+    // Ödəniş məlumatının (ad/VÖEN/telefon/IBAN) surətini hesablaşma sətirlərinə
+    // yazırıq: sonradan hesab tam silinsə də borcu ödəyə bilək.
+    await archiveBusinessPayee(id).catch(() => {});
     const now = new Date();
     const archived = await prisma.$transaction(async (tx) => {
       const del = await tx.listing.updateMany({

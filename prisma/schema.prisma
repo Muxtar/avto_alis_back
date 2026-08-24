@@ -1396,6 +1396,18 @@ model SellerLedger {
   clawbackNeeded Boolean      @default(false)
   clawbackReason String?
   payoutId       Int?
+  // ── ÖDƏNİŞ ÜNVANININ SURƏTİ ────────────────────────────────────────────
+  // Satıcı biznesini, hətta bütün hesabını silsə də bizim ona olan BORCUMUZ
+  // qalır və ödənilməlidir. Business/User sətirləri silinəndə ödəniş üçün
+  // lazım olan məlumat itməsin deyə burada surət saxlanılır. Bu sətirlərin
+  // User/Business ilə FK əlaqəsi yoxdur — ona görə kaskadla silinmir.
+  payeeName      String? // biznesin adı (yoxsa şəxsin adı)
+  payeeVoen      String?
+  payeeOwner     String? // biznes sahibinin adı
+  payeePhone     String?
+  payeeIban      String?
+  payeeBank      String? // bankın adı / hesab qeydi
+  payeeArchived  DateTime? // surət nə vaxt götürüldü (biznes/hesab silindi)
   createdAt      DateTime     @default(now())
   updatedAt      DateTime     @updatedAt
 
