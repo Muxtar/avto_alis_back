@@ -355,7 +355,7 @@ router.put('/me/businesses/:id', adminAuth, async (req: AuthRequest, res: Respon
     });
     // Təsdiq sıfırlandısa və başqa təsdiqli biznes qalmayıbsa — sellerVerified-i geri al.
     if (resetApproval) {
-      const stillApproved = await prisma.business.count({ where: { userId: biz.userId, status: 'APPROVED' } });
+      const stillApproved = await prisma.business.count({ where: { userId: biz.userId, status: 'APPROVED', deletedAt: null } });
       if (stillApproved === 0) {
         await prisma.user.update({ where: { id: biz.userId }, data: { sellerVerified: false } }).catch(() => {});
       }
@@ -405,7 +405,7 @@ router.post('/me/businesses/:id/edit', adminAuth, docFields, processImages, asyn
       },
     });
     if (resetApproval) {
-      const stillApproved = await prisma.business.count({ where: { userId: biz.userId, status: 'APPROVED' } });
+      const stillApproved = await prisma.business.count({ where: { userId: biz.userId, status: 'APPROVED', deletedAt: null } });
       if (stillApproved === 0) await prisma.user.update({ where: { id: biz.userId }, data: { sellerVerified: false } }).catch(() => {});
     }
     res.json({ success: true, business: updated, reApproval: resetApproval });
@@ -1159,7 +1159,7 @@ router.put('/admin/businesses/:id/reject', requirePermission('businesses'), asyn
     const biz = await prisma.business.update({
       where: { id }, data: { status: 'REJECTED', reviewedAt: new Date(), rejectionReason: reason.trim() },
     });
-    const stillApproved = await prisma.business.count({ where: { userId: biz.userId, status: 'APPROVED' } });
+    const stillApproved = await prisma.business.count({ where: { userId: biz.userId, status: 'APPROVED', deletedAt: null } });
     if (stillApproved === 0) await prisma.user.update({ where: { id: biz.userId }, data: { sellerVerified: false } });
     // Rədd → ödənilmiş haqq yenidən istifadəyə açılır. Pul alındı, amma biznes
     // açılmadı: istifadəçi düzəldib yenidən göndərəndə təkrar ödəməməlidir.

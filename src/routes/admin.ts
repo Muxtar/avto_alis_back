@@ -2556,9 +2556,12 @@ router.get('/admin/overview', requireAdmin, async (_req: AuthRequest, res: Respo
       prisma.user.count({ where: { role: 'USER', isBlocked: true } }),
       prisma.listing.count(),
       prisma.order.count(),
-      prisma.business.count(),
+      // Silinmiş bizneslər sayılmır: sətir yalnız maliyyə tarixçəsi üçün qalır.
+      // Əvvəl sayılırdı — sidebar-da «1 gözləyir» nişanı çıxırdı, siyahı isə
+      // (deletedAt: null süzgəci ilə) boş görünürdü.
+      prisma.business.count({ where: { deletedAt: null } }),
       prisma.user.count({ where: { type: 'COURIER' } }),
-      prisma.business.count({ where: { status: 'PENDING' } }),
+      prisma.business.count({ where: { status: 'PENDING', deletedAt: null } }),
       prisma.sellerVerification.count({ where: { status: 'PENDING' } }),
       prisma.professionDocument.count({ where: { status: 'PENDING' } }),
       prisma.socialLink.count({ where: { verified: false } }),
