@@ -1218,11 +1218,17 @@ router.post('/admin/businesses/:id/ai-recheck', requirePermission('businesses'),
 // Admin yüzlərlə VÖEN-i əl ilə tutuşdurmasın deyə sistem özü tapır.
 //
 // Müqayisə YALNIZ rəqəmlər üzrədir — "1234567891" və "12345678-91" eynidir.
+//
+// SİLİNMİŞ bizneslər sayılmır. Silmə "yumşaqdır" — sətir maliyyə tarixçəsi üçün
+// bazada qalır, amma saytda və admin siyahısında görünmür. Əvvəl bu süzgəc
+// yox idi: bütün bizneslər silinsə belə köhnə sətirlər tapılır və admin
+// «Bu VÖEN artıq N biznesdə var» xəbərdarlığını görürdü — halbuki heç bir
+// canlı biznes yox idi. VÖEN silinmiş bizneslə birlikdə yenidən istifadəyə açılır.
 async function findVoenDuplicates(voen: string, exceptId: number) {
   const digits = String(voen || '').replace(/\D/g, '');
   if (digits.length < 6) return [];          // çox qısa → mənasız uyğunluq verir
   const all = await prisma.business.findMany({
-    where: { id: { not: exceptId } },
+    where: { id: { not: exceptId }, deletedAt: null },
     select: { id: true, name: true, voen: true, status: true, isActive: true, createdAt: true, userId: true },
     take: 2000,
   });
@@ -1235,11 +1241,12 @@ async function findVoenDuplicates(voen: string, exceptId: number) {
 }
 
 // Eyni IBAN iki biznesdə → pul eyni hesaba gedir. Bu da yoxlanılır.
+// VÖEN yoxlaması kimi burada da SİLİNMİŞ bizneslər nəzərə alınmır.
 async function findIbanDuplicates(ibans: string[], exceptId: number) {
   const norm = ibans.map((i) => String(i || '').toUpperCase().replace(/[\s-]/g, '')).filter(Boolean);
   if (!norm.length) return [];
   const rows = await prisma.bankAccount.findMany({
-    where: { businessId: { not: exceptId } },
+    where: { businessId: { not: exceptId }, business: { deletedAt: null } },
     select: { iban: true, businessId: true, business: { select: { id: true, name: true, voen: true, status: true } } },
     take: 3000,
   });
