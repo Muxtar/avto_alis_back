@@ -9,6 +9,7 @@ import { extractPassportFromFiles } from '../services/vehiclePassportAI';
 import { analyzeCredential, verifyIdentityAI, extractIdName } from '../services/credentialAI';
 import { sendVerificationCode } from '../services/mailer';
 import { resolveFlag } from '../services/settings';
+import { emitToAdmins } from '../services/callSignaling';
 import fs from 'fs';
 import path from 'path';
 
@@ -114,6 +115,12 @@ router.post('/me/identity', adminAuth, identityUpload, processImages, async (req
         idVerifyStatus: 'PENDING',
       },
       select: { id: true, name: true, idVerifyStatus: true, faceMatchScore: true, idCardImage: true, selfieImage: true, idAiNameMatch: true, idAiFaceMatch: true, idAiReason: true },
+    });
+    // Admin paneli səhifəni yeniləmədən görsün — açıq panellərə anlıq bildiriş.
+    emitToAdmins('admin:identity', {
+      userId: user.id,
+      name: user.name,
+      at: new Date().toISOString(),
     });
     res.json({ success: true, user });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }

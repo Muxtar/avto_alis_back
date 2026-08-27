@@ -39,6 +39,13 @@ let ioRef: Server | null = null;
 export function emitToUser(userId: number, event: string, payload: any) {
   ioRef?.to(`u:${userId}`).emit(event, payload);
 }
+/* Admin panelə anlıq bildiriş — səhifə yenilənmədən yeni iş görünsün.
+   Admin soket qoşulanda `admins` otağına düşür (aşağıda), buradan isə həmin
+   otağa yayımlanır. İstifadə: kimlik müraciəti göndəriləndə və s. */
+export function emitToAdmins(event: string, payload: any) {
+  ioRef?.to('admins').emit(event, payload);
+}
+
 export function isUserOnline(userId: number): boolean {
   const room = ioRef?.sockets.adapter.rooms.get(`u:${userId}`);
   return !!room && room.size > 0;
@@ -109,6 +116,10 @@ export function initCallSignaling(httpServer: HttpServer, allowedOrigins: string
     const wasOnline = isUserOnline(userId);
     // Hər istifadəçi öz otağına qoşulur — çoxlu cihaz/tab dəstəklənir.
     socket.join(`u:${userId}`);
+    // Admindirsə ortaq `admins` otağına da qoşulur — panelə anlıq bildiriş üçün.
+    prisma.user.findUnique({ where: { id: userId }, select: { role: true } })
+      .then((u) => { if (u?.role === 'ADMIN') socket.join('admins'); })
+      .catch(() => { /* rol oxunmadı — admin bildirişi almayacaq, kritik deyil */ });
     if (!wasOnline) broadcastPresence(userId, true).catch(() => {});
     // ICE konfiqurasiyasını dərhal göndər.
     socket.emit('config', { iceServers: iceServers() });
