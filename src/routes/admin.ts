@@ -2550,6 +2550,7 @@ router.get('/admin/overview', requireAdmin, async (_req: AuthRequest, res: Respo
     const [
       users, blockedUsers, listings, orders, businesses, couriers,
       pBusinesses, pSellerApps, pCredentials, pSocial, pComplaints, pReturns, pListings,
+      pIdentity,
       revenueAgg, revenueTodayAgg, ordersToday, newUsers7d, activeConsult,
     ] = await Promise.all([
       prisma.user.count({ where: { role: 'USER', type: { not: 'COURIER' } } }),
@@ -2568,6 +2569,8 @@ router.get('/admin/overview', requireAdmin, async (_req: AuthRequest, res: Respo
       prisma.complaint.count({ where: { status: { in: ['OPEN', 'REVIEWING'] } } }),
       prisma.returnRequest.count({ where: { status: 'REQUESTED' } }),
       prisma.listing.count({ where: { status: 'PENDING' } }),
+      // Əl ilə kimlik yoxlaması növbəsi (Veriff söndürüləndə dolur).
+      prisma.user.count({ where: { idVerifyStatus: 'PENDING', idCardImage: { not: null } } }),
       prisma.order.aggregate({ _sum: { total: true }, where: { paymentStatus: 'PAID' } }),
       prisma.order.aggregate({ _sum: { total: true }, where: { paymentStatus: 'PAID', createdAt: { gte: startOfDay } } }),
       prisma.order.count({ where: { createdAt: { gte: startOfDay } } }),
@@ -2575,7 +2578,7 @@ router.get('/admin/overview', requireAdmin, async (_req: AuthRequest, res: Respo
       prisma.consultationSession.count({ where: { status: 'ACTIVE' } }).catch(() => 0),
     ]);
     const pending = {
-      businesses: pBusinesses, sellerApps: pSellerApps,
+      businesses: pBusinesses, sellerApps: pSellerApps, identity: pIdentity,
       credentials: pCredentials, socialLinks: pSocial, complaints: pComplaints, returns: pReturns,
       listings: pListings,
     };

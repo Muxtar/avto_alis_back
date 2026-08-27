@@ -2,6 +2,7 @@
 // Qısa TTL keşi ilə oxunur ki, hər OTP/istəkdə DB-yə getməsin.
 import { PrismaClient } from '@prisma/client';
 import { isInfobipConfigured } from './infobipWhatsApp';
+import { isVeriffConfigured } from './veriff';
 
 const prisma = new PrismaClient();
 
@@ -25,6 +26,14 @@ export const FLAGS: FlagDef[] = [
     description:
       'Aktiv: doğrulama kodu Infobip ilə (SMS və ya WhatsApp) göndərilir. Deaktiv: kod göndərilmir, test rejimində input üstündə "fake" olaraq göstərilir. Default: Infobip konfiqurasiya olunubsa aktiv.',
     default: () => isInfobipConfigured(),
+  },
+  {
+    key: 'veriff_enabled',
+    section: 'production',
+    label: 'Kimlik doğrulaması: Veriff (test)',
+    description:
+      'Aktiv: istifadəçi «Təsdiqlə» deyəndə Veriff pəncərəsi açılır və nəticə birbaşa Veriff-dən gəlir — admin əl ilə yoxlamır. Deaktiv: Veriff çağırılmır (test mərhələsində boş yerə xərclənmir); istifadəçi vəsiqənin ön/arxa şəklini və selfie-ni göndərir, müraciət «Kimlik yoxlaması» səhifəsinə düşür və admin gözlə baxıb təsdiqləyir. Default: Veriff açarları qoyulubsa aktiv.',
+    default: () => isVeriffConfigured(),
   },
   {
     key: 'registration_open',

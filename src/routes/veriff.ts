@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { PrismaClient } from '@prisma/client';
 import { adminAuth, AuthRequest } from '../middleware/auth';
 import { isVeriffConfigured, createVeriffSession, verifyWebhookSignature, getVeriffDecision } from '../services/veriff';
+import { resolveFlag } from '../services/settings';
 import { normalizeName } from '../services/credentialAI';
 
 const router = Router();
@@ -64,15 +65,33 @@ async function applyDecision(userId: number, v: any): Promise<string> {
   return status;
 }
 
-// Frontend: Veriff qoşulub-qoşulmadığını öyrənir (hansı axını göstərmək üçün).
+// Frontend: hansı kimlik axını işləyir?
+//   mode = 'veriff' → Veriff pəncərəsi açılır, nəticə birbaşa Veriff-dən gəlir
+//   mode = 'manual' → istifadəçi şəkilləri göndərir, ADMİN gözlə baxıb təsdiqləyir
+// Admin `veriff_enabled` açarını söndürəndə (test mərhələsi) `manual`-a keçilir.
 router.get('/veriff/status', adminAuth, async (_req: AuthRequest, res: Response) => {
-  res.json({ success: true, configured: isVeriffConfigured() });
+  const configured = isVeriffConfigured();
+  const enabled = configured && (await resolveFlag('veriff_enabled'));
+  res.json({
+    success: true,
+    configured,
+    enabled,
+    mode: enabled ? 'veriff' : 'manual',
+  });
 });
 
 // İstifadəçi: doğrulama sessiyası yarat — qaytarılan URL-də sənəd + video-selfie çəkilir.
 router.post('/me/veriff/session', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
     if (!isVeriffConfigured()) { res.status(400).json({ success: false, message: 'Veriff hazırda aktiv deyil' }); return; }
+    // Admin Veriff-i söndürübsə sessiya YARADILMIR — pulsuz əl ilə yoxlamaya keçir.
+    if (!(await resolveFlag('veriff_enabled'))) {
+      res.status(400).json({
+        success: false, code: 'VERIFF_DISABLED',
+        message: 'Veriff söndürülüb — kimliyi şəkillərlə göndərin, admin yoxlayacaq.',
+      });
+      return;
+    }
     const me = await prisma.user.findUnique({ where: { id: req.adminId! }, select: { name: true, idVerifyStatus: true } });
     if (me?.idVerifyStatus === 'APPROVED') { res.status(400).json({ success: false, message: 'Kimliyiniz artıq təsdiqlənib' }); return; }
 

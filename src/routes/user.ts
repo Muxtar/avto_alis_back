@@ -8,6 +8,7 @@ import { listingWriteLimiter, bulkLimiter, otpLimiter } from '../middleware/rate
 import { extractPassportFromFiles } from '../services/vehiclePassportAI';
 import { analyzeCredential, verifyIdentityAI, extractIdName } from '../services/credentialAI';
 import { sendVerificationCode } from '../services/mailer';
+import { resolveFlag } from '../services/settings';
 import fs from 'fs';
 import path from 'path';
 
@@ -63,15 +64,28 @@ router.post('/me/identity', adminAuth, identityUpload, processImages, async (req
     const selfieFile = files?.['selfieImage']?.[0];        // ön — AI üz uyğunluğu bununla aparılır
     const selfieRight = files?.['selfieRightImage']?.[0];
     const selfieLeft = files?.['selfieLeftImage']?.[0];
-    if (!idCardFile || !selfieFile || !selfieRight || !selfieLeft) {
-      res.status(400).json({ success: false, message: 'Şəxsiyyət vəsiqəsi və 3 üz şəkli (ön, sağ, sol) tələb olunur' }); return;
+    const idCardBack = files?.['idCardBackImage']?.[0];
+    // Veriff axını ilə eyni tələb: vəsiqənin ÖN + ARXA şəkli və bir selfie.
+    // Yan selfielər (sağ/sol) istəyə görədir — köhnə axın onları göndərirdi.
+    if (!idCardFile || !idCardBack || !selfieFile) {
+      res.status(400).json({
+        success: false,
+        message: 'Şəxsiyyət vəsiqəsinin ön və arxa şəkli, həmçinin selfie tələb olunur',
+      });
+      return;
     }
     const scoreNum = req.body.faceMatchScore !== undefined ? parseFloat(String(req.body.faceMatchScore)) : NaN;
 
     // İstifadəçinin əl ilə girdiyi ad — yalnız AI müqayisəsi (nameMatch) üçün.
     const me = await prisma.user.findUnique({ where: { id: req.adminId! }, select: { name: true } });
     // Claude AI ilə kimlik doğrulaması (vəsiqə adı + üz uyğunluğu, ön selfie ilə).
-    const ai = await verifyIdentityAI(idCardFile.path, selfieFile.path, (me?.name || '').trim());
+    // AI söndürülübsə (admin açarı) sorğu göndərilmir — admin gözlə yoxlayacaq.
+    const aiOn = await resolveFlag('ai_identity');
+    const ai = aiOn
+      ? await verifyIdentityAI(idCardFile.path, selfieFile.path, (me?.name || '').trim())
+      : { ok: false as const, idName: null, birthDate: null, gender: null, idNumber: null,
+          nameMatch: null, nameMatchScore: null, faceMatch: null, faceMatchScore: null,
+          reason: null, error: 'AI kimlik yoxlaması söndürülüb — admin əl ilə yoxlayacaq' };
 
     // KİMLİK = MƏNBƏ. AI vəsiqədən oxuyub doldurur; bunlar artıq əl ilə dəyişilməyəcək.
     const idName = ai.ok && ai.idName ? ai.idName : null;
@@ -84,9 +98,9 @@ router.post('/me/identity', adminAuth, identityUpload, processImages, async (req
       data: {
         idCardImage: idCardFile.filename,
         selfieImage: selfieFile.filename,
-        selfieRightImage: selfieRight.filename,
-        selfieLeftImage: selfieLeft.filename,
-        ...(files?.['idCardBackImage']?.[0]?.filename ? { idCardBackImage: files['idCardBackImage'][0].filename } : {}),
+        idCardBackImage: idCardBack.filename,
+        ...(selfieRight ? { selfieRightImage: selfieRight.filename } : {}),
+        ...(selfieLeft ? { selfieLeftImage: selfieLeft.filename } : {}),
         ...(idName ? { name: idName } : {}),
         ...(bd && /^\d{4}-\d{2}-\d{2}$/.test(bd) ? { birthDate: new Date(bd) } : {}),
         ...(gender ? { gender } : {}),

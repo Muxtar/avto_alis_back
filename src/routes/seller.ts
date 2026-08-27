@@ -155,4 +155,128 @@ router.put('/admin/seller-applications/:id/reject', requirePermission('kyc'), as
   }
 });
 
+
+// ═══════════════════════════════════════════════════════════════════════════
+// KİMLİK YOXLAMASI (ƏL İLƏ) — admin `veriff_enabled` açarını söndürəndə işləyir.
+//
+// Veriff açıq olanda bu növbə boş qalır: nəticə birbaşa Veriff-dən gəlir və
+// istifadəçi APPROVED olur. Veriff söndürüləndə (test mərhələsi) istifadəçi
+// vəsiqənin ön/arxa şəklini və selfie-ni göndərir → `idVerifyStatus = PENDING`
+// → admin burada şəkillərə baxıb təsdiqləyir və vəsiqədəki məlumatları yazır.
+// ═══════════════════════════════════════════════════════════════════════════
+
+const IDENTITY_FIELDS = {
+  id: true, name: true, phone: true, type: true, createdAt: true,
+  idVerifyStatus: true, idNumber: true, birthDate: true, gender: true,
+  idCardImage: true, idCardBackImage: true,
+  selfieImage: true, selfieRightImage: true, selfieLeftImage: true,
+  faceMatchScore: true, idAiNameMatch: true, idAiNameScore: true,
+  idAiFaceMatch: true, idAiFaceScore: true, idAiReason: true,
+  veriffStatus: true,
+} as const;
+
+// Növbə: status üzrə süzülür (default — yoxlanılanlar).
+router.get('/admin/identity', requirePermission('kyc'), async (req: AuthRequest, res: Response) => {
+  try {
+    const status = String(req.query.status || 'PENDING').toUpperCase();
+    const q = String(req.query.q || '').trim();
+    const where: any = {};
+    if (['PENDING', 'APPROVED', 'REJECTED'].includes(status)) where.idVerifyStatus = status;
+    // Şəkil göndərməyənlər növbədə görünməməlidir.
+    where.idCardImage = { not: null };
+    if (q) {
+      where.OR = [
+        { name: { contains: q, mode: 'insensitive' } },
+        { phone: { contains: q } },
+        { idNumber: { contains: q, mode: 'insensitive' } },
+      ];
+    }
+    const users = await prisma.user.findMany({
+      where, orderBy: { id: 'desc' }, take: 200, select: IDENTITY_FIELDS,
+    });
+    const counts = await prisma.user.groupBy({
+      by: ['idVerifyStatus'],
+      where: { idCardImage: { not: null } },
+      _count: { _all: true },
+    });
+    res.json({
+      success: true,
+      users,
+      counts: Object.fromEntries(counts.map((c) => [c.idVerifyStatus || 'NONE', c._count._all])),
+    });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
+// Bir müraciətin tam məlumatı (şəkillərlə).
+router.get('/admin/identity/:id', requirePermission('kyc'), async (req: AuthRequest, res: Response) => {
+  try {
+    const id = parseInt(String(req.params.id));
+    const user = await prisma.user.findUnique({ where: { id }, select: IDENTITY_FIELDS });
+    if (!user) { res.status(404).json({ success: false, message: 'İstifadəçi tapılmadı' }); return; }
+    res.json({ success: true, user });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
+// Təsdiq — admin vəsiqədəki məlumatları da yazır (ad, FIN, doğum tarixi, cins).
+// Boş buraxılan sahə DƏYİŞMİR (istifadəçinin mövcud dəyəri qalır).
+router.post('/admin/identity/:id/approve', requirePermission('kyc'), async (req: AuthRequest, res: Response) => {
+  try {
+    const id = parseInt(String(req.params.id));
+    const user = await prisma.user.findUnique({ where: { id }, select: { id: true, idCardImage: true } });
+    if (!user) { res.status(404).json({ success: false, message: 'İstifadəçi tapılmadı' }); return; }
+    if (!user.idCardImage) {
+      res.status(400).json({ success: false, message: 'Bu istifadəçi kimlik şəkli göndərməyib' }); return;
+    }
+
+    const name = String(req.body.name || '').trim();
+    const idNumber = String(req.body.idNumber || '').trim();
+    const birthDate = String(req.body.birthDate || '').trim();
+    const gender = String(req.body.gender || '').trim();
+
+    await prisma.user.update({
+      where: { id },
+      data: {
+        idVerifyStatus: 'APPROVED',
+        ...(name ? { name } : {}),
+        ...(idNumber ? { idNumber } : {}),
+        ...(/^\d{4}-\d{2}-\d{2}$/.test(birthDate) ? { birthDate: new Date(birthDate) } : {}),
+        ...(gender ? { gender } : {}),
+        idAiReason: 'Admin: gözlə yoxlanılıb və təsdiqlənib',
+      },
+    });
+    await prisma.notification.create({
+      data: {
+        userId: id, type: 'SYSTEM', title: 'Kimlik təsdiqləndi ✅',
+        body: 'Şəxsiyyətiniz yoxlanıldı və təsdiqləndi.', link: '/profile',
+      },
+    }).catch(() => {});
+    res.json({ success: true });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
+// Rədd — səbəb istifadəçiyə bildiriş kimi gedir, o yenidən göndərə bilər.
+router.post('/admin/identity/:id/reject', requirePermission('kyc'), async (req: AuthRequest, res: Response) => {
+  try {
+    const id = parseInt(String(req.params.id));
+    const reason = String(req.body.reason || '').trim();
+    const user = await prisma.user.findUnique({ where: { id }, select: { id: true } });
+    if (!user) { res.status(404).json({ success: false, message: 'İstifadəçi tapılmadı' }); return; }
+    await prisma.user.update({
+      where: { id },
+      data: {
+        idVerifyStatus: 'REJECTED',
+        idAiReason: reason ? `Admin: rədd edildi — ${reason}` : 'Admin: rədd edildi',
+      },
+    });
+    await prisma.notification.create({
+      data: {
+        userId: id, type: 'SYSTEM', title: 'Kimlik təsdiqi alınmadı',
+        body: reason || 'Göndərdiyiniz şəkillər qəbul olunmadı. Yenidən cəhd edə bilərsiniz.',
+        link: '/profile',
+      },
+    }).catch(() => {});
+    res.json({ success: true });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
 export default router;
