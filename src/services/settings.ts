@@ -137,6 +137,17 @@ export const NUMBERS: NumberDef[] = [
     unit: 'AZN',
     decimals: 2,
   },
+  {
+    key: 'veriff_fee_azn',
+    label: 'Veriff ilə kimlik doğrulaması haqqı',
+    description:
+      'İstifadəçi kimliyini Veriff ilə DƏRHAL təsdiqləmək istəyirsə bu məbləği ödəyir (Veriff xidmətinin xərcini qarşılayır). Ödəniş yalnız Veriff seçiləndə tələb olunur — admin yoxlaması həmişə pulsuzdur. 0 yazılsa Veriff də pulsuz olur. Veriff təsdiqi alınmasa ödəniş yanmır: istifadəçi yenidən cəhd edə bilir.',
+    default: 1,
+    min: 0,
+    max: 100,
+    unit: 'AZN',
+    decimals: 2,
+  },
 ];
 
 const NUMBER_MAP = new Map(NUMBERS.map((n) => [n.key, n]));

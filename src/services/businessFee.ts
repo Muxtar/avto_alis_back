@@ -1,7 +1,11 @@
-// BİZNES YARATMA HAQQI.
+// BİRDƏFƏLİK HAQLAR — biznes yaratma və Veriff kimlik doğrulaması.
 //
-// Biznes yaratmaq birdəfəlik ödənişlidir. Məqsəd: AI yoxlamaları (sənəd oxuma,
-// kimlik analizi), Veriff və şlüz xərclərinin bir hissəsini qarşılamaq.
+// İki ödəniş növü var (`purpose`), məntiq isə ortaqdır:
+//   BUSINESS — biznes yaratmaq üçün (AI sənəd yoxlaması, şlüz xərcləri)
+//   VERIFF   — kimliyi DƏRHAL Veriff ilə təsdiqləmək üçün (Veriff xidmət haqqı).
+//              Admin yoxlaması pulsuzdur — bu haqq yalnız Veriff seçiləndə alınır.
+//
+// Hər ikisinin tarifi admin paneldən dəyişilir; 0 = pulsuz.
 //
 // Axın:
 //   1) İstifadəçi «Ödə» → BusinessFee(UNPAID) + şlüz ödənişi yaranır
@@ -18,9 +22,17 @@ import { getNumber } from './settings';
 
 const prisma = new PrismaClient();
 
+/** Ödənişin növü: biznes yaratma haqqı, yoxsa Veriff kimlik doğrulaması. */
+export type FeePurpose = 'BUSINESS' | 'VERIFF';
+
+const FEE_KEY: Record<FeePurpose, string> = {
+  BUSINESS: 'business_fee_azn',
+  VERIFF: 'veriff_fee_azn',
+};
+
 /** Cari tarif (AZN). Admin paneldən dəyişilir. 0 = pulsuz. */
-export async function feeAmount(): Promise<number> {
-  try { return await getNumber('business_fee_azn'); } catch { return 0; }
+export async function feeAmount(purpose: FeePurpose = 'BUSINESS'): Promise<number> {
+  try { return await getNumber(FEE_KEY[purpose]); } catch { return 0; }
 }
 
 export interface FeeState {
@@ -32,20 +44,20 @@ export interface FeeState {
   pendingRef: string | null; // başlanmış, hələ təsdiqlənməmiş ödəniş
 }
 
-/** İstifadəçinin biznes yaratmaq üçün vəziyyəti. */
-export async function feeState(userId: number): Promise<FeeState> {
-  const amount = await feeAmount();
+/** İstifadəçinin həmin növ ödəniş üzrə vəziyyəti. */
+export async function feeState(userId: number, purpose: FeePurpose = 'BUSINESS'): Promise<FeeState> {
+  const amount = await feeAmount(purpose);
   if (amount <= 0) {
     return { amount: 0, required: false, paid: true, feeId: null, paidAt: null, pendingRef: null };
   }
   const [ready, pending] = await Promise.all([
     prisma.businessFee.findFirst({
-      where: { userId, status: 'PAID' },
+      where: { userId, purpose, status: 'PAID' },
       orderBy: { paidAt: 'asc' },   // ən köhnə ödəniş əvvəl xərclənsin
       select: { id: true, paidAt: true },
     }),
     prisma.businessFee.findFirst({
-      where: { userId, status: 'UNPAID' },
+      where: { userId, purpose, status: 'UNPAID' },
       orderBy: { createdAt: 'desc' },
       select: { gatewayRef: true },
     }),
@@ -69,12 +81,16 @@ export async function feeState(userId: number): Promise<FeeState> {
  *
  * @returns xərclənən qeydin id-si, tarif 0-dırsa null, ödəniş yoxdursa `false`
  */
-export async function consumeFee(userId: number, businessId: number): Promise<{ ok: boolean; feeId: number | null }> {
-  const amount = await feeAmount();
+export async function consumeFee(
+  userId: number,
+  businessId: number | null,
+  purpose: FeePurpose = 'BUSINESS',
+): Promise<{ ok: boolean; feeId: number | null }> {
+  const amount = await feeAmount(purpose);
   if (amount <= 0) return { ok: true, feeId: null };
 
   const candidate = await prisma.businessFee.findFirst({
-    where: { userId, status: 'PAID' },
+    where: { userId, purpose, status: 'PAID' },
     orderBy: { paidAt: 'asc' },
     select: { id: true },
   });
@@ -103,6 +119,26 @@ export async function releaseFee(businessId: number): Promise<void> {
 }
 
 /**
+ * Veriff haqqını yenidən istifadəyə aç.
+ *
+ * Veriff təsdiqi RƏDD olunsa və ya yenidən təqdim istənsə istifadəçi ikinci
+ * dəfə ödəməməlidir — pul alındı, təsdiq alınmadı. Ən son xərclənmiş qeyd
+ * PAID-ə qaytarılır.
+ */
+export async function releaseIdentityFee(userId: number): Promise<void> {
+  const last = await prisma.businessFee.findFirst({
+    where: { userId, purpose: 'VERIFF', status: 'USED' },
+    orderBy: { usedAt: 'desc' },
+    select: { id: true },
+  });
+  if (!last) return;
+  await prisma.businessFee.updateMany({
+    where: { id: last.id, status: 'USED' },
+    data: { status: 'PAID', usedAt: null },
+  }).catch(() => {});
+}
+
+/**
  * Şlüz callback-i — ödənişi təsdiqlə (idempotent).
  *
  * Təkrar callback gəlsə artıq USED olmuş qeyd PAID-ə QAYTARILMIR (status
@@ -118,18 +154,21 @@ export async function settleBusinessFee(
   if (where.gatewayOrderId != null) w.gatewayOrderId = where.gatewayOrderId;
   if (Object.keys(w).length === 0) return;
 
-  const fees = await prisma.businessFee.findMany({ where: w, select: { id: true, userId: true, status: true, amount: true } });
+  const fees = await prisma.businessFee.findMany({ where: w, select: { id: true, userId: true, status: true, amount: true, purpose: true } });
   for (const f of fees) {
     if (f.status === 'USED' || f.status === 'REFUNDED') continue;   // artıq yekunlaşıb
     if (paid) {
       if (f.status === 'PAID') continue;                            // təkrar callback
       await prisma.businessFee.update({ where: { id: f.id }, data: { status: 'PAID', paidAt: new Date() } });
+      const isVeriff = f.purpose === 'VERIFF';
       await prisma.notification.create({
         data: {
           userId: f.userId, type: 'SYSTEM',
           title: 'Ödəniş qəbul edildi ✓',
-          body: `Biznes yaratma haqqı (${f.amount.toFixed(2)} AZN) ödənildi. İndi biznes müraciətinizi göndərə bilərsiniz.`,
-          link: '/business',
+          body: isVeriff
+            ? `Kimlik doğrulaması haqqı (${f.amount.toFixed(2)} AZN) ödənildi. İndi Veriff ilə təsdiqi başlada bilərsiniz.`
+            : `Biznes yaratma haqqı (${f.amount.toFixed(2)} AZN) ödənildi. İndi biznes müraciətinizi göndərə bilərsiniz.`,
+          link: isVeriff ? '/profile' : '/business',
         },
       }).catch(() => {});
     } else {

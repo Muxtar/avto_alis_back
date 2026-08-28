@@ -1312,10 +1312,16 @@ model Banner {
 // Niyə ayrı model: bu ödəniş Order deyil (məhsul yoxdur, çatdırılma yoxdur,
 // komissiya yoxdur). Order cədvəlinə saxta sifariş yazmaq bütün maliyyə
 // hesabatlarını korlayardı.
+/// Birdəfəlik ödənişlər (biznes yaratma və Veriff kimlik doğrulaması).
+/// Cədvəlin adı tarixi səbəbdəndir — `purpose` sahəsi ödənişin nə üçün
+/// olduğunu ayırır, callback və hesablaşma məntiqi hər ikisi üçün ortaqdır.
 model BusinessFee {
   id     Int    @id @default(autoincrement())
   userId Int
   amount Float // ödəniş anındakı tarif (sonradan tarif dəyişsə də bu qalır)
+
+  /// BUSINESS = biznes yaratma haqqı · VERIFF = Veriff ilə kimlik doğrulaması
+  purpose String @default("BUSINESS")
 
   // UNPAID → PAID (ödənildi, hələ istifadə olunmayıb) → USED (biznes yaradıldı)
   // FAILED — şlüz ödənişi rədd etdi. REFUNDED — pul geri qaytarıldı.
@@ -1335,6 +1341,7 @@ model BusinessFee {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId, status])
+  @@index([userId, purpose, status])
   @@index([gatewayOrderId])
 }
 

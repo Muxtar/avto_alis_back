@@ -3,6 +3,10 @@ import { PrismaClient } from '@prisma/client';
 import { adminAuth, AuthRequest } from '../middleware/auth';
 import { isVeriffConfigured, createVeriffSession, verifyWebhookSignature, getVeriffDecision } from '../services/veriff';
 import { resolveFlag } from '../services/settings';
+import { feeState, feeAmount, consumeFee, releaseIdentityFee } from '../services/businessFee';
+import { createPayment as createGatewayPayment } from '../services/paymentGateway';
+
+const PUBLIC_BACKEND_URL = process.env.PUBLIC_BACKEND_URL || `http://localhost:${process.env.PORT || 5001}`;
 import { normalizeName } from '../services/credentialAI';
 
 const router = Router();
@@ -37,6 +41,8 @@ async function applyDecision(userId: number, v: any): Promise<string> {
         idAiReason: 'Veriff: təsdiqləndi',
       },
     });
+    // Təsdiq alındı — indi haqq xərclənir (əvvəl deyil).
+    await consumeFee(userId, null, 'VERIFF').catch(() => ({ ok: false, feeId: null }));
     await prisma.notification.create({
       data: { userId, type: 'SYSTEM', title: 'Kimlik təsdiqləndi ✅', body: 'Şəxsiyyətiniz Veriff ilə uğurla təsdiqləndi.', link: '/profile' },
     }).catch(() => {});
@@ -45,8 +51,10 @@ async function applyDecision(userId: number, v: any): Promise<string> {
       where: { id: userId },
       data: { idVerifyStatus: 'REJECTED', veriffStatus: status, idAiReason: `Veriff: rədd edildi${v?.reason ? ` — ${v.reason}` : ''}` },
     });
+    // Rədd olundu — ödəniş yanmır, növbəti cəhddə yenidən işlənir.
+    await releaseIdentityFee(userId).catch(() => {});
     await prisma.notification.create({
-      data: { userId, type: 'SYSTEM', title: 'Kimlik təsdiqi alınmadı', body: 'Veriff doğrulaması rədd edildi. Yenidən cəhd edə bilərsiniz.', link: '/profile' },
+      data: { userId, type: 'SYSTEM', title: 'Kimlik təsdiqi alınmadı', body: 'Veriff doğrulaması rədd edildi. Yenidən cəhd edə bilərsiniz — təkrar ödəniş tələb olunmur.', link: '/profile' },
     }).catch(() => {});
   } else if (['resubmission_requested', 'expired', 'abandoned'].includes(status)) {
     await prisma.user.update({
@@ -69,15 +77,57 @@ async function applyDecision(userId: number, v: any): Promise<string> {
 //   mode = 'veriff' → Veriff pəncərəsi açılır, nəticə birbaşa Veriff-dən gəlir
 //   mode = 'manual' → istifadəçi şəkilləri göndərir, ADMİN gözlə baxıb təsdiqləyir
 // Admin `veriff_enabled` açarını söndürəndə (test mərhələsi) `manual`-a keçilir.
-router.get('/veriff/status', adminAuth, async (_req: AuthRequest, res: Response) => {
+router.get('/veriff/status', adminAuth, async (req: AuthRequest, res: Response) => {
   const configured = isVeriffConfigured();
   const enabled = configured && (await resolveFlag('veriff_enabled'));
+  // Veriff seçimi ödənişlidir (tarif admin paneldən). Admin yoxlaması pulsuzdur.
+  const fee = await feeState(req.adminId!, 'VERIFF');
   res.json({
     success: true,
     configured,
     enabled,
     mode: enabled ? 'veriff' : 'manual',
+    fee: { amount: fee.amount, required: fee.required, paid: fee.paid },
   });
+});
+
+// Veriff haqqının ödənişini başlat — şlüz səhifəsinin linkini qaytarır.
+router.post('/me/veriff/fee/pay', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    if (!(await resolveFlag('veriff_enabled')) || !isVeriffConfigured()) {
+      res.status(400).json({ success: false, code: 'VERIFF_DISABLED', message: 'Veriff hazırda aktiv deyil' });
+      return;
+    }
+    const me = await prisma.user.findUnique({ where: { id: req.adminId! }, select: { idVerifyStatus: true } });
+    if (me?.idVerifyStatus === 'APPROVED') {
+      res.status(400).json({ success: false, message: 'Kimliyiniz artıq təsdiqlənib' }); return;
+    }
+    const amount = await feeAmount('VERIFF');
+    if (amount <= 0) {
+      res.status(400).json({ success: false, message: 'Veriff hazırda pulsuzdur — ödəniş tələb olunmur.' }); return;
+    }
+    const st = await feeState(req.adminId!, 'VERIFF');
+    if (st.paid) {
+      res.status(400).json({ success: false, code: 'ALREADY_PAID', message: 'Ödənilmiş haqqınız var — birbaşa doğrulamanı başlada bilərsiniz.' });
+      return;
+    }
+
+    const reference = `VF${req.adminId}-${Date.now()}`;
+    const pay = await createGatewayPayment({
+      amount, reference,
+      title: 'Kimlik doğrulaması',
+      description: 'Veriff ilə kimlik təsdiqi — birdəfəlik haqq',
+      callbackBase: PUBLIC_BACKEND_URL, language: 'az',
+    });
+    await prisma.businessFee.create({
+      data: {
+        userId: req.adminId!, amount, status: 'UNPAID', purpose: 'VERIFF',
+        gatewayProvider: pay.provider, gatewayRef: pay.ref,
+        gatewayOrderId: pay.gatewayOrderId, gatewayPassword: pay.password,
+      },
+    });
+    res.json({ success: true, amount, redirectUrl: pay.redirectUrl, reference: pay.ref });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
 
 // İstifadəçi: doğrulama sessiyası yarat — qaytarılan URL-də sənəd + video-selfie çəkilir.
@@ -89,6 +139,16 @@ router.post('/me/veriff/session', adminAuth, async (req: AuthRequest, res: Respo
       res.status(400).json({
         success: false, code: 'VERIFF_DISABLED',
         message: 'Veriff söndürülüb — kimliyi şəkillərlə göndərin, admin yoxlayacaq.',
+      });
+      return;
+    }
+    // Veriff ödənişlidir. Haqq yalnız TƏSDİQ anında xərclənir (aşağıda) —
+    // doğrulama alınmasa pul yanmır, istifadəçi yenidən cəhd edə bilir.
+    const fee = await feeState(req.adminId!, 'VERIFF');
+    if (fee.required && !fee.paid) {
+      res.status(402).json({
+        success: false, code: 'VERIFF_FEE_REQUIRED', amount: fee.amount,
+        message: `Veriff ilə dərhal təsdiq üçün ${fee.amount.toFixed(2)} AZN ödəniş tələb olunur. Admin yoxlaması pulsuzdur.`,
       });
       return;
     }

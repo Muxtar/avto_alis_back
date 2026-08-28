@@ -134,7 +134,7 @@ router.post('/me/business-fee/pay', consultationLimiter, adminAuth, async (req: 
     });
     await prisma.businessFee.create({
       data: {
-        userId: req.adminId!, amount, status: 'UNPAID',
+        userId: req.adminId!, amount, status: 'UNPAID', purpose: 'BUSINESS',
         gatewayProvider: pay.provider, gatewayRef: pay.ref,
         gatewayOrderId: pay.gatewayOrderId, gatewayPassword: pay.password,
       },
