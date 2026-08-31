@@ -11,6 +11,7 @@ import { settleOrders } from './payment';
 import { recordSettlement, recordSettlementMany, sellerBalance } from '../services/settlement';
 import { markOrdersAwaitingConfirm, getDeliveryDeadlineHours } from '../services/orderExpiry';
 import { checkPrice as yangoCheckPrice, isYangoConfigured, YANGO_MAX_WEIGHT_KG, yangoDead } from '../services/yangoDelivery';
+import { notifySellersNewOrder } from '../services/orderNotify';
 import { dispatchOrderToYango } from './yango';
 
 const PUBLIC_BACKEND_URL = process.env.PUBLIC_BACKEND_URL || `http://localhost:${process.env.PORT || 5001}`;
@@ -789,16 +790,26 @@ router.post('/cart/checkout', requireType(BUYER_TYPES), async (req: AuthRequest,
           },
         });
 
-        // Saticiya bildirim
-        await tx.notification.create({
-          data: {
-            userId: sellerId,
-            type: 'ORDER',
-            title: 'Yeni sifariş',
-            body: `Sizə yeni sifariş gəldi: ${total.toFixed(2)} AZN`,
-            link: '/orders',
-          },
-        });
+        // SATICIYA BİLDİRİŞ — yalnız sifariş HƏQİQİ olduqda.
+        //
+        // Kartla ödənişdə sifariş sətri alıcı bank səhifəsinə keçməzdən ƏVVƏL
+        // yaradılır. Əvvəl bildiriş elə buradan gedirdi: alıcı «Sifarişi
+        // tamamla» düyməsinə basan kimi satıcıya «Sizə yeni sifariş gəldi»
+        // düşürdü — alıcı ödəmədən çıxsa belə. Satıcı olmayan sifarişi
+        // gözləyirdi. İndi kart sifarişləri üçün bildiriş ödəniş
+        // təsdiqləndikdə göndərilir (services/orderNotify).
+        if (paymentMethod !== 'CARD') {
+          await tx.order.update({ where: { id: order.id }, data: { sellerNotifiedAt: new Date() } });
+          await tx.notification.create({
+            data: {
+              userId: sellerId,
+              type: 'ORDER',
+              title: 'Yeni sifariş',
+              body: `Sifariş #${order.id} — ${total.toFixed(2)} AZN (${paymentMethod === 'WALLET' ? 'balansdan ödənildi' : 'nağd'}).`,
+              link: '/orders?tab=selling',
+            },
+          });
+        }
 
         createdOrders.push(order);
       }
@@ -862,6 +873,8 @@ router.post('/cart/checkout', requireType(BUYER_TYPES), async (req: AuthRequest,
         await prisma.order.updateMany({ where: { id: { in: orders.map((o) => o.id) } }, data: { paymentStatus: 'PAID' } });
         await recordSettlementMany(orders.map((o) => o.id)).catch(() => {});
         await markOrdersAwaitingConfirm(orders.map((o) => o.id)).catch(() => {});
+        // Ödəniş tələb olunmadı, amma sifariş həqiqidir — satıcıya indi xəbər ver.
+        await notifySellersNewOrder(orders.map((o) => o.id)).catch(() => {});
       } else if (savedCardId) {
         // ── SAXLANMIŞ KARTLA ÖDƏNİŞ ──
         // Yönləndirmə yoxdur: YIĞIM tokenlə sinxron çəkir, cavab dərhal gəlir.

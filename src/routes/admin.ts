@@ -1936,7 +1936,26 @@ router.get('/admin/orders', requirePermission('orders'), async (req: AuthRequest
       prisma.order.count({ where }),
     ]);
 
-    res.json({ orders, total, page: parseInt(page as string), totalPages: Math.ceil(total / take) });
+    // NİYƏ BU SİFARİŞ «YOXDUR» — admin üçün izah.
+    //
+    // Panel bütün sətirləri göstərir, tərəflərin siyahısı isə yox. Ona görə
+    // admin «gözləmədə» sifariş görür, alıcı/satıcı isə «belə sifariş yoxdur»
+    // deyir. Səbəb adətən üçdən biridir: ödəniş tamamlanmayıb (kart sətri
+    // ödənişdən ƏVVƏL yaradılır), ödəniş uğursuz olub, və ya tərəf sifarişi
+    // öz siyahısından gizlədib. Bunu daha təxmin etməyə ehtiyac yoxdur.
+    const withState = orders.map((o) => {
+      const notes: string[] = [];
+      if (o.paymentMethod === 'CARD' && o.paymentStatus === 'PENDING' && o.status === 'PENDING') {
+        notes.push('Ödəniş tamamlanmayıb — alıcı bank səhifəsində ödəməyib (pul çıxmayıb)');
+      }
+      if (o.paymentStatus === 'FAILED') notes.push('Ödəniş uğursuz oldu — pul alınmayıb');
+      if (o.hiddenForBuyer && o.hiddenForSeller) notes.push('Hər iki tərəf öz siyahısından silib');
+      else if (o.hiddenForBuyer) notes.push('Alıcı öz siyahısından silib');
+      else if (o.hiddenForSeller) notes.push('Satıcı öz siyahısından silib');
+      return { ...o, adminNotes: notes };
+    });
+
+    res.json({ orders: withState, total, page: parseInt(page as string), totalPages: Math.ceil(total / take) });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }

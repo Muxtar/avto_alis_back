@@ -138,6 +138,17 @@ export const NUMBERS: NumberDef[] = [
     decimals: 2,
   },
   {
+    key: 'abandoned_checkout_minutes',
+    label: 'Tərk edilmiş ödənişin ləğv müddəti',
+    description:
+      'Kartla ödəniş seçib bank səhifəsində ödənişi tamamlamayan sifarişlər bu müddətdən sonra avtomatik ləğv edilir. Belə sifarişlər üçün pul alınmır və stok tutulmur — ləğv yalnız admin panelini «olmayan sifarişlər»dən təmizləyir. Çox qısa qoymayın: alıcı hələ bank səhifəsində ola bilər.',
+    default: 30,
+    min: 5,
+    max: 1440,
+    unit: 'dəqiqə',
+    decimals: 0,
+  },
+  {
     key: 'veriff_fee_azn',
     label: 'Veriff ilə kimlik doğrulaması haqqı',
     description:

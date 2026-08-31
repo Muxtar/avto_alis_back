@@ -10,6 +10,7 @@ import { settleConsultation } from './consultations';
 import { settleBusinessFee, isBusinessFeeRef } from '../services/businessFee';
 import { recordSettlement, recordSettlementMany } from '../services/settlement';
 import { markOrdersAwaitingConfirm } from '../services/orderExpiry';
+import { notifySellersNewOrder } from '../services/orderNotify';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -72,6 +73,8 @@ export async function settleOrders(where: { gatewayProvider?: string; gatewayRef
   await recordSettlementMany(orders.map((o) => o.id)).catch(() => {});
   // Kartla ödənilən sifarişlərə satıcı təsdiqi son vaxtını qoy (timeout refund üçün).
   if (paid) await markOrdersAwaitingConfirm(orders.map((o) => o.id)).catch(() => {});
+  // Satıcıya «yeni sifariş» bildirişi MƏHZ İNDİ gedir — pul gəldikdən sonra.
+  if (paid) await notifySellersNewOrder(orders.map((o) => o.id)).catch(() => {});
 }
 
 // ====================== CALLBACK ======================
@@ -106,8 +109,17 @@ router.get('/payment/callback', async (req: Request, res: Response) => {
     });
 
     if (paid) {
+      // GEC GƏLƏN ÖDƏNİŞ: sifariş artıq ləğv olunubsa (satıcı rədd etdi, vaxt
+      // keçdi, alıcı ləğv etdi) pul saxlanıla bilməz — dərhal qaytarılır.
+      // Bu yoxlama YIĞIM yolunda (settleOrders) vardı, Kapital yolunda yox idi.
+      for (const o of orders.filter((x) => x.status === 'CANCELLED')) {
+        console.warn(`[payment/callback] ləğv olunmuş sifariş #${o.id} üçün gec ödəniş — avtomatik qaytarılır`);
+        await refundOrderSafe(o.id, 'CANCELLED', o.total).catch((e) => console.error('[payment/callback] gec ödəniş qaytarması:', e?.message));
+      }
       // Yalnız hələ PENDING olanları təsdiqlə — satıcı/biznes artıq CANCELLED edibsə dirçəltmə.
       await prisma.order.updateMany({ where: { gatewayOrderId, status: 'PENDING' }, data: { status: 'CONFIRMED' } });
+      // Satıcıya bildiriş — ödəniş təsdiqləndikdən SONRA (bir dəfə).
+      await notifySellersNewOrder(orders.filter((o) => o.status !== 'CANCELLED').map((o) => o.id)).catch(() => {});
       // FAILED→PAID keçidində əvvəl geri qaytarılmış stoku yenidən tut (over-increment-in qarşısını alır).
       for (const o of orders) {
         if (!o.stockRestored) continue;

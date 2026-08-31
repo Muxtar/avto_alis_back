@@ -662,6 +662,11 @@ model Order {
   hiddenForSeller     Boolean         @default(false) // satıcı öz siyahısından gizlədib (sil)
   stockCommitted      Boolean         @default(false) // KART: stok ödəniş təsdiqlənəndə (PAID) bir dəfə azaldılır (idempotentlik)
   paidAt              DateTime? // kartla ödənişin təsdiq olunduğu an
+  // Satıcıya «yeni sifariş» bildirişi göndərilib? KARTDA bildiriş sifariş
+  // yaradılanda YOX, ödəniş təsdiqlənəndə gedir — alıcı ödəmədən çıxsa satıcı
+  // boş yerə xəbərdar edilməsin. Bu sahə təkrar bildirişin qarşısını alır
+  // (callback + status sorğusu eyni sifarişi iki dəfə settle edə bilər).
+  sellerNotifiedAt    DateTime?
   confirmDeadline     DateTime? // satıcının təsdiq etməli olduğu son vaxt (keçsə avtomatik refund)
   // Satıcı təsdiqlədikdən sonra malın yola düşməli olduğu son vaxt.
   // Kuryer tapılmasa, satıcı göndərməsə və ya sistemdə problem olsa sifariş

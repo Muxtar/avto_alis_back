@@ -29,6 +29,56 @@ export async function getDeliveryDeadlineHours(): Promise<number> {
   return Number(process.env.DELIVERY_DEADLINE_HOURS) || 72;
 }
 
+// Ödənilməmiş/tərk edilmiş kart checkout-u üçün vaxt (dəqiqə) — Setting
+// `abandoned_checkout_minutes`, default 30. 5..1440 aralığında.
+export async function getAbandonedCheckoutMinutes(): Promise<number> {
+  try {
+    const row = await prisma.setting.findUnique({ where: { key: 'abandoned_checkout_minutes' } });
+    const n = row ? parseFloat(row.value) : NaN;
+    if (Number.isFinite(n) && n >= 5 && n <= 1440) return n;
+  } catch { /* keç */ }
+  return Number(process.env.ABANDONED_CHECKOUT_MINUTES) || 30;
+}
+
+// TƏRK EDİLMİŞ KART CHECKOUT-U — «olmayan sifarişlər»in kökü.
+//
+// Kartla ödəyəndə sifariş sətri alıcı bank səhifəsinə keçməzdən ƏVVƏL
+// yaradılır. Alıcı ödəmədən çıxsa (pəncərəni bağladı, kart rədd etdi, geri
+// döndü) sətir `status: PENDING` + `paymentStatus: PENDING/FAILED` olaraq
+// ƏBƏDİ qalırdı. Alıcı üçün belə sifariş yoxdur — pul çıxmayıb; admin
+// panelində isə «gözləmədə» kimi görünürdü və heç vaxt yox olmurdu.
+//
+// Belə sətirlər müəyyən müddətdən sonra ləğv edilir. Təhlükəsizdir:
+//   • pul alınmayıb → qaytarılacaq bir şey yoxdur
+//   • kartda stok yalnız ödəniş təsdiqində tutulur (stockCommitted) → stok azad
+//   • satıcıya bildiriş getməyib (sellerNotifiedAt) → kimsə gözləmir
+// Ödəniş gec gəlsə şlüz callback-ləri ləğv olunmuş sifariş üçün pulu
+// avtomatik geri qaytarır (settleOrders / payment callback).
+export async function expireAbandonedCheckouts(): Promise<number> {
+  try {
+    const minutes = await getAbandonedCheckoutMinutes();
+    const cutoff = new Date(Date.now() - minutes * 60 * 1000);
+    const r = await prisma.order.updateMany({
+      where: {
+        paymentMethod: 'CARD',
+        status: 'PENDING',
+        paymentStatus: { in: ['PENDING', 'FAILED'] },
+        paidAt: null,
+        stockCommitted: false,
+        createdAt: { lt: cutoff },
+      },
+      data: { status: 'CANCELLED', confirmDeadline: null, deliveryDeadline: null },
+    });
+    if (r.count > 0) {
+      console.log(`[orderExpiry] ${r.count} tərk edilmiş (ödənilməmiş) kart sifarişi ləğv edildi.`);
+    }
+    return r.count;
+  } catch (e) {
+    console.error('[orderExpiry] expireAbandonedCheckouts:', (e as any)?.message);
+    return 0;
+  }
+}
+
 // Kartla ödənilən (gateway) sifarişlər PAID olanda çağırılır: təsdiq son vaxtını
 // təyin edir. Yalnız hələ PENDING olan və deadline təyin olunmamış sifarişlərə.
 export async function markOrdersAwaitingConfirm(orderIds: number[]): Promise<void> {
@@ -194,6 +244,9 @@ export async function expireUndeliveredOrders(): Promise<number> {
 // Server başlayanda periodik yoxlama qur (hər 10 dəqiqə) + dərhal bir dəfə.
 export function startOrderExpiryJob() {
   const run = () => {
+    // Ödənilməmiş, tərk edilmiş kart sifarişlərini təmizlə — admin panelində
+    // «olmayan sifariş gözləmədə» kimi qalmasınlar.
+    expireAbandonedCheckouts().catch(() => {});
     expireUnconfirmedOrders().catch(() => {});
     // Təsdiqlənib, amma göndərilməyən sifarişlər — pul alıcıda ilişib qalmasın.
     expireUndeliveredOrders().catch(() => {});
