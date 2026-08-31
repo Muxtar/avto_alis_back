@@ -2397,6 +2397,91 @@ router.put('/admin/orders/:id/status', requirePermission('orders'), async (req: 
   }
 });
 
+// ===================== SİFARİŞ SİLMƏ (admin) =====================
+//
+// Panelde sifarişlər yığılıb qalır: tərk edilmiş ödənişlər, ləğv olunmuş
+// sınaq sifarişləri və s. Bunları silmək lazımdır — LAKİN sifariş maliyyə
+// sənədidir. Ona görə tək qayda var:
+//
+//   PUL SİSTEMƏ GİRİBSƏ (paymentStatus = PAID) SİFARİŞ SİLİNMİR.
+//
+// Belə sifarişi silmək hesabatları, satıcı hesablaşmasını (SellerLedger) və
+// iadə tarixçəsini pozar. Admin əvvəlcə pulu qaytarmalıdır — qaytarıldıqdan
+// sonra (REFUNDED) silmək olar.
+//
+// Sifarişlə birlikdə gedənlər: OrderItem, ReturnRequest, SellerRating,
+// RefundAttempt (sxemdə Cascade). SellerLedger və Complaint isə sifarişə
+// FK ilə bağlı deyil — onları əl ilə təmizləyirik/ayırırıq ki, hesabatlarda
+// «sahibsiz» sətir qalmasın.
+const ORDER_DELETABLE_PAYMENT = ['PENDING', 'FAILED', 'REFUNDED'] as const;
+
+async function deleteOrderRows(ids: number[]): Promise<number> {
+  if (!ids.length) return 0;
+  return prisma.$transaction(async (tx) => {
+    // Satıcı hesablaşma sətri (FK yoxdur) — sifariş gedirsə o da getməlidir.
+    await tx.sellerLedger.deleteMany({ where: { orderId: { in: ids } } });
+    // Şikayət qalır (istifadəçi arasındakı mübahisə sənədidir), yalnız
+    // silinmiş sifarişə olan istinad qopardılır.
+    await tx.complaint.updateMany({ where: { orderId: { in: ids } }, data: { orderId: null } });
+    const r = await tx.order.deleteMany({ where: { id: { in: ids } } });
+    return r.count;
+  });
+}
+
+// Tək sifarişi sil.
+router.delete('/admin/orders/:id', requirePermission('orders'), async (req: AuthRequest, res: Response) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (Number.isNaN(id)) { res.status(400).json({ success: false, message: 'Yanlış sifariş ID' }); return; }
+    const order = await prisma.order.findUnique({
+      where: { id },
+      select: { id: true, status: true, paymentStatus: true, total: true },
+    });
+    if (!order) { res.status(404).json({ success: false, message: 'Sifariş tapılmadı' }); return; }
+    if (!ORDER_DELETABLE_PAYMENT.includes(order.paymentStatus as any)) {
+      res.status(400).json({
+        success: false,
+        message: `Bu sifariş ödənilib (${order.total.toFixed(2)} AZN) — silinə bilməz. Əvvəlcə pulu iadə edin, sonra silin.`,
+      });
+      return;
+    }
+    await deleteOrderRows([id]);
+    res.json({ success: true, deleted: 1 });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+// Toplu təmizlik — ödənilməmiş/ləğv olunmuş köhnə sifarişlər.
+// body: { days?: number (default 30), dryRun?: boolean }
+//
+// Toplu silmədə REFUNDED sifarişlər İŞTİRAK ETMİR: onlarda pul hərəkəti
+// olub və tarixçə dəyərlidir. Belə sifarişi admin tək-tək, bilərəkdən silir.
+router.post('/admin/orders/cleanup', requirePermission('orders'), async (req: AuthRequest, res: Response) => {
+  try {
+    const days = Math.min(3650, Math.max(0, parseInt(String(req.body?.days ?? 30)) || 0));
+    const cutoff = new Date(Date.now() - days * 24 * 3600 * 1000);
+    const where: Prisma.OrderWhereInput = {
+      status: 'CANCELLED',
+      paymentStatus: { in: ['PENDING', 'FAILED'] },
+      createdAt: { lt: cutoff },
+    };
+    const count = await prisma.order.count({ where });
+    if (req.body?.dryRun) { res.json({ success: true, count, days, dryRun: true }); return; }
+    if (count === 0) { res.json({ success: true, deleted: 0, days }); return; }
+    // Böyük təmizlikdə tranzaksiyanı boğmamaq üçün hissə-hissə.
+    let deleted = 0;
+    for (;;) {
+      const batch = await prisma.order.findMany({ where, select: { id: true }, take: 500 });
+      if (!batch.length) break;
+      deleted += await deleteOrderRows(batch.map((o) => o.id));
+    }
+    res.json({ success: true, deleted, days });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
 // ===================== USER BLOCK / UNBLOCK =====================
 
 router.put('/admin/users/:id/block', requirePermission('users'), async (req: AuthRequest, res: Response) => {
