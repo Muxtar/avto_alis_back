@@ -21,6 +21,21 @@ export function isYangoConfigured(): boolean {
 // Yango yük limiti (kq). Bundan ağır sifarişlər kuryerlə göndərilə bilməz.
 export const YANGO_MAX_WEIGHT_KG = Number(process.env.YANGO_MAX_WEIGHT_KG || 50);
 
+// Claim-in "ölü" (bir daha hərəkət etməyəcək) statusları. Belə sifariş üçün
+// yeni claim yaradıla bilər — satıcı kuryeri yenidən çağıra bilsin.
+//
+// Bu siyahı ROUTE-da deyil, BURADA saxlanılır: həm yango, həm cart marşrutu
+// "çatdırılma dağıldımı?" sualını verir və iki nüsxə saxlamaq təhlükəlidir.
+export const YANGO_DEAD = [
+  'cancelled', 'cancelled_by_taxi', 'cancelled_with_payment', 'cancelled_with_items_on_hands',
+  'failed', 'estimating_failed', 'performer_not_found', 'returned', 'returned_finish',
+];
+
+/** Çatdırılma bitib/dağılıbmı — kuryer bir daha hərəkət etməyəcək. */
+export function yangoDead(status?: string | null): boolean {
+  return YANGO_DEAD.includes(String(status || ''));
+}
+
 // TARİF SİNFİ — qiymətə ƏN ÇOX TƏSİR EDƏN parametr.
 //
 // Əvvəl hər yerdə sabit `express` yazılırdı. `express` sürətli/prioritet

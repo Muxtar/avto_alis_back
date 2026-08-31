@@ -10,7 +10,7 @@ import { missingRequiredConsents } from '../services/legal';
 import { settleOrders } from './payment';
 import { recordSettlement, recordSettlementMany, sellerBalance } from '../services/settlement';
 import { markOrdersAwaitingConfirm, getDeliveryDeadlineHours } from '../services/orderExpiry';
-import { checkPrice as yangoCheckPrice, isYangoConfigured, YANGO_MAX_WEIGHT_KG } from '../services/yangoDelivery';
+import { checkPrice as yangoCheckPrice, isYangoConfigured, YANGO_MAX_WEIGHT_KG, yangoDead } from '../services/yangoDelivery';
 import { dispatchOrderToYango } from './yango';
 
 const PUBLIC_BACKEND_URL = process.env.PUBLIC_BACKEND_URL || `http://localhost:${process.env.PORT || 5001}`;
@@ -1073,10 +1073,31 @@ router.put('/orders/:id/status', adminAuth, async (req: AuthRequest, res: Respon
     // göndərilən sifarişi "təhvil aldım" edə bilər. (Göndərildikdən sonra ləğv yoxdur — mallar yoldadır.)
     const BUYER_TRANSITIONS: Record<string, string[]> = { PENDING: ['CANCELLED'], CONFIRMED: ['CANCELLED'], SHIPPED: ['DELIVERED'] };
     const allowed = isSeller ? (ORDER_TRANSITIONS[order.status] || []) : (BUYER_TRANSITIONS[order.status] || []);
-    if (!allowed.includes(next)) {
+
+    // ── ÇIXILMAZ VƏZİYYƏTİN QARŞISI: dağılmış çatdırılma ──
+    //
+    // SHIPPED statusunu çox vaxt İNSAN deyil, Yango qoyur: claim `pickuped`
+    // olan kimi sifariş avtomatik SHIPPED-ə keçir. Sonra kuryer ləğv edilirsə
+    // (satıcı ləğv etdi, kuryer imtina etdi, mal geri qayıtdı) sifariş SHIPPED
+    // olaraq qalır — cədvəldə isə SHIPPED-dən yalnız DELIVERED var.
+    // Nəticə: heç kim sifarişi bağlaya bilmir. Satıcı "ləğv et" düyməsinə
+    // basır → 400, alıcının pulu isə sonsuza qədər ilişib qalır. Halbuki
+    // sistem alıcıya məhz "sifarişi ləğv edib pulunuzu geri ala bilərsiniz"
+    // bildirişini göndərir (bax: routes/yango.ts, syncOrderStatus).
+    //
+    // Ona görə: kuryer ARTIQ HƏRƏKƏT ETMƏYƏCƏKSƏ (claim ölü statusdadır)
+    // SHIPPED-dən ləğv həm satıcıya, həm alıcıya açılır. Canlı kuryeri olan
+    // sifariş isə əvvəlki kimi qorunur — mallar yoldadırsa ləğv yoxdur.
+    const deliveryCollapsed =
+      order.status === 'SHIPPED' && !!order.yangoClaimId && yangoDead(order.yangoStatus);
+    const canCancelStuck = next === 'CANCELLED' && deliveryCollapsed;
+
+    if (!allowed.includes(next) && !canCancelStuck) {
       res.status(400).json({
         success: false,
-        message: `${order.status} → ${next} keçidi icazə verilmir`,
+        message: order.status === 'SHIPPED' && next === 'CANCELLED'
+          ? 'Sifariş artıq yoldadır — kuryer aktiv olduğu müddətdə ləğv edilə bilməz. Çatdırılmanı ləğv edin, sonra sifarişi bağlaya bilərsiniz.'
+          : `${order.status} → ${next} keçidi icazə verilmir`,
       });
       return;
     }

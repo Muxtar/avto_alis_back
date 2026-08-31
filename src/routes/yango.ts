@@ -5,7 +5,7 @@ import { emitToUser } from '../services/callSignaling';
 import {
   isYangoConfigured, checkPrice, createClaim, acceptClaim, getClaimInfo,
   getPerformerPosition, getCancelInfo, cancelClaim, mapYangoStatus, YANGO_MAX_WEIGHT_KG, type Geo,
-  getTrackingLinks, toE164, getPointsEta, getDriverPhone, getConfirmationCode,
+  getTrackingLinks, toE164, getPointsEta, getDriverPhone, getConfirmationCode, YANGO_DEAD,
 } from '../services/yangoDelivery';
 
 const router = Router();
@@ -65,13 +65,6 @@ async function syncOrderStatus(orderId: number, current: string, yangoStatus: st
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
-// Claim-in "ölü" (bir daha hərəkət etməyəcək) statusları. Belə sifariş üçün
-// yeni claim yaradıla bilər — satıcı kuryeri yenidən çağıra bilsin.
-export const YANGO_DEAD = [
-  'cancelled', 'cancelled_by_taxi', 'cancelled_with_payment', 'cancelled_with_items_on_hands',
-  'failed', 'estimating_failed', 'performer_not_found', 'returned', 'returned_finish',
-];
 
 // Yango axını: create → estimating → ready_for_approval → **accept** → performer_lookup.
 //
