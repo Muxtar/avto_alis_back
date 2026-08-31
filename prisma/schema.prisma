@@ -381,6 +381,17 @@ model Listing {
   allowSelfDelivery Boolean         @default(false)
   // Yalnız alıcı gəlib götürsün — Yango və satıcı çatdırması bağlıdır (məs. avtomobil).
   pickupOnly        Boolean         @default(false)
+  // ── TAKSİT (hissəli alış) — SATICININ SEÇİMİ ──
+  // Əvvəl taksit hər biznes elanında avtomatik açıq idi və satıcı onu nə
+  // bağlaya, nə də ay sayını məhdudlaşdıra bilirdi. İndi elanı qoyan özü
+  // qərar verir. Köhnə elanların davranışı dəyişməsin deyə default AÇIQdır.
+  //
+  // DİQQƏT: taksit alıcının ÖZ taksit kartı (BirKart/Tamkart) ilə işləyir —
+  // satıcı tam məbləği bir dəfəyə alır, bank onu kart sahibi üçün bölür.
+  // Bu sahələr yalnız taksitin təklif olunub-olunmadığını idarə edir.
+  installmentEnabled   Boolean        @default(true)
+  // Ən çox neçə aya bölünə bilər (3/6/9/12/18). null → limit yoxdur.
+  installmentMaxMonths Int?
   // Satıcı özü çatdıranda qeyd/qiymət (məs. "Şəhər içi 10 AZN, kənar 20 AZN").
   selfDeliveryNote  String?
   // Məhsulun çəkisi (kq, bir ədəd). Yango yük limiti (50 kq) yoxlanışı üçün.

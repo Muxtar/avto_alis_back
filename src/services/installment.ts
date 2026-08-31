@@ -25,6 +25,44 @@ export function installmentAllowed(amount: number, isBusiness: boolean): boolean
   return isBusiness && amount >= INSTALLMENT_MIN_AMOUNT;
 }
 
+// Elanın taksit parametrləri — satıcının seçimi.
+type ListingInstallmentFields = {
+  businessId?: number | null;
+  businessObjectId?: number | null;
+  installmentEnabled?: boolean | null;
+  installmentMaxMonths?: number | null;
+};
+
+/** Elan biznesə bağlıdırmı — taksit yalnız belə elanlarda mümkündür. */
+export function isBusinessListing(l: ListingInstallmentFields): boolean {
+  return !!(l.businessId || l.businessObjectId);
+}
+
+/**
+ * Bu elan üçün seçilə bilən ay variantları.
+ * Satıcı taksiti bağlayıbsa və ya elan biznes elanı deyilsə — boş.
+ */
+export function monthsForListing(l: ListingInstallmentFields): number[] {
+  if (!isBusinessListing(l) || l.installmentEnabled === false) return [];
+  const max = l.installmentMaxMonths;
+  return INSTALLMENT_MONTHS.filter((m) => !max || m <= max);
+}
+
+/** Sifarişdəki BÜTÜN məhsullar üçün ortaq ay variantları (ən dar məhdudiyyət). */
+export function monthsForListings(list: ListingInstallmentFields[]): number[] {
+  if (!list.length) return [];
+  return list.reduce<number[]>(
+    (acc, l) => acc.filter((m) => monthsForListing(l).includes(m)),
+    [...INSTALLMENT_MONTHS],
+  );
+}
+
+/** Ay sayının dəyəri elanların icazə verdiyi aralıqdadırmı. */
+export function monthsAllowedFor(list: ListingInstallmentFields[], months: unknown): boolean {
+  const n = typeof months === 'number' ? months : parseInt(String(months ?? ''), 10);
+  return monthsForListings(list).includes(n);
+}
+
 // Aylıq ödəniş — 0% faizlə bərabər bölgü. Yuvarlaqlaşdırmadan yaranan
 // qəpik fərqi SON aya yazılır ki, cəm həmişə tam məbləğə bərabər olsun.
 export function monthlyPayment(amount: number, months: number): { monthly: number; last: number; total: number } {

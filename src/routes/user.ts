@@ -10,6 +10,7 @@ import { analyzeCredential, verifyIdentityAI, extractIdName } from '../services/
 import { sendVerificationCode } from '../services/mailer';
 import { resolveFlag } from '../services/settings';
 import { emitToAdmins } from '../services/callSignaling';
+import { isValidMonths } from '../services/installment';
 import fs from 'fs';
 import path from 'path';
 
@@ -519,6 +520,12 @@ router.post('/me/listings', listingWriteLimiter, adminAuth, upload.array('images
     const { title, description, price, category, type, location, phone, condition, country, brand, stock, forVehicle, unit, unitValue, year, model, city, fuelType, paymentType, businessObjectId, attributes, listingMode, barter, forRent, bookable, bookingType, maxGuests, openTime, closeTime, deliveryMethod } = req.body;
     const isBookable = bookable === true || bookable === 'true';
     const selfDeliveryOn = deliveryMethod === 'SELF' || req.body.allowSelfDelivery === true || req.body.allowSelfDelivery === 'true';
+    // TAKSİT — satıcının seçimi. Göndərilməsə köhnə davranış (açıq) qalır.
+    // Ay limiti yalnız icazəli variantlardan biri ola bilər (3/6/9/12/18).
+    const instOn = req.body.installmentEnabled === undefined
+      ? true
+      : !(req.body.installmentEnabled === false || req.body.installmentEnabled === 'false');
+    const instMax = isValidMonths(req.body.installmentMaxMonths) ? Number(req.body.installmentMaxMonths) : null;
     const wKg = req.body.weightKg != null && req.body.weightKg !== '' ? Math.max(0, parseFloat(String(req.body.weightKg))) : null;
     const validBookingType = bookingType === 'RESERVATION' || bookingType === 'STAY' ? bookingType : null;
     const parsedAttrs = (() => { try { const o = attributes ? JSON.parse(attributes) : null; return o && typeof o === 'object' && Object.keys(o).length ? o : undefined; } catch { return undefined; } })();
@@ -596,6 +603,8 @@ router.post('/me/listings', listingWriteLimiter, adminAuth, upload.array('images
         forRent: forRent === true || forRent === 'true',
         bookable: isBookable,
         allowSelfDelivery: selfDeliveryOn,
+        installmentEnabled: instOn,
+        installmentMaxMonths: instOn ? instMax : null,
         selfDeliveryNote: selfDeliveryOn ? (req.body.selfDeliveryNote?.trim() || null) : null,
         pickupOnly: req.body.pickupOnly === true || req.body.pickupOnly === 'true',
         weightKg: wKg,
@@ -675,6 +684,14 @@ router.put('/me/listings/:id', adminAuth, upload.array('images', 5), processImag
         ...(barter !== undefined && { barter: barter === true || barter === 'true' }),
         ...(forRent !== undefined && { forRent: forRent === true || forRent === 'true' }),
         ...((req.body.allowSelfDelivery !== undefined || deliveryMethod !== undefined) && { allowSelfDelivery: req.body.allowSelfDelivery === true || req.body.allowSelfDelivery === 'true' || deliveryMethod === 'SELF' }),
+        // Taksit — yalnız göndərilibsə dəyişir (multipart-da sahə boş qala bilər).
+        ...(req.body.installmentEnabled !== undefined && (() => {
+          const on = !(req.body.installmentEnabled === false || req.body.installmentEnabled === 'false');
+          return { installmentEnabled: on, ...(on ? {} : { installmentMaxMonths: null }) };
+        })()),
+        ...(req.body.installmentMaxMonths !== undefined && {
+          installmentMaxMonths: isValidMonths(req.body.installmentMaxMonths) ? Number(req.body.installmentMaxMonths) : null,
+        }),
         ...(req.body.selfDeliveryNote !== undefined && { selfDeliveryNote: req.body.selfDeliveryNote?.trim() || null }),
         ...(req.body.pickupOnly !== undefined && { pickupOnly: req.body.pickupOnly === true || req.body.pickupOnly === 'true' }),
         ...(req.body.weightKg !== undefined && { weightKg: req.body.weightKg !== '' && req.body.weightKg != null ? Math.max(0, parseFloat(String(req.body.weightKg))) : null }),

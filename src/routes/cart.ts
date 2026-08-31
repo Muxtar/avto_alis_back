@@ -4,7 +4,7 @@ import { PrismaClient, UserType } from '@prisma/client';
 import { adminAuth, requireType, AuthRequest } from '../middleware/auth';
 import { createPayment as createGatewayPayment } from '../services/paymentGateway';
 import { refundOrderSafe, restoreStockForOrder } from '../services/refunds';
-import { isValidMonths, installmentAllowed } from '../services/installment';
+import { installmentAllowed, monthsAllowedFor } from '../services/installment';
 import { chargeSavedCard } from '../services/savedCards';
 import { missingRequiredConsents } from '../services/legal';
 import { settleOrders } from './payment';
@@ -770,9 +770,13 @@ router.post('/cart/checkout', requireType(BUYER_TYPES), async (req: AuthRequest,
             // Yeni kartla ödəyib "yadda saxla" seçilibsə şlüzə save=y gedir
             // və ödəniş təsdiqlənəndə token yazılır.
             saveCardRequested: paymentMethod === 'CARD' && !savedCardId && saveCard === true,
+            // Ay sayı SATICININ elandakı seçimi ilə yoxlanılır: taksiti
+            // bağlayıbsa və ya limit qoyubsa (məs. ən çox 6 ay) alıcı daha
+            // uzun plan seçə bilmir. Əvvəl yoxlama yalnız «biznes elanıdırmı»
+            // idi — satıcının sözü keçmirdi.
             installmentMonths:
-              paymentMethod === 'CARD' && isValidMonths(installmentMonths)
-                && items.every((i) => !!(i.listing as any).businessObjectId)
+              paymentMethod === 'CARD'
+                && monthsAllowedFor(items.map((i) => i.listing as any), installmentMonths)
                 && installmentAllowed(total, true)
                 ? Number(installmentMonths)
                 : null,

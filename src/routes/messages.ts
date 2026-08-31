@@ -11,7 +11,7 @@ const prisma = new PrismaClient();
 // Mesajın müştəriyə göndərilən standart forması (göndərən, reaksiyalar, cavab).
 const msgInclude = {
   sender: { select: { id: true, name: true, avatar: true } },
-  listing: { select: { id: true, title: true, price: true, images: true, city: true } },
+  listing: { select: { id: true, title: true, price: true, images: true, city: true, businessId: true, businessObjectId: true, installmentEnabled: true, installmentMaxMonths: true } },
   // Hansı biznes obyektinə (filial) aid olduğu — chat-da göstərilir.
   businessObject: { select: { id: true, name: true, city: true } },
   reactions: { select: { userId: true, emoji: true } },
@@ -475,7 +475,7 @@ router.get('/messages/conversations', adminAuth, async (req: AuthRequest, res: R
       include: {
         sender: { select: { id: true, name: true, type: true, avatar: true } },
         receiver: { select: { id: true, name: true, type: true, avatar: true } },
-        listing: { select: { id: true, title: true, price: true, images: true, city: true } },
+        listing: { select: { id: true, title: true, price: true, images: true, city: true, businessId: true, businessObjectId: true, installmentEnabled: true, installmentMaxMonths: true } },
         businessObject: { select: { id: true, name: true, city: true } },
       },
       orderBy: { createdAt: 'desc' },
