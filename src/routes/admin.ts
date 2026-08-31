@@ -7,6 +7,7 @@ import { createOtp } from '../services/otp';
 import { refund as kapitalRefund } from '../services/kapital';
 import { listFlags, setFlag, listNumbers, setNumber } from '../services/settings';
 import { checkAllServices } from '../services/serviceHealth';
+import { emitToUser } from '../services/callSignaling';
 import { runWebSearchTest } from '../services/webSearchAI';
 import { runAgent } from '../services/aiAgent';
 import { getCommissionPercent, setCommissionPercent, createPayout, sellerBalance, getPayoutHoldDays, setPayoutHoldDays } from '../services/settlement';
@@ -1651,30 +1652,44 @@ router.get('/admin/listing-owners', requirePermission('listings'), async (req: A
     const objById = new Map(objects.map((o) => [o.id, o]));
     const userById = new Map(users.map((u) => [u.id, u]));
 
+    // SAHİB TAPILMASA DA ELAN İTMƏMƏLİDİR.
+    //
+    // Əvvəl `continue` vardı: obyekt/istifadəçi sətri oxuna bilmirsə həmin
+    // elanlar siyahıdan tamamilə düşürdü. Sidebar nişanı isə (filtrsiz
+    // `count`) onları saymağa davam edirdi — nəticədə «2 elan gözləyir»
+    // yazılır, moderasiya səhifəsi isə boş görünürdü və elanı nə təsdiqləmək,
+    // nə də rədd etmək mümkün olmurdu. İndi belə elanlar «sahibi naməlum»
+    // qrupuna düşür: nişan da, siyahı da eyni şeyi göstərir.
     for (const r of objRows) {
       const o = objById.get(r.businessObjectId!);
-      if (!o) continue;
-      const key = `OBJECT:${o.id}`;
+      const key = o ? `OBJECT:${o.id}` : `OBJECT:${r.businessObjectId}`;
       if (!owners.has(key)) {
-        owners.set(key, {
-          key, kind: 'OBJECT', id: o.id,
-          name: `${o.name} (Obyekt №${o.id})`,
-          subtitle: [o.business?.name, o.city].filter(Boolean).join(' · ') || null,
-          voen: o.business?.voen || null,
-          total: 0, pending: 0, approved: 0, rejected: 0,
-        });
+        owners.set(key, o
+          ? {
+              key, kind: 'OBJECT', id: o.id,
+              name: `${o.name} (Obyekt №${o.id})`,
+              subtitle: [o.business?.name, o.city].filter(Boolean).join(' · ') || null,
+              voen: o.business?.voen || null,
+              total: 0, pending: 0, approved: 0, rejected: 0,
+            }
+          : {
+              key, kind: 'OBJECT', id: r.businessObjectId!,
+              name: `Silinmiş obyekt №${r.businessObjectId}`,
+              subtitle: 'Obyekt tapılmadı — elan sahibsiz qalıb',
+              voen: null,
+              total: 0, pending: 0, approved: 0, rejected: 0,
+            });
       }
       bump(owners.get(key)!, r.status, r._count._all);
     }
     for (const r of userRows) {
       const u = userById.get(r.userId);
-      if (!u) continue;
-      const key = `USER:${u.id}`;
+      const key = `USER:${r.userId}`;
       if (!owners.has(key)) {
         owners.set(key, {
-          key, kind: 'USER', id: u.id,
-          name: u.name || `İstifadəçi №${u.id}`,
-          subtitle: u.phone || null,
+          key, kind: 'USER', id: r.userId,
+          name: u ? (u.name || `İstifadəçi №${u.id}`) : `Silinmiş istifadəçi №${r.userId}`,
+          subtitle: u ? u.phone : 'İstifadəçi tapılmadı — elan sahibsiz qalıb',
           voen: null,
           total: 0, pending: 0, approved: 0, rejected: 0,
         });
@@ -1693,7 +1708,11 @@ router.get('/admin/listing-owners', requirePermission('listings'), async (req: A
     // Gözləyəni çox olan sahib yuxarıda — moderasiya növbəsi üçün rahat.
     list.sort((a, b) => b.pending - a.pending || b.total - a.total || a.name.localeCompare(b.name));
 
-    res.json({ success: true, owners: list });
+    // Sidebar nişanının saydığı HƏQİQİ rəqəm — səhifə öz cəmi ilə tutuşdurub
+    // uyğunsuzluq varsa admini xəbərdar edə bilsin (səssiz itki olmasın).
+    const pendingTotal = await prisma.listing.count({ where: { status: 'PENDING' } });
+
+    res.json({ success: true, owners: list, pendingTotal });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }
@@ -1718,6 +1737,25 @@ router.patch('/admin/listings/:id/status', requirePermission('listings'), async 
       },
       select: { id: true, title: true, status: true, rejectReason: true, userId: true },
     });
+
+    // SATICIYA XƏBƏR VER. Əvvəl moderasiya səssiz idi: elan təsdiqlənirdi və
+    // ya rədd edilirdi, satıcı isə heç nə görmürdü — profilində «gözləmədə»
+    // yazısına baxıb gözləyirdi, elanının saytda niyə olmadığını bilmirdi.
+    if (status !== 'PENDING') {
+      await prisma.notification.create({
+        data: {
+          userId: listing.userId,
+          type: 'LISTING',
+          title: status === 'APPROVED' ? 'Elanınız təsdiqləndi ✓' : 'Elanınız rədd edildi',
+          body: status === 'APPROVED'
+            ? `«${listing.title}» artıq saytda görünür.`
+            : `«${listing.title}» rədd edildi.${listing.rejectReason ? ` Səbəb: ${listing.rejectReason}` : ''} Düzəliş edib yenidən göndərə bilərsiniz.`,
+          link: status === 'APPROVED' ? `/marketplace/${listing.id}` : '/account',
+        },
+      }).catch(() => {});
+      emitToUser(listing.userId, 'listing:moderated', { id: listing.id, status: listing.status });
+    }
+
     res.json({ success: true, listing });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
