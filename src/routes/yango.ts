@@ -5,7 +5,7 @@ import { emitToUser } from '../services/callSignaling';
 import {
   isYangoConfigured, checkPrice, createClaim, acceptClaim, getClaimInfo,
   getPerformerPosition, getCancelInfo, cancelClaim, mapYangoStatus, YANGO_MAX_WEIGHT_KG, type Geo,
-  getTrackingLinks, getPointsEta, getDriverPhone, getConfirmationCode,
+  getTrackingLinks, toE164, getPointsEta, getDriverPhone, getConfirmationCode,
 } from '../services/yangoDelivery';
 
 const router = Router();
@@ -161,11 +161,24 @@ export async function dispatchOrderToYango(orderId: number): Promise<{ ok: boole
   const srcLng = obj?.longitude ?? order.seller.longitude;
   const srcAddr = obj?.address || order.seller.address || '';
   const srcName = obj?.name || order.seller.name || 'Satıcı';
-  const srcPhone = obj?.phone || order.seller.phone || '';
   if (srcLat == null || srcLng == null) return fail('Obyektin/satıcının koordinatı yoxdur');
   if (order.latitude == null || order.longitude == null) return fail('Alıcı ünvanının koordinatı yoxdur');
-  const dstPhone = order.phone || order.buyer.phone || '';
-  if (!srcPhone || !dstPhone) return fail('Göndərən və ya alıcı telefonu yoxdur');
+
+  /* Nömrələr E.164-ə salınır. Yango boşluqlu («+994 50 000 00 00») və ya
+     ölkə kodsuz («0501234567») nömrəyə `Invalid number length` qaytarır və
+     claim ÜMUMİYYƏTLƏ yaranmır. Səhvi Yango-ya getməzdən ƏVVƏL tuturuq ki,
+     satıcı anlaşılan mesaj görsün və hansı nömrənin düzəldiləcəyini bilsin. */
+  const srcRaw = obj?.phone || order.seller.phone || '';
+  const dstRaw = order.phone || order.buyer.phone || '';
+  if (!srcRaw || !dstRaw) return fail('Göndərən və ya alıcı telefonu yoxdur');
+  const srcPhone = toE164(srcRaw);
+  const dstPhone = toE164(dstRaw);
+  if (!srcPhone) {
+    return fail(`Göndərənin telefon nömrəsi düzgün deyil: «${srcRaw}». Obyektin (və ya profilin) nömrəsini +994XXXXXXXXX formatında yazın.`);
+  }
+  if (!dstPhone) {
+    return fail(`Alıcının telefon nömrəsi düzgün deyil: «${dstRaw}». Sifarişdəki əlaqə nömrəsi +994XXXXXXXXX formatında olmalıdır.`);
+  }
 
   // Yük limiti — 50 kq-dan ağır sifariş Yango ilə göndərilə bilməz.
   const totalWeight = order.items.reduce((s, i) => s + i.quantity * ((i.listing as any)?.weightKg || 0), 0);

@@ -39,6 +39,37 @@ export interface YangoContact {
   name: string;
   phone: string; // +994... (E.164)
 }
+
+/* ── TELEFON NÖMRƏSİ → E.164 ──────────────────────────────────────────────
+   Yango nömrəni CİDDİ E.164 formatında gözləyir: «+» və ardınca yalnız
+   rəqəmlər. Bizdə isə nömrə müxtəlif formalarda saxlanılır/daxil edilir:
+     "+994 50 000 00 00"  (qeydiyyatda boşluqlara icazə verilir)
+     "050 123 45 67"      (səbətdə istifadəçi belə yazır)
+     "0501234567" · "501234567" · "00994501234567"
+   Boşluqlu və ya ölkə kodsuz nömrə göndəriləndə Yango `Invalid number length`
+   qaytarır və kuryer ÜMUMİYYƏTLƏ çağırılmır — sifariş ilişib qalır.
+   Ona görə nömrə Yango-ya getməzdən əvvəl burada normallaşdırılır. */
+const DEFAULT_CC = process.env.DEFAULT_COUNTRY_CODE || '994'; // Azərbaycan
+const AZ_LOCAL_LEN = 9;                                        // 50 123 45 67 → 9 rəqəm
+
+export function toE164(raw: string | null | undefined): string | null {
+  const s = String(raw || '').trim();
+  if (!s) return null;
+
+  const hadPlus = s.startsWith('+');
+  let d = s.replace(/\D/g, '');            // boşluq, tire, mötərizə — hamısı atılır
+  if (!d) return null;
+
+  if (!hadPlus) {
+    if (d.startsWith('00')) d = d.slice(2);                       // 00994… → 994…
+    else if (d.startsWith('0') && d.length === AZ_LOCAL_LEN + 1) d = DEFAULT_CC + d.slice(1); // 0XXXXXXXXX
+    else if (d.length === AZ_LOCAL_LEN) d = DEFAULT_CC + d;       // XXXXXXXXX
+  }
+
+  // E.164: ölkə kodu ilə birlikdə 8–15 rəqəm.
+  if (d.length < 8 || d.length > 15) return null;
+  return '+' + d;
+}
 export interface YangoPoint {
   fullname: string;
   coordinates: Geo;
