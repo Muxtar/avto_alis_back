@@ -1126,7 +1126,14 @@ router.put('/orders/:id/status', adminAuth, async (req: AuthRequest, res: Respon
     }
     // DELIVERED üçün təhvil kodu YALNIZ satıcı təsdiqləyəndə tələb olunur (səhv adama təhvilin
     // qarşısı). Alıcı özü "təhvil aldım" deyəndə kod lazım deyil — özü təsdiqləyir.
-    if (next === 'DELIVERED' && isSeller && order.pickupCode) {
+    //
+    // YANGO sifarişində kod YOXDUR: kod xüsusiyyəti ləğv edilib, alıcı «TX-…»
+    // kodunu Yango sifarişində görmür də. Əvvəl Yango ilişəndə (sifariş #88)
+    // satıcı sifarişi «çatdırıldı» edə bilmirdi — görünməyən kodu istəyirdi.
+    // Kod yalnız mağazadan götürmədə, satıcının özü çatdırmasında və bizim
+    // öz kuryerimizdə (courierId) qalır.
+    const isYangoOrder = order.deliveryType !== 'PICKUP' && order.deliveryMethod === 'COURIER' && !order.courierId;
+    if (next === 'DELIVERED' && isSeller && order.pickupCode && !isYangoOrder) {
       const provided = String(req.body?.code || '').trim().toUpperCase();
       if (provided !== order.pickupCode.toUpperCase()) {
         res.status(400).json({ success: false, message: 'Təhvil kodu yanlışdır. Alıcıdan kodu soruşun.' });

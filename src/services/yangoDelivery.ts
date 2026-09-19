@@ -47,20 +47,19 @@ export function yangoDead(status?: string | null): boolean {
 // CANLI müqayisə etmək olar — təxmin etməyə ehtiyac yoxdur.
 export const YANGO_TAXI_CLASS = process.env.YANGO_TAXI_CLASS || 'courier';
 
-// TƏHVİLDƏ (ALICIDA) KOD TƏLƏB OLUNSUNMU.
+// KURYER HEÇ BİR NÖQTƏDƏ KOD İSTƏMİR (skip_confirmation: true).
 //
-// Yango kuryeri iki nöqtədə kod soruşur. Götürmə kodunu Yango API ilə verir
-// (satıcıya göstəririk). Təhvil kodunu isə VERMİR — `claims/confirmation_code`
-// kuryer ünvanda olanda da `not_found` qaytarır — və Azərbaycanda alıcıya
-// SMS də göndərilmir (sifariş #88: kuryer qapıda gözlədi, alıcıda kod yox idi).
-// Ona görə təhvil nöqtəsində kod SÖNDÜRÜLÜR (`skip_confirmation`).
-// Yango SMS-i işə salsa, Railway-də YANGO_DROPOFF_CONFIRM=1 qoyub geri açmaq olar.
-export const YANGO_DROPOFF_CONFIRM = process.env.YANGO_DROPOFF_CONFIRM === '1';
-
-// GÖTÜRMƏDƏ (SATICIDA) KOD. Sahibin qərarı ilə kod xüsusiyyəti ümumiyyətlə
-// ləğv edilib — kuryer heç bir nöqtədə kod istəmir. Geri açmaq üçün
-// Railway-də YANGO_PICKUP_CONFIRM=1 (kod satıcıya bildiriş + kartda göstərilir).
-export const YANGO_PICKUP_CONFIRM = process.env.YANGO_PICKUP_CONFIRM === '1';
+// Yango claim-in hər nöqtəsində (götürmə, təhvil, geri qaytarma) default
+// olaraq təsdiq kodu tələb edir. Götürmə kodunu API ilə verir, amma təhvil
+// kodunu VERMİR (`claims/confirmation_code` → `not_found`) və Azərbaycanda
+// alıcıya SMS də gəlmir. Nəticə: sifariş #87 kuryer kod ala bilmədiyi üçün
+// ödənişli ləğv oldu, #88-də kuryer qapıda ilişib qaldı — nə təhvil vermək,
+// nə ləğv etmək olurdu (cancel_state: unavailable).
+//
+// Sahibin qərarı: kod xüsusiyyəti TAMAMİLƏ ləğv edilib. Hər üç nöqtədə kod
+// söndürülür. Geri qaytarma nöqtəsi də AÇIQ verilir: onu Yango özü əlavə
+// edəndə kodu açıq qalırdı — alıcı malı qəbul etməsə kuryer mağazada eyni
+// problemə düşərdi.
 
 // [longitude, latitude] — Yango koordinatları belə gözləyir.
 export type Geo = [number, number];
@@ -184,15 +183,20 @@ export async function createClaim(params: {
         point_id: 1, visit_order: 1, type: 'source',
         address: { fullname: params.source.fullname, coordinates: params.source.coordinates },
         contact: params.source.contact,
-        // Satıcıdan kod istənilməsin (YANGO_PICKUP_CONFIRM izahı).
-        skip_confirmation: !YANGO_PICKUP_CONFIRM,
+        skip_confirmation: true,   // satıcıdan kod istənilmir
       },
       {
         point_id: 2, visit_order: 2, type: 'destination',
         address: { fullname: params.destination.fullname, coordinates: params.destination.coordinates },
         contact: params.destination.contact,
-        // Alıcıdan kod istənilməsin (yuxarıdakı YANGO_DROPOFF_CONFIRM izahı).
-        skip_confirmation: !YANGO_DROPOFF_CONFIRM,
+        skip_confirmation: true,   // alıcıdan kod istənilmir
+      },
+      {
+        // Alıcı qəbul etməsə mal bura (mağazaya) qayıdır — burada da kod yoxdur.
+        point_id: 3, visit_order: 3, type: 'return',
+        address: { fullname: params.source.fullname, coordinates: params.source.coordinates },
+        contact: params.source.contact,
+        skip_confirmation: true,
       },
     ],
     items: params.items.map((it) => ({
@@ -254,23 +258,8 @@ export async function getDriverPhone(claimId: string, pointId?: number) {
   return yreq('/driver-voiceforwarding', { body });
 }
 
-// Təhvil təsdiq kodu (Yango) — alıcı bunu kuryerə deyir.
-export async function getConfirmationCode(claimId: string) {
-  return yreq('/claims/confirmation_code', { body: { claim_id: claimId } });
-}
-
-/** Kuryerin HAZIRKI nöqtəsi üçün kodu qaytarır — yalnız həqiqi, rəqəmli kodu.
- *
- *  DİQQƏT: Yango xəta cavabında da `code` sahəsi qaytarır — kod hələ
- *  hazır deyilsə `{"code":"not_found","message":"Order not found"}` (HTTP 404).
- *  Əvvəl `data.code` yoxlanmadan götürülürdü və alıcıya «təhvil kodu
- *  not_found» bildirişi gedirdi (sifariş #88). Kod yalnız uğurlu cavabda və
- *  yalnız rəqəmlərdən ibarətdirsə qəbul olunur. */
-export async function getConfirmationCodeValue(claimId: string): Promise<string | null> {
-  const r = await getConfirmationCode(claimId);
-  const code = r.ok ? String(r.data?.code ?? '').trim() : '';
-  return /^\d{3,10}$/.test(code) ? code : null;
-}
+// Təsdiq kodu funksiyaları SİLİNİB — kod xüsusiyyəti ləğv edilib
+// (yuxarıdakı «KURYER HEÇ BİR NÖQTƏDƏ KOD İSTƏMİR» izahına bax).
 
 // Yango statusunu bizim OrderStatus-a uyğunlaşdır (avtomatik sinxron üçün).
 export function mapYangoStatus(yango: string): 'CONFIRMED' | 'SHIPPED' | 'DELIVERED' | 'CANCELLED' | null {

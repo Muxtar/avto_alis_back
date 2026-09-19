@@ -6,7 +6,7 @@ import { pushLive } from '../services/live';
 import {
   isYangoConfigured, checkPrice, createClaim, acceptClaim, getClaimInfo,
   getPerformerPosition, getCancelInfo, cancelClaim, mapYangoStatus, YANGO_MAX_WEIGHT_KG, type Geo,
-  getTrackingLinks, toE164, getPointsEta, getDriverPhone, getConfirmationCodeValue, YANGO_DEAD, YANGO_DROPOFF_CONFIRM, YANGO_PICKUP_CONFIRM,
+  getTrackingLinks, toE164, getPointsEta, getDriverPhone, YANGO_DEAD,
 } from '../services/yangoDelivery';
 
 const router = Router();
@@ -67,14 +67,6 @@ async function syncOrderStatus(orderId: number, current: string, yangoStatus: st
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-// YANGO TƏSDİQ KODU hansı mərhələdə kimə lazımdır.
-// Kuryer iki nöqtədə kod soruşur — kodu hər dəfə Yango verir və o, YALNIZ
-// rəqəmlərdən ibarətdir (məs. 670206):
-//   • götürmədə — SATICIDAN (kuryer tapılandan mağazada malı alana qədər);
-//   • təhvildə  — ALICIDAN (kuryer malı götürəndən təhvilə qədər).
-// `/claims/confirmation_code` kuryerin HAZIRKI nöqtəsinin kodunu qaytarır.
-const SELLER_CODE_STAGES = ['performer_found', 'pickup_arrived', 'ready_for_pickup_confirmation'];
-const BUYER_CODE_STAGES = ['pickuped', 'delivery_arrived', 'ready_for_delivery_confirmation'];
 
 // Yango axını: create → estimating → ready_for_approval → **accept** → performer_lookup.
 //
@@ -295,7 +287,7 @@ router.get('/orders/:id/yango/status', adminAuth, async (req: AuthRequest, res: 
       }
     }
 
-    // Kuryer aktiv mərhələ? (Wolt-tipli canlı izləmə/ETA/təhvil kodu bu mərhələdə lazımdır.)
+    // Kuryer aktiv mərhələ? (Wolt-tipli canlı izləmə/ETA bu mərhələdə lazımdır.)
     const ACTIVE = ['accepted', 'performer_found', 'performer_draft', 'pickup_arrived', 'ready_for_pickup_confirmation', 'pickuped', 'delivery_arrived', 'ready_for_delivery_confirmation'];
     const active = ACTIVE.includes(status);
 
@@ -321,23 +313,7 @@ router.get('/orders/:id/yango/status', adminAuth, async (req: AuthRequest, res: 
       if (etaExpected) etaSeconds = Math.max(0, Math.round((new Date(etaExpected).getTime() - Date.now()) / 1000));
     }
 
-    // YANGO TƏSDİQ KODU — iki nöqtədə istənilir, kodu hər dəfə Yango verir
-    // (yalnız rəqəmlərdən ibarətdir, məs. 670206):
-    //   • götürmədə  — kuryer mağazaya çatanda SATICIDAN soruşur;
-    //   • təhvildə   — kuryer ünvana çatanda ALICIDAN soruşur.
-    // Əvvəl kod yalnız alıcıya və yalnız təhvil mərhələsində göstərilirdi.
-    // Satıcı götürmə kodunu heç yerdə görmürdü, alıcıya isə bizim daxili
-    // «TX-XXXXXX» kodumuz "kuryerə deyin" yazısı ilə göstərilirdi — kuryer
-    // tətbiqi onu «kod yalnız rəqəmlərdən ibarət olmalıdır» deyə rədd edirdi.
-    // `/claims/confirmation_code` kuryerin HAZIRKI nöqtəsinin kodunu qaytarır.
-    let confirmationCode: string | null = null;
-    let confirmationFor: 'pickup' | 'delivery' | null = null;
-    if (YANGO_PICKUP_CONFIRM && order.sellerId === req.adminId && SELLER_CODE_STAGES.includes(status)) confirmationFor = 'pickup';
-    else if (YANGO_DROPOFF_CONFIRM && order.buyerId === req.adminId && BUYER_CODE_STAGES.includes(status)) confirmationFor = 'delivery';
-    if (confirmationFor) {
-      confirmationCode = await getConfirmationCodeValue(order.yangoClaimId);
-      if (!confirmationCode) confirmationFor = null;
-    }
+    // Təsdiq kodu artıq YOXDUR — kod xüsusiyyəti ləğv edilib (services/yangoDelivery.ts).
 
     await prisma.order.update({
       where: { id: order.id },
@@ -360,7 +336,7 @@ router.get('/orders/:id/yango/status', adminAuth, async (req: AuthRequest, res: 
     res.json({
       success: true, dispatched: true, status,
       performer: info.data.performer_info || null,
-      courierPosition, trackingUrl, etaExpected, etaSeconds, confirmationCode, confirmationFor,
+      courierPosition, trackingUrl, etaExpected, etaSeconds,
       routePoints: info.data.route_points || [], pricing: info.data.pricing || null,
     });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
@@ -460,37 +436,9 @@ router.post('/yango/callback', async (req: Request, res: Response) => {
 // İndi server özü hər 10 saniyədən bir aktiv claim-ləri yoxlayır:
 //   • status dəyişibsə — bazaya yazır, sifarişi sinxronlaşdırır, tərəflərə
 //     anlıq xəbər göndərir;
-//   • kod lazım olan mərhələdədirsə — kodu Yango-dan alıb DOĞRU tərəfə
-//     bildiriş kimi göndərir (satıcıya götürmə, alıcıya təhvil kodu).
-//     Bildiriş zəngdə qalır, istifadəçi hansı səhifədə olsa görür.
+//   • ready_for_approval-da ilişən claim-i təsdiqləyir.
+// (Kuryer kodu göndərilmir — kod xüsusiyyəti ləğv edilib.)
 const WATCH_STOP = [...YANGO_DEAD, 'delivered', 'delivered_finish'];
-const notifiedCodes = new Set<string>();   // `${orderId}:${kim}:${kod}` — təkrar göndərilməsin
-
-async function notifyConfirmationCode(
-  o: { id: number; yangoClaimId: string; buyerId: number; sellerId: number },
-  who: 'pickup' | 'delivery',
-) {
-  const code = await getConfirmationCodeValue(o.yangoClaimId);
-  if (!code) return;
-  const key = `${o.id}:${who}:${code}`;
-  if (notifiedCodes.has(key)) return;
-  const userId = who === 'pickup' ? o.sellerId : o.buyerId;
-  // Server yenidən başlasa yaddaş sıfırlanır — bazadan da yoxlayırıq.
-  const dup = await prisma.notification.findFirst({
-    where: { userId, title: { contains: code }, createdAt: { gt: new Date(Date.now() - 24 * 3600 * 1000) } },
-    select: { id: true },
-  }).catch(() => null);
-  notifiedCodes.add(key);
-  if (dup) return;
-  const title = who === 'pickup' ? `Sifariş #${o.id}: kuryer kodu ${code}` : `Sifariş #${o.id}: təhvil kodu ${code}`;
-  const body = who === 'pickup'
-    ? `Yango kuryeri mağazaya gələndə kod soruşacaq. Məhsulu verərkən bu kodu deyin: ${code}`
-    : `Kuryer sifarişinizi gətirir. Məhsulu alarkən kuryerə bu kodu deyin: ${code}`;
-  await prisma.notification.create({
-    data: { userId, type: 'ORDER', title, body, link: who === 'pickup' ? '/orders?tab=selling' : '/orders' },
-  }).catch(() => {});
-  pushLive(userId, { kind: 'order', id: o.id, toast: `🔑 ${title}`, tone: 'info' });
-}
 
 let watcherBusy = false;
 async function watchActiveClaims() {
@@ -526,9 +474,6 @@ async function watchActiveClaims() {
         emitToUser(o.sellerId, 'order:yango', payload);
         pushLive([o.buyerId, o.sellerId], { kind: 'order', id: o.id });
       }
-      const ord = { id: o.id, yangoClaimId: claimId, buyerId: o.buyerId, sellerId: o.sellerId };
-      if (YANGO_PICKUP_CONFIRM && SELLER_CODE_STAGES.includes(st)) await notifyConfirmationCode(ord, 'pickup');
-      else if (YANGO_DROPOFF_CONFIRM && BUYER_CODE_STAGES.includes(st)) await notifyConfirmationCode(ord, 'delivery');
     }
   } catch (e: any) {
     console.error('[yango] izləyici xətası:', e?.message);
@@ -538,7 +483,7 @@ async function watchActiveClaims() {
 }
 
 export function startYangoWatcher() {
-  // 10 san: kuryer qapıda kod gözləyir — gecikmə qısa olmalıdır.
+  // 10 san: status (kuryer tapıldı / yolda / çatdı) tərəflərə tez çatsın.
   setTimeout(watchActiveClaims, 10 * 1000);
   setInterval(watchActiveClaims, 10 * 1000);
   console.log('[yango] aktiv sifariş izləyicisi işə düşdü (hər 10 san).');
