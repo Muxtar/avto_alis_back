@@ -240,6 +240,19 @@ export async function getConfirmationCode(claimId: string) {
   return yreq('/claims/confirmation_code', { body: { claim_id: claimId } });
 }
 
+/** Kuryerin HAZIRKI nöqtəsi üçün kodu qaytarır — yalnız həqiqi, rəqəmli kodu.
+ *
+ *  DİQQƏT: Yango xəta cavabında da `code` sahəsi qaytarır — kod hələ
+ *  hazır deyilsə `{"code":"not_found","message":"Order not found"}` (HTTP 404).
+ *  Əvvəl `data.code` yoxlanmadan götürülürdü və alıcıya «təhvil kodu
+ *  not_found» bildirişi gedirdi (sifariş #88). Kod yalnız uğurlu cavabda və
+ *  yalnız rəqəmlərdən ibarətdirsə qəbul olunur. */
+export async function getConfirmationCodeValue(claimId: string): Promise<string | null> {
+  const r = await getConfirmationCode(claimId);
+  const code = r.ok ? String(r.data?.code ?? '').trim() : '';
+  return /^\d{3,10}$/.test(code) ? code : null;
+}
+
 // Yango statusunu bizim OrderStatus-a uyğunlaşdır (avtomatik sinxron üçün).
 export function mapYangoStatus(yango: string): 'CONFIRMED' | 'SHIPPED' | 'DELIVERED' | 'CANCELLED' | null {
   switch (yango) {

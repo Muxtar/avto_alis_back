@@ -6,7 +6,7 @@ import { pushLive } from '../services/live';
 import {
   isYangoConfigured, checkPrice, createClaim, acceptClaim, getClaimInfo,
   getPerformerPosition, getCancelInfo, cancelClaim, mapYangoStatus, YANGO_MAX_WEIGHT_KG, type Geo,
-  getTrackingLinks, toE164, getPointsEta, getDriverPhone, getConfirmationCode, YANGO_DEAD,
+  getTrackingLinks, toE164, getPointsEta, getDriverPhone, getConfirmationCodeValue, YANGO_DEAD,
 } from '../services/yangoDelivery';
 
 const router = Router();
@@ -335,8 +335,7 @@ router.get('/orders/:id/yango/status', adminAuth, async (req: AuthRequest, res: 
     if (order.sellerId === req.adminId && SELLER_CODE_STAGES.includes(status)) confirmationFor = 'pickup';
     else if (order.buyerId === req.adminId && BUYER_CODE_STAGES.includes(status)) confirmationFor = 'delivery';
     if (confirmationFor) {
-      const cc = await getConfirmationCode(order.yangoClaimId);
-      confirmationCode = cc.data?.code ? String(cc.data.code) : null;
+      confirmationCode = await getConfirmationCodeValue(order.yangoClaimId);
       if (!confirmationCode) confirmationFor = null;
     }
 
@@ -458,7 +457,7 @@ router.post('/yango/callback', async (req: Request, res: Response) => {
 // səhifə 30 saniyəlik sorğunu hələ etməmişdi. Kuryer gözləyib sifarişi
 // ödənişli ləğv edirdi (sifariş #87).
 //
-// İndi server özü hər 20 saniyədən bir aktiv claim-ləri yoxlayır:
+// İndi server özü hər 10 saniyədən bir aktiv claim-ləri yoxlayır:
 //   • status dəyişibsə — bazaya yazır, sifarişi sinxronlaşdırır, tərəflərə
 //     anlıq xəbər göndərir;
 //   • kod lazım olan mərhələdədirsə — kodu Yango-dan alıb DOĞRU tərəfə
@@ -471,8 +470,7 @@ async function notifyConfirmationCode(
   o: { id: number; yangoClaimId: string; buyerId: number; sellerId: number },
   who: 'pickup' | 'delivery',
 ) {
-  const cc = await getConfirmationCode(o.yangoClaimId);
-  const code = cc.data?.code ? String(cc.data.code) : null;
+  const code = await getConfirmationCodeValue(o.yangoClaimId);
   if (!code) return;
   const key = `${o.id}:${who}:${code}`;
   if (notifiedCodes.has(key)) return;
@@ -540,9 +538,10 @@ async function watchActiveClaims() {
 }
 
 export function startYangoWatcher() {
-  setTimeout(watchActiveClaims, 15 * 1000);
-  setInterval(watchActiveClaims, 20 * 1000);
-  console.log('[yango] aktiv sifariş izləyicisi işə düşdü (hər 20 san).');
+  // 10 san: kuryer qapıda kod gözləyir — gecikmə qısa olmalıdır.
+  setTimeout(watchActiveClaims, 10 * 1000);
+  setInterval(watchActiveClaims, 10 * 1000);
+  console.log('[yango] aktiv sifariş izləyicisi işə düşdü (hər 10 san).');
 }
 
 export default router;
