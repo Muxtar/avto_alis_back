@@ -4,6 +4,7 @@ import { PrismaClient } from '@prisma/client';
 import { refundOrderSafe, retryFailedRefunds, unstickPendingRefunds, restoreStockForOrder } from './refunds';
 import { recordSettlement, releaseHeldLedgers } from './settlement';
 import { endExpiredConsultations } from '../routes/consultations';
+import { cancelActiveYangoClaim } from '../routes/yango';
 
 const prisma = new PrismaClient();
 
@@ -181,6 +182,10 @@ export async function expireUndeliveredOrders(): Promise<number> {
     });
     for (const order of stuck) {
       try {
+        // Kuryer yoldadırsa (Yango ləğvə icazə vermir) — avtomatik ləğv YOX:
+        // mal alıcıya gedir, sifariş tezliklə SHIPPED olacaq.
+        const yc = await cancelActiveYangoClaim(order.id);
+        if (!yc.ok) continue;
         const r = await refundOrderSafe(order.id, 'CANCELLED', order.total);
         await prisma.order.update({
           where: { id: order.id },

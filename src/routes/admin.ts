@@ -14,6 +14,7 @@ import { getCommissionPercent, setCommissionPercent, createPayout, sellerBalance
 import { recordSettlement } from '../services/settlement';
 import { refundOrderSafe } from '../services/refunds';
 import { checkPrice, isYangoConfigured, YANGO_TAXI_CLASS } from '../services/yangoDelivery';
+import { cancelActiveYangoClaim } from './yango';
 import { infobipStatus, testWhatsApp } from '../services/infobipWhatsApp';
 import { smsStatus, testSms } from '../services/infobipSms';
 import { otpChannel } from '../services/otp';
@@ -2421,6 +2422,14 @@ router.put('/admin/orders/:id/status', requirePermission('orders'), async (req: 
     }
     const order = await prisma.order.findUnique({ where: { id: orderId }, include: { items: true } });
     if (!order) { res.status(404).json({ success: false, message: 'Sifariş tapılmadı' }); return; }
+
+    // Ləğv: əvvəlcə aktiv Yango çatdırılması ləğv olunur. Kuryer malı
+    // götürübsə Yango icazə vermir — admin bunu bilərək ?force=1 ilə keçə bilər
+    // (məs. mal satıcıya qayıdıb, Yango statusu isə ilişib qalıb).
+    if (status === 'CANCELLED' && order.status !== 'CANCELLED' && order.yangoClaimId && String(req.query.force || '') !== '1') {
+      const yc = await cancelActiveYangoClaim(orderId);
+      if (!yc.ok) { res.status(409).json({ success: false, needsForce: true, message: `${yc.message} Yenə də ləğv etmək üçün təsdiqləyin.` }); return; }
+    }
 
     // Ləğv olunduqda və əvvəl ləğv olunmayıbsa — stoku geri qaytar.
     let refundFailed: string | null = null;

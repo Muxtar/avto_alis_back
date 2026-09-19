@@ -3,6 +3,8 @@ import { PrismaClient } from '@prisma/client';
 import { adminAuth, AuthRequest } from '../middleware/auth';
 import { emitToUser } from '../services/callSignaling';
 import { pushLive } from '../services/live';
+import { recordSettlement } from '../services/settlement';
+import { refundOrderSafe, restoreStockForOrder } from '../services/refunds';
 import {
   isYangoConfigured, checkPrice, createClaim, acceptClaim, getClaimInfo,
   getPerformerPosition, getCancelInfo, cancelClaim, mapYangoStatus, YANGO_MAX_WEIGHT_KG, type Geo,
@@ -18,51 +20,174 @@ const orderInclude = {
   seller: { select: { id: true, name: true, phone: true, latitude: true, longitude: true, address: true } },
 };
 
-// Sifarişin status sırası — yalnız irəli sinxron (geri qaytarma yox).
+// ═══════════════════════════════════════════════════════════════════════════
+// YANGO STATUSU → SİFARİŞİN HƏYAT DÖVRÜ
+//
+// Yango statusu dəyişəndə sifarişdə nə baş verməlidir. Status sorğusu,
+// webhook və fon izləyicisi hamısı BUNU çağırır — hər dəfə eyni status ilə də
+// çağırıla bilər, ona görə hər addım `updateMany` şərti ilə YALNIZ BİR DƏFƏ
+// icra olunur (təkrar bildiriş, təkrar qaytarma olmur).
+//
+//   kuryer tapıldı … mağazada      → sifariş CONFIRMED qalır
+//   pickuped / yolda / ünvanda     → SHIPPED + alıcıya "yoldadır"
+//   delivered                      → DELIVERED + satıcı hesablaşması + bildiriş
+//   returning (alıcı qəbul etmədi) → hər iki tərəfə "məhsul geri qaytarılır"
+//   returned (mal satıcıdadır)     → sifariş LƏĞV + stok + pul geri + bildiriş
+//   kuryer tapılmadı / ləğv        → sifariş qalır, satıcı yenidən çağırır
+//   cancelled_with_items_on_hands  → mal kuryerdədir: satıcı + admin xəbərdar
+//
+// ƏVVƏLKİ PROBLEMLƏR (hamısı burada bağlanır):
+//   • Yango "çatdırıldı" deyəndə satıcı hesablaşması (recordSettlement)
+//     çağırılmırdı — satıcının pulu «gözləmədə» qalıb heç vaxt açılmırdı.
+//   • Alıcı imtina edəndə mal satıcıya qayıdırdı, sifariş isə sonsuza qədər
+//     SHIPPED qalırdı: pul qaytarılmır, stok bərpa olunmur, heç kim bilmir.
+//   • «Kuryer tapılmadı» satıcıya bildirilmirdi.
+// ═══════════════════════════════════════════════════════════════════════════
 const RANK: Record<string, number> = { PENDING: 0, CONFIRMED: 1, SHIPPED: 2, DELIVERED: 3, CANCELLED: 3 };
-async function syncOrderStatus(orderId: number, current: string, yangoStatus: string) {
-  const mapped = mapYangoStatus(yangoStatus);
-  if (!mapped) return;
-  if (current === 'DELIVERED' || current === 'CANCELLED') return; // terminal
+const RETURNING = ['returning', 'return_arrived', 'ready_for_return_confirmation'];
+const RETURNED = ['returned', 'returned_finish'];
+// Kuryer mal götürmədən çatdırılma dağıldı — sifariş qalır, yeni kuryer çağırılır.
+const FAILED_BEFORE_PICKUP: Record<string, string> = {
+  performer_not_found: 'Kuryer tapılmadı — yenidən kuryer çağırın və ya özünüz çatdırın.',
+  estimating_failed: 'Yango çatdırılmanı hesablaya bilmədi (ünvan və ya çəki) — yenidən cəhd edin və ya özünüz çatdırın.',
+  cancelled: 'Çatdırılma ləğv edildi — yeni kuryer çağıra bilərsiniz.',
+  cancelled_by_taxi: 'Kuryer sifarişdən imtina etdi — yeni kuryer çağırın.',
+  cancelled_with_payment: 'Çatdırılma ləğv edildi — yeni kuryer çağıra bilərsiniz.',
+  failed: 'Çatdırılma uğursuz oldu — yeni kuryer çağırın və ya özünüz çatdırın.',
+};
+const MSG_RETURNING = 'Alıcı məhsulu qəbul etmədi — kuryer məhsulu satıcıya qaytarır.';
+const MSG_ITEMS_ON_HANDS = 'Çatdırılma ləğv olundu, məhsul KURYERDƏDİR — Yango dəstəyi ilə əlaqə saxlayın.';
 
-  // ÇATDIRILMANIN ləğvi SİFARİŞİN ləğvi DEYİL.
-  //
-  // Əvvəl burada sifarişin özü də CANCELLED edilirdi. Nəticə: satıcı yalnız
-  // kuryeri ləğv etmək istəyəndə növbəti status sorğusunda BÜTÜN SİFARİŞ
-  // bağlanırdı — satıcı düymələri (`status !== CANCELLED` şərti ilə) yox olur,
-  // yeni kuryer də çağırıla bilmirdi. Sifariş ortada ilişib qalırdı.
-  //
-  // Kuryer ləğv olunubsa sifariş öz statusunda qalır; satıcı yeni kuryer çağırır
-  // və ya özü çatdırır. Sifarişi yalnız satıcı/alıcı özü ləğv edə bilər.
-  if (mapped === 'CANCELLED') {
-    const upd = await prisma.order.updateMany({
-      where: { id: orderId, yangoError: null },   // yalnız BİR dəfə xəbər ver
-      data: { yangoError: 'Çatdırılma ləğv edildi — yeni kuryer çağıra bilərsiniz' },
-    }).catch(() => ({ count: 0 }));
-    // Alıcı ilişib qalmasın: çatdırılma pozulubsa o, sifarişi ləğv edib pulunu
-    // geri ala bilər. Bunu bilmədən aylarla gözləyə bilərdi.
-    if (upd.count > 0) {
-      const o = await prisma.order.findUnique({ where: { id: orderId }, select: { buyerId: true, sellerId: true, paymentStatus: true } });
-      if (o) {
-        await prisma.notification.create({
-          data: {
-            userId: o.buyerId, type: 'ORDER', title: `Sifariş #${orderId}`,
-            body: o.paymentStatus === 'PAID'
-              ? 'Kuryer çatdırılması baş tutmadı. Satıcı yeni kuryer çağıra bilər — gözləmək istəmirsinizsə sifarişi ləğv edib ödənişinizi geri ala bilərsiniz.'
-              : 'Kuryer çatdırılması baş tutmadı. Satıcı yeni kuryer çağıracaq.',
-            link: '/orders',
-          },
-        }).catch(() => {});
-        await prisma.notification.create({
-          data: { userId: o.sellerId, type: 'ORDER', title: `Sifariş #${orderId}`, body: 'Kuryer çatdırılması ləğv oldu — yenidən kuryer çağırın və ya özünüz çatdırın.', link: '/orders?tab=selling' },
-        }).catch(() => {});
-      }
+const notify = (userId: number, orderId: number, body: string, link = '/orders') =>
+  prisma.notification.create({ data: { userId, type: 'ORDER', title: `Sifariş #${orderId}`, body, link } }).catch(() => {});
+
+/** yangoError-u bir dəfə yazır; ilk dəfə yazıldısa true (bildiriş göndərmək üçün). */
+async function markOnce(orderId: number, msg: string): Promise<boolean> {
+  const r = await prisma.order.updateMany({
+    where: { id: orderId, OR: [{ yangoError: null }, { yangoError: { not: msg } }] },
+    data: { yangoError: msg },
+  }).catch(() => ({ count: 0 }));
+  return r.count > 0;
+}
+
+async function syncOrderStatus(orderId: number, _current: string, yangoStatus: string) {
+  const o = await prisma.order.findUnique({
+    where: { id: orderId },
+    select: { id: true, status: true, buyerId: true, sellerId: true, paymentStatus: true, referrerId: true, referralVoided: true },
+  });
+  if (!o || o.status === 'DELIVERED' || o.status === 'CANCELLED') return;   // terminal
+
+  // ── Çatdırıldı ──
+  if (mapYangoStatus(yangoStatus) === 'DELIVERED') {
+    const r = await prisma.order.updateMany({
+      where: { id: orderId, status: { in: ['PENDING', 'CONFIRMED', 'SHIPPED'] } },
+      data: { status: 'DELIVERED', deliveryDeadline: null, yangoError: null },
+    });
+    if (r.count > 0) {
+      await recordSettlement(orderId).catch(() => {});   // satıcının qazancı saxlama pəncərəsinə düşür
+      await notify(o.buyerId, orderId, 'Sifarişiniz çatdırıldı ✓ Satıcıya rəy yaza bilərsiniz.');
+      await notify(o.sellerId, orderId, 'Yango kuryeri sifarişi alıcıya təhvil verdi ✓', '/orders?tab=selling');
     }
     return;
   }
-  if ((RANK[mapped] ?? 0) > (RANK[current] ?? 0)) {
-    await prisma.order.update({ where: { id: orderId }, data: { status: mapped as any } }).catch(() => {});
+
+  // ── Alıcı qəbul etmədi, mal geri gedir ──
+  if (RETURNING.includes(yangoStatus)) {
+    if (await markOnce(orderId, MSG_RETURNING)) {
+      await notify(o.sellerId, orderId, 'Alıcı məhsulu qəbul etmədi (və ya ünvanda tapılmadı). Kuryer məhsulu sizə geri gətirir — təhvil alanda sifariş avtomatik ləğv olunacaq.', '/orders?tab=selling');
+      await notify(o.buyerId, orderId, 'Məhsul sizə təhvil verilmədi və satıcıya qaytarılır. Məhsul satıcıya çatan kimi sifariş ləğv olunacaq və ödənişiniz qaytarılacaq.');
+    }
+    return;
   }
+
+  // ── Mal satıcıya qayıtdı → sifarişi bağla, pulu qaytar ──
+  if (RETURNED.includes(yangoStatus)) {
+    const r = await prisma.order.updateMany({
+      where: { id: orderId, status: { in: ['PENDING', 'CONFIRMED', 'SHIPPED'] } },
+      data: { status: 'CANCELLED', deliveryDeadline: null, yangoError: 'Məhsul satıcıya qaytarıldı — sifariş ləğv edildi.' },
+    });
+    if (r.count > 0) {
+      await restoreStockForOrder(orderId).catch(() => {});
+      const ref = await refundOrderSafe(orderId, 'CANCELLED');
+      if (o.referrerId && !o.referralVoided) {
+        await prisma.order.update({ where: { id: orderId }, data: { referralVoided: true } }).catch(() => {});
+      }
+      await recordSettlement(orderId).catch(() => {});
+      await notify(o.sellerId, orderId, 'Məhsul sizə geri qaytarıldı — sifariş ləğv edildi, stok bərpa olundu.', '/orders?tab=selling');
+      await notify(o.buyerId, orderId, o.paymentStatus === 'PAID'
+        ? (ref.ok ? 'Sifariş ləğv edildi və ödənişiniz geri qaytarıldı.' : 'Sifariş ləğv edildi. Ödənişin qaytarılması emal olunur.')
+        : 'Sifariş ləğv edildi.');
+    }
+    return;
+  }
+
+  // ── Mal kuryerdə qaldı (ləğv) — insan həll etməlidir ──
+  if (yangoStatus === 'cancelled_with_items_on_hands') {
+    if (await markOnce(orderId, MSG_ITEMS_ON_HANDS)) {
+      await notify(o.sellerId, orderId, 'Yango çatdırılmanı ləğv etdi, amma məhsul kuryerdədir. Yango dəstəyi ilə əlaqə saxlayın; məhsul sizə qayıdandan sonra sifarişi ləğv edin.', '/orders?tab=selling');
+      await notify(o.buyerId, orderId, 'Çatdırılmada problem yarandı — satıcı Yango ilə həll edir. Sifariş çatdırılmasa ləğv olunub ödənişiniz qaytarılacaq.');
+      const admins = await prisma.user.findMany({ where: { role: 'ADMIN' }, select: { id: true }, take: 20 });
+      for (const a of admins) await notify(a.id, orderId, `⚠️ Yango ləğv etdi, məhsul kuryerdə qaldı (sifariş #${orderId}). Yoxlayın.`, '/admin/orders');
+    }
+    return;
+  }
+
+  // ── Kuryer mal götürmədən çatdırılma dağıldı ──
+  const failMsg = FAILED_BEFORE_PICKUP[yangoStatus];
+  if (failMsg) {
+    if (await markOnce(orderId, failMsg)) {
+      await notify(o.sellerId, orderId, failMsg, '/orders?tab=selling');
+      await notify(o.buyerId, orderId, o.paymentStatus === 'PAID'
+        ? 'Kuryer çatdırılması baş tutmadı. Satıcı yeni kuryer çağıracaq — gözləmək istəmirsinizsə sifarişi ləğv edib ödənişinizi geri ala bilərsiniz.'
+        : 'Kuryer çatdırılması baş tutmadı. Satıcı yeni kuryer çağıracaq.');
+    }
+    return;
+  }
+
+  // ── İrəli hərəkət (kuryer tapıldı → CONFIRMED, götürdü → SHIPPED) ──
+  const mapped = mapYangoStatus(yangoStatus);
+  if (mapped && mapped !== 'CANCELLED' && (RANK[mapped] ?? 0) > (RANK[o.status] ?? 0)) {
+    const r = await prisma.order.updateMany({
+      where: { id: orderId, status: o.status },
+      data: { status: mapped as any },
+    }).catch(() => ({ count: 0 }));
+    if (r.count > 0 && mapped === 'SHIPPED') {
+      await notify(o.buyerId, orderId, 'Kuryer məhsulu götürdü — sifarişiniz yoldadır 🛵');
+    }
+  }
+}
+
+// ── Sifariş ləğv olunanda aktiv Yango çatdırılmasını da ləğv et ──
+//
+// Əvvəl sifariş (alıcı, satıcı, admin və ya vaxt aşımı ilə) ləğv olunurdu,
+// Yango claim-i isə AKTİV qalırdı: kuryer yenə mağazaya gəlir, Yango pul
+// tuturdu, pulu artıq qaytarılmış alıcıya mal gedə bilərdi.
+// Kuryer malı artıq götürübsə Yango ləğvə icazə vermir — onda sifariş də
+// ləğv edilməməlidir (çağıran tərəf `ok:false` alıb dayanır).
+export async function cancelActiveYangoClaim(orderId: number): Promise<{ ok: boolean; message?: string }> {
+  const order = await prisma.order.findUnique({
+    where: { id: orderId }, select: { id: true, yangoClaimId: true, yangoStatus: true, yangoVersion: true },
+  });
+  if (!order?.yangoClaimId) return { ok: true };
+  const info = await getClaimInfo(order.yangoClaimId);
+  const st = String(info.data?.status || order.yangoStatus || '');
+  if (YANGO_DEAD.includes(st) || ['delivered', 'delivered_finish'].includes(st)) return { ok: true };
+  if (['pickuped', 'delivery_arrived', 'ready_for_delivery_confirmation', ...RETURNING].includes(st)) {
+    return { ok: false, message: 'Kuryer məhsulu artıq götürüb — sifarişi indi ləğv etmək olmaz. Çatdırılmanı gözləyin və ya Yango dəstəyi ilə əlaqə saxlayın.' };
+  }
+  const ci = await getCancelInfo(order.yangoClaimId);
+  const state = ci.data?.cancel_state;
+  if (state === 'unavailable') {
+    return { ok: false, message: 'Yango bu mərhələdə çatdırılmanın ləğvinə icazə vermir — Yango dəstəyi ilə əlaqə saxlayın.' };
+  }
+  const version = (info.data?.version as number) ?? order.yangoVersion ?? 1;
+  const c = await cancelClaim(order.yangoClaimId, version, state === 'paid' ? 'paid' : 'free');
+  if (!c.ok) return { ok: false, message: `Yango çatdırılması ləğv edilmədi: ${c.error || 'xəta'}` };
+  await prisma.order.update({
+    where: { id: orderId },
+    data: { yangoStatus: (c.data?.status as string) || 'cancelled', courierLat: null, courierLng: null },
+  }).catch(() => {});
+  return { ok: true };
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));

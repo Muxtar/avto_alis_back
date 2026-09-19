@@ -12,7 +12,7 @@ import { recordSettlement, recordSettlementMany, sellerBalance } from '../servic
 import { markOrdersAwaitingConfirm, getDeliveryDeadlineHours } from '../services/orderExpiry';
 import { checkPrice as yangoCheckPrice, isYangoConfigured, YANGO_MAX_WEIGHT_KG, yangoDead } from '../services/yangoDelivery';
 import { notifySellersNewOrder } from '../services/orderNotify';
-import { dispatchOrderToYango } from './yango';
+import { dispatchOrderToYango, cancelActiveYangoClaim } from './yango';
 import { pushLive, pushAdmins } from '../services/live';
 
 const PUBLIC_BACKEND_URL = process.env.PUBLIC_BACKEND_URL || `http://localhost:${process.env.PORT || 5001}`;
@@ -1114,7 +1114,12 @@ router.put('/orders/:id/status', adminAuth, async (req: AuthRequest, res: Respon
       res.status(400).json({
         success: false,
         message: order.status === 'SHIPPED' && next === 'CANCELLED'
-          ? 'Sifariş artıq yoldadır — kuryer aktiv olduğu müddətdə ləğv edilə bilməz. Çatdırılmanı ləğv edin, sonra sifarişi bağlaya bilərsiniz.'
+          ? (order.yangoClaimId
+            // Yango mal götürüləndən sonra ləğvə icazə vermir — "çatdırılmanı
+            // ləğv edin" məsləhəti yanlış idi. Alıcı qəbul etməsə mal geri
+            // gəlir və sifariş avtomatik ləğv olunur (routes/yango.ts).
+            ? 'Kuryer məhsulu artıq götürüb — sifariş indi ləğv edilə bilməz. Alıcı qəbul etməsə məhsul satıcıya qaytarılacaq və sifariş avtomatik ləğv olunacaq.'
+            : 'Sifariş artıq yoldadır — ləğv edilə bilməz. Təhvil verildikdən sonra qaytarma sorğusu göndərə bilərsiniz.')
           : `${order.status} → ${next} keçidi icazə verilmir`,
       });
       return;
@@ -1150,6 +1155,14 @@ router.put('/orders/:id/status', adminAuth, async (req: AuthRequest, res: Respon
       deliveryDeadline = new Date(Date.now() + h * 3600 * 1000);
     } else if (next === 'DELIVERED' || next === 'CANCELLED') {
       deliveryDeadline = null; // iş bitdi — nəzarətçi bir daha toxunmasın
+    }
+
+    // LƏĞV: əvvəlcə Yango çatdırılması ləğv olunur. Kuryer malı artıq
+    // götürübsə Yango icazə vermir — onda sifariş də ləğv EDİLMİR (əks halda
+    // pul qaytarılır, mal isə alıcıya gedirdi).
+    if (next === 'CANCELLED' && order.yangoClaimId) {
+      const yc = await cancelActiveYangoClaim(order.id);
+      if (!yc.ok) { res.status(409).json({ success: false, message: yc.message }); return; }
     }
 
     const updated = await prisma.order.update({
