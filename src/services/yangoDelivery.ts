@@ -57,6 +57,11 @@ export const YANGO_TAXI_CLASS = process.env.YANGO_TAXI_CLASS || 'courier';
 // Yango SMS-i işə salsa, Railway-də YANGO_DROPOFF_CONFIRM=1 qoyub geri açmaq olar.
 export const YANGO_DROPOFF_CONFIRM = process.env.YANGO_DROPOFF_CONFIRM === '1';
 
+// GÖTÜRMƏDƏ (SATICIDA) KOD. Sahibin qərarı ilə kod xüsusiyyəti ümumiyyətlə
+// ləğv edilib — kuryer heç bir nöqtədə kod istəmir. Geri açmaq üçün
+// Railway-də YANGO_PICKUP_CONFIRM=1 (kod satıcıya bildiriş + kartda göstərilir).
+export const YANGO_PICKUP_CONFIRM = process.env.YANGO_PICKUP_CONFIRM === '1';
+
 // [longitude, latitude] — Yango koordinatları belə gözləyir.
 export type Geo = [number, number];
 
@@ -179,6 +184,8 @@ export async function createClaim(params: {
         point_id: 1, visit_order: 1, type: 'source',
         address: { fullname: params.source.fullname, coordinates: params.source.coordinates },
         contact: params.source.contact,
+        // Satıcıdan kod istənilməsin (YANGO_PICKUP_CONFIRM izahı).
+        skip_confirmation: !YANGO_PICKUP_CONFIRM,
       },
       {
         point_id: 2, visit_order: 2, type: 'destination',

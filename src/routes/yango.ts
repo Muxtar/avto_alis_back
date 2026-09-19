@@ -6,7 +6,7 @@ import { pushLive } from '../services/live';
 import {
   isYangoConfigured, checkPrice, createClaim, acceptClaim, getClaimInfo,
   getPerformerPosition, getCancelInfo, cancelClaim, mapYangoStatus, YANGO_MAX_WEIGHT_KG, type Geo,
-  getTrackingLinks, toE164, getPointsEta, getDriverPhone, getConfirmationCodeValue, YANGO_DEAD, YANGO_DROPOFF_CONFIRM,
+  getTrackingLinks, toE164, getPointsEta, getDriverPhone, getConfirmationCodeValue, YANGO_DEAD, YANGO_DROPOFF_CONFIRM, YANGO_PICKUP_CONFIRM,
 } from '../services/yangoDelivery';
 
 const router = Router();
@@ -332,7 +332,7 @@ router.get('/orders/:id/yango/status', adminAuth, async (req: AuthRequest, res: 
     // `/claims/confirmation_code` kuryerin HAZIRKI nöqtəsinin kodunu qaytarır.
     let confirmationCode: string | null = null;
     let confirmationFor: 'pickup' | 'delivery' | null = null;
-    if (order.sellerId === req.adminId && SELLER_CODE_STAGES.includes(status)) confirmationFor = 'pickup';
+    if (YANGO_PICKUP_CONFIRM && order.sellerId === req.adminId && SELLER_CODE_STAGES.includes(status)) confirmationFor = 'pickup';
     else if (YANGO_DROPOFF_CONFIRM && order.buyerId === req.adminId && BUYER_CODE_STAGES.includes(status)) confirmationFor = 'delivery';
     if (confirmationFor) {
       confirmationCode = await getConfirmationCodeValue(order.yangoClaimId);
@@ -527,7 +527,7 @@ async function watchActiveClaims() {
         pushLive([o.buyerId, o.sellerId], { kind: 'order', id: o.id });
       }
       const ord = { id: o.id, yangoClaimId: claimId, buyerId: o.buyerId, sellerId: o.sellerId };
-      if (SELLER_CODE_STAGES.includes(st)) await notifyConfirmationCode(ord, 'pickup');
+      if (YANGO_PICKUP_CONFIRM && SELLER_CODE_STAGES.includes(st)) await notifyConfirmationCode(ord, 'pickup');
       else if (YANGO_DROPOFF_CONFIRM && BUYER_CODE_STAGES.includes(st)) await notifyConfirmationCode(ord, 'delivery');
     }
   } catch (e: any) {
