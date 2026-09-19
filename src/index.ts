@@ -44,6 +44,7 @@ import outreachRoutes from './routes/outreach';
 import mediaRoutes from './routes/media';
 import { auditMiddleware } from './services/auditLog';
 import { startOrderExpiryJob } from './services/orderExpiry';
+import { startYangoWatcher } from './routes/yango';
 import { seedLegalDocuments } from './services/legal';
 
 const app = express();
@@ -296,5 +297,6 @@ server.listen(PORT, () => {
   backfillListingExpiresAt();
   backfillOptimizeImages();
   startOrderExpiryJob();   // satıcı təsdiqi timeout → avtomatik refund
+  startYangoWatcher();     // Yango statusu + kuryer kodları (səhifə açıq olmasa da)
   seedLegalDocuments();    // hüquqi sənədlər bazada yoxdursa yazılsın
 });
