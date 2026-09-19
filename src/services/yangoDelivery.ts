@@ -47,6 +47,16 @@ export function yangoDead(status?: string | null): boolean {
 // CANLI müqayisə etmək olar — təxmin etməyə ehtiyac yoxdur.
 export const YANGO_TAXI_CLASS = process.env.YANGO_TAXI_CLASS || 'courier';
 
+// TƏHVİLDƏ (ALICIDA) KOD TƏLƏB OLUNSUNMU.
+//
+// Yango kuryeri iki nöqtədə kod soruşur. Götürmə kodunu Yango API ilə verir
+// (satıcıya göstəririk). Təhvil kodunu isə VERMİR — `claims/confirmation_code`
+// kuryer ünvanda olanda da `not_found` qaytarır — və Azərbaycanda alıcıya
+// SMS də göndərilmir (sifariş #88: kuryer qapıda gözlədi, alıcıda kod yox idi).
+// Ona görə təhvil nöqtəsində kod SÖNDÜRÜLÜR (`skip_confirmation`).
+// Yango SMS-i işə salsa, Railway-də YANGO_DROPOFF_CONFIRM=1 qoyub geri açmaq olar.
+export const YANGO_DROPOFF_CONFIRM = process.env.YANGO_DROPOFF_CONFIRM === '1';
+
 // [longitude, latitude] — Yango koordinatları belə gözləyir.
 export type Geo = [number, number];
 
@@ -174,6 +184,8 @@ export async function createClaim(params: {
         point_id: 2, visit_order: 2, type: 'destination',
         address: { fullname: params.destination.fullname, coordinates: params.destination.coordinates },
         contact: params.destination.contact,
+        // Alıcıdan kod istənilməsin (yuxarıdakı YANGO_DROPOFF_CONFIRM izahı).
+        skip_confirmation: !YANGO_DROPOFF_CONFIRM,
       },
     ],
     items: params.items.map((it) => ({
