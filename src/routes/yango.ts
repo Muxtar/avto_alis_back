@@ -312,11 +312,25 @@ router.get('/orders/:id/yango/status', adminAuth, async (req: AuthRequest, res: 
       if (etaExpected) etaSeconds = Math.max(0, Math.round((new Date(etaExpected).getTime() - Date.now()) / 1000));
     }
 
-    // Təhvil təsdiq kodu — YALNIZ alıcıya və çatdırılma mərhələsində (kuryerə deyir).
+    // YANGO TƏSDİQ KODU — iki nöqtədə istənilir, kodu hər dəfə Yango verir
+    // (yalnız rəqəmlərdən ibarətdir, məs. 670206):
+    //   • götürmədə  — kuryer mağazaya çatanda SATICIDAN soruşur;
+    //   • təhvildə   — kuryer ünvana çatanda ALICIDAN soruşur.
+    // Əvvəl kod yalnız alıcıya və yalnız təhvil mərhələsində göstərilirdi.
+    // Satıcı götürmə kodunu heç yerdə görmürdü, alıcıya isə bizim daxili
+    // «TX-XXXXXX» kodumuz "kuryerə deyin" yazısı ilə göstərilirdi — kuryer
+    // tətbiqi onu «kod yalnız rəqəmlərdən ibarət olmalıdır» deyə rədd edirdi.
+    // `/claims/confirmation_code` kuryerin HAZIRKI nöqtəsinin kodunu qaytarır.
+    const PICKUP_STAGES = ['pickup_arrived', 'ready_for_pickup_confirmation'];
+    const DROPOFF_STAGES = ['pickuped', 'delivery_arrived', 'ready_for_delivery_confirmation'];
     let confirmationCode: string | null = null;
-    if (order.buyerId === req.adminId && ['pickuped', 'delivery_arrived', 'ready_for_delivery_confirmation'].includes(status)) {
+    let confirmationFor: 'pickup' | 'delivery' | null = null;
+    if (order.sellerId === req.adminId && PICKUP_STAGES.includes(status)) confirmationFor = 'pickup';
+    else if (order.buyerId === req.adminId && DROPOFF_STAGES.includes(status)) confirmationFor = 'delivery';
+    if (confirmationFor) {
       const cc = await getConfirmationCode(order.yangoClaimId);
-      confirmationCode = cc.data?.code || null;
+      confirmationCode = cc.data?.code ? String(cc.data.code) : null;
+      if (!confirmationCode) confirmationFor = null;
     }
 
     await prisma.order.update({
@@ -340,7 +354,7 @@ router.get('/orders/:id/yango/status', adminAuth, async (req: AuthRequest, res: 
     res.json({
       success: true, dispatched: true, status,
       performer: info.data.performer_info || null,
-      courierPosition, trackingUrl, etaExpected, etaSeconds, confirmationCode,
+      courierPosition, trackingUrl, etaExpected, etaSeconds, confirmationCode, confirmationFor,
       routePoints: info.data.route_points || [], pricing: info.data.pricing || null,
     });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
