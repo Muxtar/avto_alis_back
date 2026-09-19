@@ -4,6 +4,7 @@ import { PrismaClient } from '@prisma/client';
 import { adminAuth, requirePermission, AuthRequest } from '../middleware/auth';
 import { upload } from '../middleware/upload';
 import { processImages } from '../middleware/imageProcess';
+import { pushLive, pushAdmins } from '../services/live';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -27,6 +28,7 @@ router.post('/support/tickets', adminAuth, upload.array('images', 4), processIma
       },
       include: { messages: true },
     });
+    pushAdmins('support', { id: ticket.id, toast: `Yeni dəstək müraciəti: ${subject}` });
     res.json({ success: true, ticket });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
@@ -62,6 +64,7 @@ router.post('/support/tickets/:id/reply', adminAuth, upload.array('images', 4), 
     const me = await prisma.user.findUnique({ where: { id: req.adminId! }, select: { name: true } });
     await prisma.ticketMessage.create({ data: { ticketId: id, senderId: req.adminId!, isAdmin: false, senderName: me?.name || 'İstifadəçi', body, images: files?.map((f) => f.filename) || [] } });
     await prisma.supportTicket.update({ where: { id }, data: { status: 'OPEN', lastReplyAt: new Date() } });
+    pushAdmins('support', { id, toast: `Dəstək #${id}: istifadəçi cavab yazdı` });
     res.json({ success: true });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
@@ -105,6 +108,9 @@ router.post('/admin/support/:id/reply', requirePermission('support'), upload.arr
     await prisma.ticketMessage.create({ data: { ticketId: id, senderId: req.adminId!, isAdmin: true, senderName: req.adminName || 'Dəstək', body, images: files?.map((f) => f.filename) || [] } });
     await prisma.supportTicket.update({ where: { id }, data: { status: 'PENDING', lastReplyAt: new Date() } });
     await prisma.notification.create({ data: { userId: t.userId, type: 'SYSTEM', title: 'Dəstəkdən cavab', body: 'Müraciətinizə cavab verildi.', link: '/support' } }).catch(() => {});
+    // Açıq söhbət pəncərəsində cavab dərhal görünsün.
+    pushLive(t.userId, { kind: 'support', id, toast: 'Dəstəkdən cavab gəldi 💬', tone: 'info' });
+    pushAdmins('support', { id });
     res.json({ success: true });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
@@ -114,7 +120,9 @@ router.patch('/admin/support/:id/status', requirePermission('support'), async (r
     const id = parseInt(String(req.params.id));
     const status = String(req.body?.status);
     if (!['OPEN', 'PENDING', 'RESOLVED', 'CLOSED'].includes(status)) { res.status(400).json({ success: false, message: 'Yanlış status' }); return; }
-    await prisma.supportTicket.update({ where: { id }, data: { status: status as any } });
+    const tk = await prisma.supportTicket.update({ where: { id }, data: { status: status as any }, select: { userId: true } });
+    pushLive(tk.userId, { kind: 'support', id, status });
+    pushAdmins('support', { id });
     res.json({ success: true });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });

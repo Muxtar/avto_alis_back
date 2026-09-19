@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { PrismaClient } from '@prisma/client';
 import { adminAuth, AuthRequest } from '../middleware/auth';
 import { emitToUser } from '../services/callSignaling';
+import { pushLive } from '../services/live';
 import {
   isYangoConfigured, checkPrice, createClaim, acceptClaim, getClaimInfo,
   getPerformerPosition, getCancelInfo, cancelClaim, mapYangoStatus, YANGO_MAX_WEIGHT_KG, type Geo,
@@ -333,6 +334,7 @@ router.get('/orders/:id/yango/status', adminAuth, async (req: AuthRequest, res: 
       const payload = { orderId: order.id, yangoStatus: status };
       emitToUser(order.buyerId, 'order:yango', payload);
       emitToUser(order.sellerId, 'order:yango', payload);
+      pushLive([order.buyerId, order.sellerId], { kind: 'order', id: order.id });
     }
 
     res.json({
@@ -400,7 +402,7 @@ router.post('/yango/callback', async (req: Request, res: Response) => {
     const claimId = body.claim_id || body.id || body.order_id;
     const status = body.status || body.claim_status;
     if (claimId && status) {
-      const order = await prisma.order.findFirst({ where: { yangoClaimId: String(claimId) }, select: { id: true, status: true, yangoVersion: true } });
+      const order = await prisma.order.findFirst({ where: { yangoClaimId: String(claimId) }, select: { id: true, status: true, yangoVersion: true, yangoStatus: true, buyerId: true, sellerId: true } });
       if (order) {
         let st = String(status);
         // Yango "təsdiq gözlənilir" deyirsə dərhal təsdiqlə — kuryer axtarışı
@@ -411,6 +413,13 @@ router.post('/yango/callback', async (req: Request, res: Response) => {
         }
         await prisma.order.update({ where: { id: order.id }, data: { yangoStatus: st } }).catch(() => {});
         await syncOrderStatus(order.id, order.status, st);
+        // Webhook yolu: heç kim səhifəni açıq saxlamasa belə tərəflər xəbər tutsun.
+        if (st !== order.yangoStatus) {
+          const payload = { orderId: order.id, yangoStatus: st };
+          emitToUser(order.buyerId, 'order:yango', payload);
+          emitToUser(order.sellerId, 'order:yango', payload);
+          pushLive([order.buyerId, order.sellerId], { kind: 'order', id: order.id });
+        }
       }
     }
     // Yango 200 gözləyir.

@@ -5,6 +5,7 @@ import { isVeriffConfigured, createVeriffSession, verifyWebhookSignature, getVer
 import { resolveFlag } from '../services/settings';
 import { feeState, feeAmount, consumeFee, releaseIdentityFee } from '../services/businessFee';
 import { createPayment as createGatewayPayment } from '../services/paymentGateway';
+import { pushLive } from '../services/live';
 
 const PUBLIC_BACKEND_URL = process.env.PUBLIC_BACKEND_URL || `http://localhost:${process.env.PORT || 5001}`;
 import { normalizeName } from '../services/credentialAI';
@@ -70,6 +71,13 @@ async function applyDecision(userId: number, v: any): Promise<string> {
     // submitted/started və s. aralıq statuslar — yalnız xam statusu saxla.
     await prisma.user.update({ where: { id: userId }, data: { veriffStatus: status || null } }).catch(() => {});
   }
+  // Veriff qərarı webhook ilə gəlir — istifadəçinin açıq Profil səhifəsi
+  // nəticəni gözləmə/yeniləmə olmadan görsün.
+  pushLive(userId, {
+    kind: 'identity', status,
+    ...(status === 'approved' ? { toast: 'Kimliyiniz təsdiqləndi ✅', tone: 'success' as const } : {}),
+    ...(status === 'declined' ? { toast: 'Kimlik təsdiqi alınmadı', tone: 'error' as const } : {}),
+  });
   return status;
 }
 

@@ -7,7 +7,7 @@ import { createOtp } from '../services/otp';
 import { refund as kapitalRefund } from '../services/kapital';
 import { listFlags, setFlag, listNumbers, setNumber } from '../services/settings';
 import { checkAllServices } from '../services/serviceHealth';
-import { emitToUser } from '../services/callSignaling';
+import { pushLive, pushPublicListings } from '../services/live';
 import { runWebSearchTest } from '../services/webSearchAI';
 import { runAgent } from '../services/aiAgent';
 import { getCommissionPercent, setCommissionPercent, createPayout, sellerBalance, getPayoutHoldDays, setPayoutHoldDays } from '../services/settlement';
@@ -488,8 +488,37 @@ router.post('/admin/listings/bulk', requirePermission('listings'), async (req: A
     if (!ids.length) { res.status(400).json({ success: false, message: 'Elan seçilməyib' }); return; }
     let count = 0;
     let archivedCount = 0;
-    if (action === 'approve') count = (await prisma.listing.updateMany({ where: { id: { in: ids } }, data: { status: 'APPROVED' } })).count;
-    else if (action === 'reject') count = (await prisma.listing.updateMany({ where: { id: { in: ids } }, data: { status: 'REJECTED' } })).count;
+    // Sahiblər ƏVVƏLCƏDƏN götürülür — silmədən sonra elan artıq olmur.
+    const owners = await prisma.listing.findMany({ where: { id: { in: ids } }, select: { id: true, userId: true, title: true } });
+    if (action === 'approve' || action === 'reject') {
+      const status = action === 'approve' ? 'APPROVED' : 'REJECTED';
+      count = (await prisma.listing.updateMany({
+        where: { id: { in: ids } },
+        data: { status, reviewedAt: new Date(), ...(status === 'APPROVED' ? { rejectReason: null } : {}) },
+      })).count;
+      // Toplu moderasiya da satıcıya XƏBƏR verir. Əvvəl yalnız tək-tək
+      // moderasiya bildiriş göndərirdi — toplu təsdiqdə satıcı heç nə bilmirdi.
+      if (owners.length) {
+        await prisma.notification.createMany({
+          data: owners.map((l) => ({
+            userId: l.userId, type: 'LISTING' as const,
+            title: status === 'APPROVED' ? 'Elanınız təsdiqləndi ✓' : 'Elanınız rədd edildi',
+            body: status === 'APPROVED'
+              ? `«${l.title}» artıq saytda görünür.`
+              : `«${l.title}» rədd edildi. Düzəliş edib yenidən göndərə bilərsiniz.`,
+            link: status === 'APPROVED' ? `/marketplace/${l.id}` : '/account',
+          })),
+        }).catch(() => {});
+      }
+      for (const l of owners) {
+        pushLive(l.userId, {
+          kind: 'listing', id: l.id, status,
+          toast: status === 'APPROVED' ? `Elanınız təsdiqləndi ✓ «${l.title}»` : `Elanınız rədd edildi: «${l.title}»`,
+          tone: status === 'APPROVED' ? 'success' : 'error',
+        });
+      }
+      if (owners.length) pushPublicListings({ reason: status === 'APPROVED' ? 'approved' : 'removed' });
+    }
     else if (action === 'delete') {
       // Sifarişdə keçən elanlar silinmir — arxivlənir (sifariş sətirləri qorunur).
       const sold = await prisma.orderItem.findMany({ where: { listingId: { in: ids } }, select: { listingId: true }, distinct: ['listingId'] });
@@ -500,6 +529,8 @@ router.post('/admin/listings/bulk', requirePermission('listings'), async (req: A
         archivedCount = arch.count;
       }
       count = deletable.length ? (await prisma.listing.deleteMany({ where: { id: { in: deletable } } })).count : 0;
+      for (const l of owners) pushLive(l.userId, { kind: 'listing', id: l.id });
+      if (owners.length) pushPublicListings({ reason: 'removed' });
     }
     else { res.status(400).json({ success: false, message: 'Yanlış əməliyyat' }); return; }
     res.json({
@@ -521,8 +552,11 @@ router.post('/admin/users/bulk', requirePermission('users'), async (req: AuthReq
     const targetIds = safeIds.filter((id: number) => !adminSet.has(id));
     if (!targetIds.length) { res.status(400).json({ success: false, message: 'Uyğun istifadəçi yoxdur (admin/özünüz xaric)' }); return; }
     let count = 0;
-    if (action === 'block') count = (await prisma.user.updateMany({ where: { id: { in: targetIds } }, data: { isBlocked: true } })).count;
-    else if (action === 'unblock') count = (await prisma.user.updateMany({ where: { id: { in: targetIds } }, data: { isBlocked: false } })).count;
+    if (action === 'block' || action === 'unblock') {
+      const isBlocked = action === 'block';
+      count = (await prisma.user.updateMany({ where: { id: { in: targetIds } }, data: { isBlocked } })).count;
+      pushLive(targetIds, { kind: 'account', status: isBlocked ? 'BLOCKED' : 'ACTIVE' });
+    }
     else if (action === 'delete') {
       // ── TOPLU SİLMƏ ARTIQ "deleteMany" DEYİL ──
       // Əvvəl bir sətirlə silinirdi: ödəniş ünvanının arxivi götürülmür,
@@ -971,6 +1005,7 @@ router.post('/admin/payouts/businesses/:key/pay', requirePermission('finance_pay
       await prisma.notification.create({
         data: { userId: p.sellerId, type: 'SYSTEM', title: 'Ödəniş edildi 💸', body: `${p.amount} AZN bank hesabınıza köçürüldü (${count} sifariş).`, link: '/earnings' },
       }).catch(() => {});
+      pushLive(p.sellerId, { kind: 'payout', id: p.id, toast: `Ödəniş edildi 💸 ${p.amount} AZN`, tone: 'success' });
     }
 
     res.json({ success: true, payout: payouts[0]?.payout, payouts: payouts.map((x) => x.payout), paidCount: ledgers.length, amount });
@@ -1007,6 +1042,7 @@ router.post('/admin/payouts/:id/reverse', requirePermission('finance_payouts'), 
     // yenidən hesablanır və düzgün statusu özü təyin edir.
     for (const l of ledgers) await recordSettlement(l.orderId).catch(() => {});
     console.warn(`[payouts] GERİ ALINDI: payout ${id}, ${payout.amount} AZN, ${ledgers.length} sətir, admin ${req.adminName}`);
+    pushLive(payout.sellerId, { kind: 'payout', id });
     res.json({ success: true, restored: ledgers.length, amount: payout.amount });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
@@ -1079,6 +1115,7 @@ router.post('/admin/payouts', requirePermission('finance_payouts'), async (req: 
     await prisma.notification.create({
       data: { userId: sellerId, type: 'SYSTEM', title: 'Ödəniş edildi', body: `Hesabınıza ${payout.amount} AZN ödəniş edildi.`, link: '/earnings' },
     }).catch(() => {});
+    pushLive(sellerId, { kind: 'payout', toast: `Ödəniş edildi 💸 ${payout.amount} AZN`, tone: 'success' });
     res.json({ success: true, payout });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
@@ -1489,6 +1526,9 @@ router.put('/admin/users/:id', requirePermission('users'), async (req: AuthReque
           ...(role !== undefined && { role }),
         },
       });
+      // Rol / təsdiq nişanı / ad dəyişdi — istifadəçinin açıq sessiyası
+      // bunu səhifəni yeniləmədən görsün.
+      pushLive(user.id, { kind: 'account' });
       res.json({ success: true, user });
     } catch (err: any) {
       // H11 fix: catch unique-violation on phone
@@ -1753,8 +1793,14 @@ router.patch('/admin/listings/:id/status', requirePermission('listings'), async 
           link: status === 'APPROVED' ? `/marketplace/${listing.id}` : '/account',
         },
       }).catch(() => {});
-      emitToUser(listing.userId, 'listing:moderated', { id: listing.id, status: listing.status });
     }
+    // Sahibin açıq səhifəsi (Hesabım / Profil) statusu DƏRHAL görsün.
+    pushLive(listing.userId, {
+      kind: 'listing', id: listing.id, status: listing.status,
+      ...(status === 'APPROVED' ? { toast: `Elanınız təsdiqləndi ✓ «${listing.title}»`, tone: 'success' as const } : {}),
+      ...(status === 'REJECTED' ? { toast: `Elanınız rədd edildi: «${listing.title}»`, tone: 'error' as const } : {}),
+    });
+    pushPublicListings({ id: listing.id, reason: status === 'APPROVED' ? 'approved' : 'removed' });
 
     res.json({ success: true, listing });
   } catch (error: any) {
@@ -1776,6 +1822,7 @@ router.put('/admin/listings/:id', requirePermission('listings'), async (req: Aut
         ...(type !== undefined && { type }),
       },
     });
+    pushLive(listing.userId, { kind: 'listing', id: listing.id });
     res.json({ success: true, listing });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
@@ -1798,6 +1845,8 @@ router.delete('/admin/listings/:id', requirePermission('listings'), async (req: 
         where: { id: listing.id },
         data: { status: 'ARCHIVED', archivedAt: new Date() },
       });
+      pushLive(listing.userId, { kind: 'listing', id: listing.id, status: 'ARCHIVED' });
+      if (listing.status === 'APPROVED') pushPublicListings({ id: listing.id, reason: 'removed' });
       res.json({
         success: true, archived: true, orderItems: soldCount, listing: archived,
         message: `Bu elan ${soldCount} sifarişdə keçir — silinmədi, arxivləndi (saytda görünmür, sifariş tarixçəsi qorunur).`,
@@ -1814,6 +1863,8 @@ router.delete('/admin/listings/:id', requirePermission('listings'), async (req: 
     }
 
     await prisma.listing.delete({ where: { id: listing.id } });
+    pushLive(listing.userId, { kind: 'listing', id: listing.id });
+    if (listing.status === 'APPROVED') pushPublicListings({ id: listing.id, reason: 'removed' });
     res.json({ success: true });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
@@ -2243,6 +2294,7 @@ router.put('/admin/orders/:id/assign-courier', requirePermission('orders'), asyn
       data: { courierId: cid },
       include: { courier: { select: { id: true, name: true, phone: true } } },
     });
+    pushLive([order.buyerId, order.sellerId, ...(cid ? [cid] : [])], { kind: 'order', id: order.id });
     res.json({ success: true, order });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
@@ -2341,6 +2393,13 @@ router.put('/admin/returns/:id/override', requirePermission('returns'), async (r
         ...(refundAmount !== undefined && { refundAmount: parseFloat(refundAmount) }),
       },
     });
+    // Alıcının və satıcının Sifarişlər səhifəsində iadə statusu dərhal dəyişsin.
+    pushLive(ret.buyerId, {
+      kind: 'return', id: ret.id, status,
+      toast: status === 'REJECTED' ? `İadə sorğunuz rədd edildi (sifariş #${ret.orderId})` : `İadə sorğunuz yeniləndi: sifariş #${ret.orderId}`,
+      tone: status === 'REJECTED' ? 'error' : 'success',
+    });
+    pushLive(ret.sellerId, { kind: 'return', id: ret.id, status });
     res.json({ success: true, returnRequest: updated });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
@@ -2388,6 +2447,8 @@ router.put('/admin/orders/:id/status', requirePermission('orders'), async (req: 
         data: { userId: order.buyerId, type: 'ORDER', title: 'Sifariş statusu yeniləndi', body: `Sifariş #${order.id}: ${status}`, link: `/orders/${order.id}` },
       });
     } catch { /* ignore */ }
+    pushLive(order.buyerId, { kind: 'order', id: order.id, status, toast: `Sifariş #${order.id} statusu yeniləndi`, tone: status === 'CANCELLED' ? 'error' : 'info' });
+    pushLive([order.sellerId, ...(order.courierId ? [order.courierId] : [])], { kind: 'order', id: order.id, status });
     res.json({
       success: true, order: updated,
       ...(refundFailed ? { refundPending: true, refundError: refundFailed, message: 'Sifariş ləğv edildi, lakin ödənişin qaytarılması alınmadı — avtomatik təkrar cəhd ediləcək.' } : {}),
@@ -2498,6 +2559,9 @@ router.put('/admin/users/:id/block', requirePermission('users'), async (req: Aut
       data: { isBlocked: blocked === true },
       select: { id: true, name: true, isBlocked: true },
     });
+    // Bloklanan istifadəçinin açıq sessiyası dərhal bağlanır (frontend /me
+    // sorğusunda 403 alıb çıxış edir) — bloku ancaq yeniləyəndə hiss etmirdi.
+    pushLive(user.id, { kind: 'account', status: user.isBlocked ? 'BLOCKED' : 'ACTIVE' });
     res.json({ success: true, user });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
@@ -2557,6 +2621,8 @@ router.post('/admin/broadcast', requirePermission('broadcast'), async (req: Auth
         userId: u.id, type: 'SYSTEM', title: String(title), body: String(body), link: link ? String(link) : null,
       })),
     });
+    // Bildiriş zəngi 8 saniyə gözləmədən yenilənsin.
+    pushLive(users.map((u) => u.id), { kind: 'notification' });
     res.json({ success: true, count: result.count });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
@@ -2650,6 +2716,11 @@ router.post('/admin/credentials/:id/:action', requirePermission('credentials'), 
         link: '/profile',
       },
     }).catch(() => {});
+    pushLive(doc.userId, {
+      kind: 'credential', id: doc.id, status: doc.status,
+      toast: action === 'approve' ? `"${doc.title}" sənədiniz təsdiqləndi ✓` : `"${doc.title}" sənədiniz rədd edildi`,
+      tone: action === 'approve' ? 'success' : 'error',
+    });
     res.json({ success: true, document: doc });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
@@ -2677,6 +2748,7 @@ router.post('/admin/social-links/:id/:action', requirePermission('social'), asyn
     const action = String(req.params.action);
     if (!['verify', 'reject'].includes(action)) { res.status(400).json({ success: false, message: 'Yanlış əməliyyat' }); return; }
     const link = await prisma.socialLink.update({ where: { id }, data: { verified: action === 'verify' } });
+    pushLive(link.userId, { kind: 'social', id: link.id, status: link.verified ? 'VERIFIED' : 'REJECTED' });
     res.json({ success: true, link });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });

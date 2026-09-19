@@ -45,6 +45,11 @@ export function emitToUser(userId: number, event: string, payload: any) {
 export function emitToAdmins(event: string, payload: any) {
   ioRef?.to('admins').emit(event, payload);
 }
+/* Bütün qoşulmuş istifadəçilərə — yalnız ictimai, məxfi olmayan xəbərlər üçün
+   (məs. "vitrində yeni elan var"). Heç vaxt şəxsi məlumat göndərməyin. */
+export function emitToAll(event: string, payload: any) {
+  ioRef?.emit(event, payload);
+}
 
 export function isUserOnline(userId: number): boolean {
   const room = ioRef?.sockets.adapter.rooms.get(`u:${userId}`);

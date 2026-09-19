@@ -10,6 +10,7 @@ import { analyzeCredential, verifyIdentityAI, extractIdName } from '../services/
 import { sendVerificationCode } from '../services/mailer';
 import { resolveFlag } from '../services/settings';
 import { emitToAdmins } from '../services/callSignaling';
+import { pushAdmins } from '../services/live';
 import { isValidMonths } from '../services/installment';
 import fs from 'fs';
 import path from 'path';
@@ -24,7 +25,7 @@ router.get('/me', adminAuth, async (req: AuthRequest, res: Response) => {
       where: { id: req.adminId },
       select: {
         id: true, name: true, phone: true, email: true, emailVerified: true, type: true, role: true, verified: true,
-        profileComplete: true, sellerVerified: true, sellerVerifiedAt: true, createdAt: true,
+        profileComplete: true, sellerVerified: true, sellerVerifiedAt: true, createdAt: true, isBlocked: true,
         idVerifyStatus: true, profession: true, professions: true, bio: true, avatar: true, cvFile: true, cvPublic: true,
         idCardImage: true, idCardBackImage: true, selfieImage: true, selfieRightImage: true, selfieLeftImage: true,
         faceMatchScore: true, idNumber: true, birthDate: true, gender: true,
@@ -260,6 +261,7 @@ router.post('/me/credentials', adminAuth, upload.single('document'), processImag
         fraudSignals: true, aiReason: true, status: true, createdAt: true,
       },
     });
+    pushAdmins('credential', { id: doc.id, toast: `Yeni peşə sənədi: ${doc.title}` });
     res.status(201).json({ success: true, document: doc, ai: { ok: ai.ok, error: ai.error } });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
@@ -620,6 +622,8 @@ router.post('/me/listings', listingWriteLimiter, adminAuth, upload.array('images
         status: 'PENDING',
       },
     });
+    // Moderasiya növbəsinə düşdü — admin paneli dərhal görsün.
+    pushAdmins('listing', { id: listing.id, toast: `Yeni elan təsdiq gözləyir: ${listing.title}` });
     res.status(201).json({ success: true, listing });
   } catch (error: any) {
     console.error('[POST /me/listings] error:', error.message, error.code, error);
@@ -782,6 +786,7 @@ router.post('/me/listings/bulk', bulkLimiter, adminAuth, async (req: AuthRequest
         errors.push({ index: i, message: err.message, externalId: it?.externalId });
       }
     }
+    if (created.length) pushAdmins('listing', { toast: `${created.length} yeni elan təsdiq gözləyir` });
     res.json({ success: true, created, errors, total: items.length });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
@@ -927,6 +932,7 @@ router.post('/me/social', adminAuth, async (req: AuthRequest, res: Response) => 
       update: { url, verified: false },
       create: { userId: req.adminId!, platform, url },
     });
+    pushAdmins('social', { id: link.id });
     res.json({ success: true, link });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });

@@ -13,6 +13,7 @@ import { markOrdersAwaitingConfirm, getDeliveryDeadlineHours } from '../services
 import { checkPrice as yangoCheckPrice, isYangoConfigured, YANGO_MAX_WEIGHT_KG, yangoDead } from '../services/yangoDelivery';
 import { notifySellersNewOrder } from '../services/orderNotify';
 import { dispatchOrderToYango } from './yango';
+import { pushLive, pushAdmins } from '../services/live';
 
 const PUBLIC_BACKEND_URL = process.env.PUBLIC_BACKEND_URL || `http://localhost:${process.env.PORT || 5001}`;
 
@@ -1207,6 +1208,13 @@ router.put('/orders/:id/status', adminAuth, async (req: AuthRequest, res: Respon
         },
       });
     }
+    // Hər iki tərəfin açıq Sifarişlər səhifəsi yeniləmədən dəyişsin; qarşı
+    // tərəfə isə hansı səhifədə olsa da qısa xəbər.
+    pushLive(isBuyer ? order.sellerId : order.buyerId, {
+      kind: 'order', id: order.id, status: next,
+      ...(label ? { toast: `Sifariş #${order.id}: ${isBuyer && next === 'DELIVERED' ? 'alıcı təhvil aldı' : label}`, tone: next === 'CANCELLED' ? 'error' as const : 'info' as const } : {}),
+    });
+    pushLive(isBuyer ? order.buyerId : order.sellerId, { kind: 'order', id: order.id, status: next });
 
     // Ləğv baş tutdu, amma pul qaytarıla bilmədisə bunu GİZLƏTMİRİK — həm
     // satıcı/alıcı bilməlidir, həm də admin panelinə düşür və təkrar cəhd olunur.
@@ -1321,6 +1329,8 @@ router.post('/returns', adminAuth, async (req: AuthRequest, res: Response) => {
         refundAmount,
       },
     });
+    pushLive(order.sellerId, { kind: 'return', id: returnReq.id, status: returnReq.status, toast: `Sifariş #${order.id} üçün iadə sorğusu gəldi`, tone: 'info' });
+    pushAdmins('return', { id: returnReq.id });
     res.status(201).json({ success: true, returnRequest: returnReq });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
@@ -1362,6 +1372,8 @@ router.put('/returns/:id/cancel', adminAuth, async (req: AuthRequest, res: Respo
     if (!ret || ret.buyerId !== req.adminId) { res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return; }
     if (ret.status !== 'REQUESTED') { res.status(400).json({ success: false, message: 'Yalnız gözləyən sorğuları ləğv edə bilərsiniz' }); return; }
     const updated = await prisma.returnRequest.update({ where: { id: ret.id }, data: { status: 'CANCELLED' } });
+    // Qarşı tərəfin Sifarişlər səhifəsində iadə statusu dərhal dəyişsin.
+    pushLive([ret.buyerId, ret.sellerId], { kind: 'return', id: ret.id, status: updated.status });
     res.json({ success: true, returnRequest: updated });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
@@ -1375,6 +1387,8 @@ router.put('/returns/:id/ship', adminAuth, async (req: AuthRequest, res: Respons
     if (!ret || ret.buyerId !== req.adminId) { res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return; }
     if (ret.status !== 'APPROVED') { res.status(400).json({ success: false, message: 'Sorğu hələ təsdiqlənməyib' }); return; }
     const updated = await prisma.returnRequest.update({ where: { id: ret.id }, data: { status: 'RETURN_SHIPPED' } });
+    // Qarşı tərəfin Sifarişlər səhifəsində iadə statusu dərhal dəyişsin.
+    pushLive([ret.buyerId, ret.sellerId], { kind: 'return', id: ret.id, status: updated.status });
     res.json({ success: true, returnRequest: updated });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
@@ -1392,6 +1406,8 @@ router.put('/returns/:id/approve', adminAuth, async (req: AuthRequest, res: Resp
       where: { id: ret.id },
       data: { status: 'APPROVED', refundAmount: refundAmount ? parseFloat(refundAmount) : ret.refundAmount },
     });
+    // Qarşı tərəfin Sifarişlər səhifəsində iadə statusu dərhal dəyişsin.
+    pushLive([ret.buyerId, ret.sellerId], { kind: 'return', id: ret.id, status: updated.status });
     res.json({ success: true, returnRequest: updated });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
@@ -1408,6 +1424,8 @@ router.put('/returns/:id/reject', adminAuth, async (req: AuthRequest, res: Respo
       where: { id: ret.id },
       data: { status: 'REJECTED', sellerNote: req.body.sellerNote || null },
     });
+    // Qarşı tərəfin Sifarişlər səhifəsində iadə statusu dərhal dəyişsin.
+    pushLive([ret.buyerId, ret.sellerId], { kind: 'return', id: ret.id, status: updated.status });
     res.json({ success: true, returnRequest: updated });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
@@ -1421,6 +1439,8 @@ router.put('/returns/:id/receive', adminAuth, async (req: AuthRequest, res: Resp
     if (!ret || ret.sellerId !== req.adminId) { res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return; }
     if (ret.status !== 'RETURN_SHIPPED') { res.status(400).json({ success: false, message: 'Məhsul hələ göndərilməyib' }); return; }
     const updated = await prisma.returnRequest.update({ where: { id: ret.id }, data: { status: 'RETURN_RECEIVED' } });
+    // Qarşı tərəfin Sifarişlər səhifəsində iadə statusu dərhal dəyişsin.
+    pushLive([ret.buyerId, ret.sellerId], { kind: 'return', id: ret.id, status: updated.status });
     res.json({ success: true, returnRequest: updated });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
@@ -1500,6 +1520,7 @@ router.put('/returns/:id/refund', adminAuth, async (req: AuthRequest, res: Respo
     // satıcıya köçürə bilərdi.
     await recordSettlement(ord.id).catch(() => {});
 
+    pushLive([ret.buyerId, ret.sellerId], { kind: 'return', id: ret.id, status: updated.status });
     res.json({ success: true, returnRequest: updated, stockWarnings: stockWarnings.length > 0 ? stockWarnings : undefined });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });

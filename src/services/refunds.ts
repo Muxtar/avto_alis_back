@@ -21,6 +21,7 @@
 
 import { PrismaClient } from '@prisma/client';
 import { refundOrder as gatewayRefundOrder, activeProvider } from './paymentGateway';
+import { pushAdmins } from './live';
 
 const prisma = new PrismaClient();
 
@@ -176,4 +177,5 @@ async function notifyAdmins(orderId: number, amount: number, error: string): Pro
       },
     }).catch(() => {});
   }
+  pushAdmins('refund', { id: orderId, toast: `⚠️ Sifariş #${orderId}: pul qaytarıla bilmədi` });
 }

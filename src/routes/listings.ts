@@ -4,6 +4,7 @@ import { upload } from '../middleware/upload';
 import { processImages } from '../middleware/imageProcess';
 import { adminAuth, AuthRequest, verifyTokenUserId } from '../middleware/auth';
 import { purchasedListing, reviewStats } from '../services/reviewGating';
+import { pushAdmins } from '../services/live';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -550,6 +551,7 @@ router.post('/listings', adminAuth, upload.array('images', 5), processImages, as
       include: { user: { select: { id: true, name: true, avatar: true, verified: true, type: true } } },
     });
 
+    pushAdmins('listing', { id: listing.id, toast: `Yeni elan təsdiq gözləyir: ${listing.title}` });
     res.status(201).json({ success: true, listing });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });

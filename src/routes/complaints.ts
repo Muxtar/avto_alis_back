@@ -5,6 +5,7 @@ import { complaintLimiter } from '../middleware/rateLimiter';
 import { refundOrder } from '../services/paymentGateway';
 import { upload } from '../middleware/upload';
 import { processImages } from '../middleware/imageProcess';
+import { pushLive, pushAdmins } from '../services/live';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -62,6 +63,7 @@ router.post('/complaints', complaintLimiter, adminAuth, upload.array('images', M
     const complaint = await prisma.complaint.create({
       data: { complainantId: req.adminId!, targetUserId, consultationId, orderId, listingId, category, description, images },
     });
+    pushAdmins('complaint', { id: complaint.id, toast: 'Yeni şikayət' });
     res.json({ success: true, complaint });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
@@ -79,6 +81,7 @@ router.post('/complaints/:id/evidence', complaintLimiter, adminAuth, upload.arra
     const images = [...(c.images || []), ...add].slice(0, MAX_EVIDENCE);
     // Sübut əlavə olundu → yenidən baxış üçün REVIEWING-ə qaytar.
     const updated = await prisma.complaint.update({ where: { id }, data: { images, status: 'REVIEWING' } });
+    pushAdmins('complaint', { id, toast: `Şikayət #${id}: sübut əlavə edildi` });
     res.json({ success: true, complaint: updated });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
@@ -191,6 +194,7 @@ router.post('/admin/complaints/:id/request-evidence', requirePermission('complai
         link: '/complaints',
       },
     }).catch(() => {});
+    pushLive(c.complainantId, { kind: 'complaint', id, status: 'EVIDENCE_REQUESTED', toast: 'Şikayətiniz üçün əlavə sübut istənir', tone: 'info' });
     res.json({ success: true });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
@@ -242,6 +246,10 @@ router.post('/admin/complaints/:id/resolve', requirePermission('complaints'), as
       data: { status: status as any, resolution: resolution || (doRefund ? 'REFUNDED' : doSuspend ? 'SUSPENDED' : upheld ? 'WARNED' : 'REJECTED'), adminNote, resolvedById: req.adminId, resolvedAt: new Date() },
     });
     await prisma.notification.create({ data: { userId: c.complainantId, type: 'COMPLAINT', title: 'Şikayət nəticələndi', body: upheld ? 'Şikayətiniz nəzərə alındı.' : 'Şikayətiniz araşdırıldı.', link: '/consultations' } }).catch(() => {});
+    pushLive(c.complainantId, { kind: 'complaint', id, status, toast: 'Şikayətiniz nəticələndi', tone: upheld ? 'success' : 'info' });
+    // Qarşı tərəf: dayandırıldısa profili/təklifləri dərhal dəyişməlidir.
+    pushLive(c.targetUserId, { kind: doSuspend ? 'consultation' : 'complaint', id });
+    if (c.consultation) pushLive([c.complainantId, c.targetUserId], { kind: 'consultation', id: c.consultation.id });
 
     res.json({ success: true });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }

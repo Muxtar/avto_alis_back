@@ -9,6 +9,7 @@
 // KART — yalnız ödəniş təsdiqlənəndə.
 import { PrismaClient } from '@prisma/client';
 import { emitToUser } from './callSignaling';
+import { pushLive, pushAdmins } from './live';
 
 const prisma = new PrismaClient();
 
@@ -55,7 +56,10 @@ export async function notifySellersNewOrder(orderIds: number[]): Promise<void> {
 
     for (const o of claimed) {
       emitToUser(o.sellerId, 'order:new', { orderId: o.id, total: o.total });
+      // Satıcının açıq Sifarişlər səhifəsinə yeni sətir düşsün + zəng.
+      pushLive(o.sellerId, { kind: 'order', id: o.id, toast: `Yeni sifariş #${o.id} — ${o.total.toFixed(2)} AZN`, tone: 'success' });
     }
+    if (claimed.length) pushAdmins('order');
   } catch (e) {
     console.error('[orderNotify] notifySellersNewOrder:', (e as any)?.message);
   }

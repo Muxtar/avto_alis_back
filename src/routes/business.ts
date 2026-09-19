@@ -12,6 +12,7 @@ import { feeState, feeAmount, consumeFee, releaseFee } from '../services/busines
 import fs from 'fs';
 import path from 'path';
 import { archiveBusinessPayee } from '../services/payoutArchive';
+import { pushLive, pushAdmins, pushPublicListings } from '../services/live';
 
 const PUBLIC_BACKEND_URL = process.env.PUBLIC_BACKEND_URL || `http://localhost:${process.env.PORT || 5001}`;
 
@@ -290,6 +291,7 @@ router.post('/me/businesses', adminAuth, docFields, processImages, async (req: A
     await prisma.notification.create({
       data: { userId: req.adminId!, type: 'SYSTEM', title: 'Biznes yoxlamaya göndərildi', body: `Biznes müraciətiniz admin təsdiqini gözləyir. Təsdiqdən sonra kartla satış mümkün olacaq.`, link: '/business' },
     }).catch(() => {});
+    pushAdmins('business', { id: business.id, toast: `Yeni biznes müraciəti: ${business.name}` });
 
     // Bank hesabları: yalnız əl ilə göndərilənlər (adətən boş — admin sonradan
     // sənədə baxıb IBAN əlavə edir). AI ilə oxuma yoxdur.
@@ -359,6 +361,7 @@ router.put('/me/businesses/:id', adminAuth, async (req: AuthRequest, res: Respon
       if (stillApproved === 0) {
         await prisma.user.update({ where: { id: biz.userId }, data: { sellerVerified: false } }).catch(() => {});
       }
+      pushAdmins('business', { id: updated.id, toast: `Biznes yenidən təsdiq gözləyir: ${updated.name}` });
     }
     res.json({ success: true, business: updated });
   } catch (error: any) {
@@ -407,6 +410,7 @@ router.post('/me/businesses/:id/edit', adminAuth, docFields, processImages, asyn
     if (resetApproval) {
       const stillApproved = await prisma.business.count({ where: { userId: biz.userId, status: 'APPROVED', deletedAt: null } });
       if (stillApproved === 0) await prisma.user.update({ where: { id: biz.userId }, data: { sellerVerified: false } }).catch(() => {});
+      pushAdmins('business', { id: updated.id, toast: `Biznes yenidən təsdiq gözləyir: ${updated.name}` });
     }
     res.json({ success: true, business: updated, reApproval: resetApproval });
   } catch (error: any) {
@@ -669,6 +673,7 @@ router.post('/me/businesses/:id/objects', adminAuth, async (req: AuthRequest, re
         activityAreas: Array.isArray(activityAreas) ? activityAreas.filter((x: any) => typeof x === 'string') : [],
       },
     });
+    pushAdmins('object', { id: obj.id });
     res.status(201).json({ success: true, object: obj });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
@@ -1145,6 +1150,9 @@ router.put('/admin/businesses/:id/approve', requirePermission('businesses'), asy
     await prisma.notification.create({
       data: { userId: biz.userId, type: 'SYSTEM', title: 'Biznes təsdiqləndi', body: `"${biz.name}" təsdiqləndi — artıq kartla satış mümkündür.`, link: '/business' },
     }).catch(() => {});
+    pushLive(biz.userId, { kind: 'business', id: biz.id, status: 'APPROVED', toast: `Biznes təsdiqləndi ✓ «${biz.name}»`, tone: 'success' });
+    // Biznes aktivləşdi — onun elanları vitrinə qayıda bilər.
+    pushPublicListings({ reason: 'approved' });
     res.json({ success: true, business: biz });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
@@ -1167,6 +1175,7 @@ router.put('/admin/businesses/:id/reject', requirePermission('businesses'), asyn
     await prisma.notification.create({
       data: { userId: biz.userId, type: 'SYSTEM', title: 'Biznes rədd edildi', body: `"${biz.name}": ${reason.trim()}\n\nÖdədiyiniz haqq qüvvədədir — düzəlişdən sonra əlavə ödəniş etmədən yenidən müraciət edə bilərsiniz.`, link: '/business' },
     }).catch(() => {});
+    pushLive(biz.userId, { kind: 'business', id: biz.id, status: 'REJECTED', toast: `Biznes rədd edildi: «${biz.name}»`, tone: 'error' });
     res.json({ success: true, business: biz });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
@@ -1321,6 +1330,7 @@ router.put('/admin/businesses/:id', requirePermission('businesses'), async (req:
     if (b.kind === 'LEGAL' || b.kind === 'PHYSICAL') data.kind = b.kind;
     else if (voen) data.kind = voen.replace(/\D/g, '').slice(-1) === '1' ? 'LEGAL' : 'PHYSICAL';
     const biz = await prisma.business.update({ where: { id }, data });
+    pushLive(biz.userId, { kind: 'business', id: biz.id });
     res.json({ success: true, business: biz });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
@@ -1449,6 +1459,12 @@ router.patch('/admin/businesses/:id/active', requirePermission('businesses'), as
     const id = parseInt(String(req.params.id));
     const isActive = req.body?.isActive === true;
     const biz = await prisma.business.update({ where: { id }, data: { isActive } });
+    pushLive(biz.userId, {
+      kind: 'business', id: biz.id,
+      toast: isActive ? `Biznes aktivləşdirildi: «${biz.name}»` : `Biznes deaktiv edildi: «${biz.name}»`,
+      tone: isActive ? 'success' : 'error',
+    });
+    pushPublicListings({ reason: isActive ? 'approved' : 'removed' });
     res.json({ success: true, business: { id: biz.id, isActive: biz.isActive } });
   } catch (error: any) { res.status(400).json({ success: false, message: error.message }); }
 });
@@ -1457,7 +1473,9 @@ router.patch('/admin/objects/:id/active', requirePermission('businesses'), async
   try {
     const id = parseInt(String(req.params.id));
     const isActive = req.body?.isActive === true;
-    const obj = await prisma.businessObject.update({ where: { id }, data: { isActive } });
+    const obj = await prisma.businessObject.update({ where: { id }, data: { isActive }, include: { business: { select: { userId: true } } } });
+    pushLive(obj.business?.userId, { kind: 'object', id: obj.id, toast: isActive ? `Obyekt aktivləşdirildi: «${obj.name}»` : `Obyekt deaktiv edildi: «${obj.name}»`, tone: isActive ? 'success' : 'error' });
+    pushPublicListings({ reason: isActive ? 'approved' : 'removed' });
     res.json({ success: true, object: { id: obj.id, isActive: obj.isActive } });
   } catch (error: any) { res.status(400).json({ success: false, message: error.message }); }
 });
@@ -1490,10 +1508,12 @@ router.delete('/admin/businesses/:id', requirePermission('businesses'), async (r
         data: { status: 'ARCHIVED', archivedAt: now },
       });
       await tx.businessObject.updateMany({ where: { businessId: id }, data: { deletedAt: now, isActive: false } });
-      await tx.business.update({ where: { id }, data: { deletedAt: now, isActive: false } });
-      return del.count;
+      const b = await tx.business.update({ where: { id }, data: { deletedAt: now, isActive: false } });
+      return { count: del.count, userId: b.userId };
     });
-    res.json({ success: true, deletedListings: archived, deletedObjects: objectIds.length });
+    pushLive(archived.userId, { kind: 'business', id });
+    pushPublicListings({ reason: 'removed' });
+    res.json({ success: true, deletedListings: archived.count, deletedObjects: objectIds.length });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }
@@ -1512,10 +1532,12 @@ router.delete('/admin/objects/:id', requirePermission('businesses'), async (req:
         where: { businessObjectId: id, status: { not: 'ARCHIVED' } },
         data: { status: 'ARCHIVED', archivedAt: now },
       });
-      await tx.businessObject.update({ where: { id }, data: { deletedAt: now, isActive: false } });
-      return del.count;
+      const o = await tx.businessObject.update({ where: { id }, data: { deletedAt: now, isActive: false }, include: { business: { select: { userId: true } } } });
+      return { count: del.count, userId: o.business?.userId };
     });
-    res.json({ success: true, deletedListings: archived });
+    pushLive(archived.userId, { kind: 'object', id });
+    pushPublicListings({ reason: 'removed' });
+    res.json({ success: true, deletedListings: archived.count });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }

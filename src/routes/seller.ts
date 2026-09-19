@@ -3,6 +3,7 @@ import { PrismaClient, UserType } from '@prisma/client';
 import { adminAuth, requirePermission, AuthRequest } from '../middleware/auth';
 import { upload } from '../middleware/upload';
 import { processImages } from '../middleware/imageProcess';
+import { pushLive, pushAdmins } from '../services/live';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -48,6 +49,7 @@ router.post('/seller/apply', adminAuth, upload.fields([
       ? await prisma.sellerVerification.update({ where: { userId }, data })
       : await prisma.sellerVerification.create({ data: { userId, ...data } });
 
+    pushAdmins('seller', { id: application.id, toast: 'Yeni satıcı ərizəsi' });
     res.json({ success: true, application });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
@@ -120,6 +122,7 @@ router.put('/admin/seller-applications/:id/approve', requirePermission('kyc'), a
         },
       }),
     ]);
+    pushLive(app.userId, { kind: 'seller', status: 'APPROVED', toast: 'Satıcı kimliyiniz təsdiqləndi ✓', tone: 'success' });
     res.json({ success: true });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
@@ -149,6 +152,7 @@ router.put('/admin/seller-applications/:id/reject', requirePermission('kyc'), as
         },
       }),
     ]);
+    pushLive(app.userId, { kind: 'seller', status: 'REJECTED', toast: 'Satıcı ərizəniz rədd edildi', tone: 'error' });
     res.json({ success: true });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
@@ -250,6 +254,7 @@ router.post('/admin/identity/:id/approve', requirePermission('kyc'), async (req:
         body: 'Şəxsiyyətiniz yoxlanıldı və təsdiqləndi.', link: '/profile',
       },
     }).catch(() => {});
+    pushLive(id, { kind: 'identity', status: 'APPROVED', toast: 'Kimliyiniz təsdiqləndi ✅', tone: 'success' });
     res.json({ success: true });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
@@ -275,6 +280,7 @@ router.post('/admin/identity/:id/reject', requirePermission('kyc'), async (req: 
         link: '/profile',
       },
     }).catch(() => {});
+    pushLive(id, { kind: 'identity', status: 'REJECTED', toast: 'Kimlik təsdiqi alınmadı', tone: 'error' });
     res.json({ success: true });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
