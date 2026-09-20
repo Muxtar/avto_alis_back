@@ -340,13 +340,21 @@ router.get('/listings/:id', async (req: Request, res: Response) => {
       res.status(404).json({ success: false, message: 'Elan tapılmadı' });
       return;
     }
-    if (listing.expiresAt && listing.expiresAt <= new Date()) {
+    // Baxan kimdir — aşağıdakı bir neçə yoxlamada lazımdır.
+    const viewerId = verifyTokenUserId(req.headers.authorization?.replace('Bearer ', ''));
+    // MƏHSULU ALMIŞ İSTİFADƏÇİ elanı HƏMİŞƏ aça bilər.
+    // Əvvəl vaxtı keçmiş / arxivlənmiş elan hamıya 404 verirdi. Nəticə: elan
+    // 20-30 gündən sonra (və ya satıcı onu gizlədəndə) yox olurdu və həmin
+    // məhsulu ALMIŞ alıcı ona RƏY YAZA BİLMİRDİ — sifarişdəki «Rəy yaz»
+    // düyməsi «Elan tapılmadı» səhifəsinə aparırdı.
+    const buyerOfListing = viewerId != null ? await purchasedListing(viewerId, listing.id) : false;
+    if (listing.expiresAt && listing.expiresAt <= new Date() && !buyerOfListing) {
       res.status(404).json({ success: false, message: 'Elan tapılmadı' });
       return;
     }
     // Deaktiv biznes/obyektin elanı saytın HEÇ BİR yerində açılmamalıdır —
     // birbaşa link və ya "ən son baxdıqlarınız" vasitəsilə də.
-    if (listing.businessObject?.business) {
+    if (listing.businessObject?.business && !buyerOfListing) {
       const owner = await prisma.businessObject.findUnique({
         where: { id: listing.businessObjectId! },
         select: { isActive: true, business: { select: { isActive: true } } },
@@ -358,13 +366,12 @@ router.get('/listings/:id', async (req: Request, res: Response) => {
     }
     // Arxivləşdirilmiş (obyekt/biznes silinib) elan HEÇ KİMƏ açılmır —
     // sahibinə də. Sətir yalnız satış tarixçəsi üçün bazada qalır.
-    if (listing.status === 'ARCHIVED') {
+    if (listing.status === 'ARCHIVED' && !buyerOfListing) {
       res.status(404).json({ success: false, message: 'Elan tapılmadı' });
       return;
     }
     // Moderasiyadan keçməmiş elanı yalnız sahibi və admin görə bilər.
-    if (listing.status !== 'APPROVED') {
-      const viewerId = verifyTokenUserId(req.headers.authorization?.replace('Bearer ', ''));
+    if (listing.status !== 'APPROVED' && !buyerOfListing) {
       let allowed = viewerId != null && viewerId === listing.userId;
       if (!allowed && viewerId != null) {
         const viewer = await prisma.user.findUnique({ where: { id: viewerId }, select: { role: true } });
@@ -383,10 +390,9 @@ router.get('/listings/:id', async (req: Request, res: Response) => {
     // Hər iki halda bir istifadəçi bir elana yalnız bir dəfə (dəyişilə bilər).
     // VÖEN-siz-də canReview=true olduğundan frontend rəy formunu göstərir.
     let canReview = false;
-    const reviewerId = verifyTokenUserId(req.headers.authorization?.replace('Bearer ', ''));
-    if (reviewerId != null && reviewerId !== listing.userId) {
+    if (viewerId != null && viewerId !== listing.userId) {
       const isVoen = !!(listing.businessId || listing.businessObjectId);
-      canReview = isVoen ? await purchasedListing(reviewerId, listing.id) : true;
+      canReview = isVoen ? buyerOfListing : true;
     }
 
     // VÖEN elanda obyektin reytinqini (5 ulduz + bəyən/bəyənmə) də göndər —

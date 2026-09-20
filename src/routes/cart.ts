@@ -976,10 +976,23 @@ router.get('/orders/buying', adminAuth, async (req: AuthRequest, res: Response) 
         courier: { select: { id: true, name: true, phone: true } },
         buyerObject: { select: { id: true, name: true } },
         returnRequests: { include: { orderItem: true } },
+        // Alıcı bu sifarişə artıq satıcı qiyməti veribmi — forma təkrar
+        // açılmasın (əvvəl bu məlumat qaytarılmırdı: forma hər dəfə görünür,
+        // göndərəndə isə «artıq rating vermisiniz» xətası çıxırdı).
+        sellerRating: { select: { rating: true, comment: true } },
       },
       orderBy: { createdAt: 'desc' },
     });
-    res.json({ orders });
+    // Alıcının bu məhsullara YAZDIĞI rəylər — «Rəy yaz» düyməsi yazılmış
+    // məhsulda «Rəyi dəyiş»ə çevrilsin.
+    const listingIds = Array.from(new Set(orders.flatMap((o) => o.items.map((i) => i.listingId))));
+    const myReviews = listingIds.length
+      ? await prisma.comment.findMany({
+          where: { userId: req.adminId!, listingId: { in: listingIds } },
+          select: { id: true, listingId: true, rating: true, content: true },
+        })
+      : [];
+    res.json({ orders, myReviews });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }
@@ -1033,6 +1046,7 @@ router.get('/orders/:id', adminAuth, async (req: AuthRequest, res: Response) => 
           },
         },
         courier: { select: { id: true, name: true, phone: true } },
+        sellerRating: { select: { rating: true, comment: true } },
       },
     });
     if (!order) {
@@ -1215,6 +1229,19 @@ router.put('/orders/:id/status', adminAuth, async (req: AuthRequest, res: Respon
       DELIVERED: 'çatdırıldı',
       CANCELLED: 'rədd/ləğv edildi',
     };
+    // Təhvil alındı — alıcıya rəy xatırlatması. Rəy yazmaq üçün məhsulu
+    // axtarmağa ehtiyac yoxdur: «Sifarişlər» səhifəsində hər məhsulun
+    // yanında «Rəy yaz» düyməsi var.
+    if (next === 'DELIVERED') {
+      await prisma.notification.create({
+        data: {
+          userId: order.buyerId, type: 'ORDER', title: `Sifariş #${order.id}`,
+          body: 'Sifarişiniz tamamlandı ✓ Məhsula və satıcıya rəy yazmağınız digər alıcılara kömək edir.',
+          link: '/orders',
+        },
+      }).catch(() => {});
+    }
+
     const label = statusLabels[next];
     if (label) {
       // Statusu satıcı dəyişibsə alıcıya, alıcı dəyişibsə (təhvil aldım/ləğv) satıcıya bildir.

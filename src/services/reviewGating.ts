@@ -20,6 +20,20 @@ export async function purchasedFromObject(userId: number, objectId: number): Pro
   return !!item;
 }
 
+/** Bu obyektdən neçə DƏFƏ (neçə sifarişlə) alıb — hər alış bir rəy haqqı verir.
+ *
+ *  Əvvəl mağazaya ÖMÜRLÜK bir rəy yazmaq olurdu: eyni mağazadan ikinci dəfə
+ *  alan müştəri yeni təcrübəsini yaza bilmirdi («artıq rəy yazmısınız»).
+ *  İndi hər tamamlanmış sifariş bir rəy haqqıdır (eBay üslubu). */
+export async function deliveredOrderCountFromObject(userId: number, objectId: number): Promise<number> {
+  const rows = await prisma.orderItem.findMany({
+    where: { listing: { businessObjectId: objectId }, order: { buyerId: userId, status: 'DELIVERED' } },
+    select: { orderId: true },
+    distinct: ['orderId'],
+  });
+  return rows.length;
+}
+
 // Bu istifadəçi qarşı tərəflə 1:1 yazışıb (fərdi elanlar üçün "əlaqə saxlayıb" sübutu)?
 export async function messagedUser(userId: number, otherId: number): Promise<boolean> {
   const m = await prisma.message.findFirst({
@@ -42,6 +56,13 @@ export async function consultedProfessional(userId: number, proId: number): Prom
     select: { id: true },
   });
   return !!s;
+}
+
+/** Bu peşəkarla neçə seans keçirib — hər seans bir rəy haqqı verir. */
+export async function consultationCount(userId: number, proId: number): Promise<number> {
+  return prisma.consultationSession.count({
+    where: { buyerId: userId, professionalId: proId, status: { in: ['PAID', 'ACTIVE', 'PAUSED', 'ENDED'] } },
+  });
 }
 
 // Rəylərdən məmnunluq faizi (5 ulduz əsaslı) + orta + say
