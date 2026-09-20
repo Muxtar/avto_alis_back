@@ -4,6 +4,7 @@ import { upload } from '../middleware/upload';
 import { processImages } from '../middleware/imageProcess';
 import { adminAuth, AuthRequest, verifyTokenUserId } from '../middleware/auth';
 import { purchasedListing, reviewStats } from '../services/reviewGating';
+import { searchWords } from '../services/searchTerms';
 import { pushAdmins } from '../services/live';
 
 const router = Router();
@@ -27,20 +28,31 @@ router.get('/listings', async (req: Request, res: Response) => {
       ],
     };
     if (search) {
-      const s = search as string;
-      // Ümumi axtarış: məhsul/xidmət (başlıq, təsvir, marka, model),
-      // satıcının adı-soyadı, şirkət adı və biznes obyekti adı.
-      (where.AND as Prisma.ListingWhereInput[]).push({
-        OR: [
-          { title: { contains: s, mode: 'insensitive' } },
-          { description: { contains: s, mode: 'insensitive' } },
-          { brand: { contains: s, mode: 'insensitive' } },
-          { model: { contains: s, mode: 'insensitive' } },
-          { user: { name: { contains: s, mode: 'insensitive' } } },
-          { business: { name: { contains: s, mode: 'insensitive' } } },
-          { businessObject: { name: { contains: s, mode: 'insensitive' } } },
-        ],
-      });
+      // Ümumi axtarış: məhsul/xidmət (başlıq, təsvir, KATEQORİYA, marka, model),
+      // satıcının adı, şirkət/obyekt adı, şəhər.
+      //
+      // Sorğu SÖZLƏRƏ bölünür və hər söz kökünə salınır (services/searchTerms):
+      // «kitablar» → «kitab», «uşaq kitabı» → «uşaq» + «kitab». Hər söz
+      // sahələrdən ən azı birində olmalıdır. Əvvəl bütöv sətir axtarılırdı:
+      // şəkilçili söz və ya söz sırası dəyişəndə elan TAPILMIRDI, kateqoriya
+      // isə ümumiyyətlə axtarılmırdı (saytda kitab var, «kitab» yazanda çıxmırdı).
+      const words = searchWords(String(search));
+      const terms = words.length ? words : [String(search).trim().toLowerCase()];
+      for (const w of terms) {
+        (where.AND as Prisma.ListingWhereInput[]).push({
+          OR: [
+            { title: { contains: w, mode: 'insensitive' } },
+            { description: { contains: w, mode: 'insensitive' } },
+            { category: { contains: w, mode: 'insensitive' } },
+            { brand: { contains: w, mode: 'insensitive' } },
+            { model: { contains: w, mode: 'insensitive' } },
+            { city: { contains: w, mode: 'insensitive' } },
+            { user: { name: { contains: w, mode: 'insensitive' } } },
+            { business: { name: { contains: w, mode: 'insensitive' } } },
+            { businessObject: { name: { contains: w, mode: 'insensitive' } } },
+          ],
+        });
+      }
     }
     // Əsas kateqoriya seçiləndə alt-kateqoriyaları da tut (prefix uyğunluğu).
     if (category) (where.AND as Prisma.ListingWhereInput[]).push({ category: { startsWith: category as string } });
