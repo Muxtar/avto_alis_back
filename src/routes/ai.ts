@@ -29,8 +29,10 @@ router.post('/ai/chat', aiChatLimiter, adminAuth, async (req: AuthRequest, res: 
     }
     // Token daxili GET endpoint çağırışları üçün (oxuma alətləri mövcud endpoint-ləri işlədir).
     const token = (req.headers.authorization || '').replace('Bearer ', '');
-    const { reply, pendingAction } = await runAgent(req.adminId!, token, history);
-    res.json({ success: true, reply, pendingAction });
+    const { reply, pendingAction, executed } = await runAgent(req.adminId!, token, history);
+    // `executed` — təsdiqsiz icra olunan əməllər (səbət, seçilmişlər...).
+    // Frontend bunlara baxıb sayğacları yeniləyir.
+    res.json({ success: true, reply, pendingAction, executed });
   } catch (error: any) {
     console.error('[POST /ai/chat] error:', error?.message || error);
     res.status(500).json({ success: false, message: 'AI cavab verə bilmədi' });

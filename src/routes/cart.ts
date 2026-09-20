@@ -531,6 +531,18 @@ router.delete('/cart/item/:id', adminAuth, async (req: AuthRequest, res: Respons
   }
 });
 
+// Səbəti tamamilə boşalt (AI köməkçi və «hamısını sil» düyməsi üçün).
+router.delete('/cart/clear', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const cart = await prisma.cart.findUnique({ where: { userId: req.adminId! }, select: { id: true } });
+    if (!cart) { res.json({ success: true, removed: 0 }); return; }
+    const r = await prisma.cartItem.deleteMany({ where: { cartId: cart.id } });
+    res.json({ success: true, removed: r.count });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
 // Checkout (Bolt Food benzeri: delivery/pickup + scheduled + promo + loyalty)
 router.post('/cart/checkout', requireType(BUYER_TYPES), async (req: AuthRequest, res: Response) => {
   try {
