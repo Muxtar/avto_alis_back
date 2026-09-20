@@ -15,7 +15,7 @@ import { notifySellersNewOrder } from '../services/orderNotify';
 import { dispatchOrderToYango, cancelActiveYangoClaim } from './yango';
 import { pushLive, pushAdmins } from '../services/live';
 import { unitPriceFor, priceInfo, type Tier } from '../services/tierPricing';
-import { groupQty, applyGroupPrice } from '../services/groupBuy';
+import { groupQty, RETURN_WINDOW_DAYS } from '../services/groupBuy';
 
 const PUBLIC_BACKEND_URL = process.env.PUBLIC_BACKEND_URL || `http://localhost:${process.env.PORT || 5001}`;
 
@@ -57,14 +57,12 @@ router.get('/cart', adminAuth, async (req: AuthRequest, res: Response) => {
     //   • birgə alış sətridirsə → QRUPUN ümumi sayına görə (hamıya eyni qiymət).
     const priced = await Promise.all(cart.items.map(async (i) => {
       const tiers: Tier[] = (i.listing.priceTiers || []).map((t: any) => ({ minQty: t.minQty, price: t.price }));
+      // BİRGƏ ALIŞ sətri TAM qiymətlə ödənilir; endirim qaytarma müddəti
+      // bitəndən sonra geri qaytarılır (gözlənilən qiymət `pricing`-dədir).
       let unit = i.listing.price;
       let groupTotalQty: number | null = null;
-      if (i.groupBuyId) {
-        groupTotalQty = await groupQty(i.groupBuyId);
-        unit = unitPriceFor(i.listing.price, tiers, Math.max(groupTotalQty + i.quantity, i.quantity));
-      } else if (tiers.length) {
-        unit = unitPriceFor(i.listing.price, tiers, i.quantity);
-      }
+      if (i.groupBuyId) groupTotalQty = await groupQty(i.groupBuyId);
+      else if (tiers.length) unit = unitPriceFor(i.listing.price, tiers, i.quantity);
       return {
         ...i,
         unitPrice: unit,
@@ -73,6 +71,9 @@ router.get('/cart', adminAuth, async (req: AuthRequest, res: Response) => {
         groupTotalQty,
         groupCode: (i as any).groupBuy?.code || null,
         groupExpiresAt: (i as any).groupBuy?.expiresAt || null,
+        // Birgə alışda endirim sonra qaytarılır — alıcı bunu səbətdə görür.
+        groupRefundLater: !!i.groupBuyId,
+        returnWindowDays: RETURN_WINDOW_DAYS,
         pricing: priceInfo(i.listing.price, tiers, i.groupBuyId ? (groupTotalQty || 0) + i.quantity : i.quantity),
       };
     }));
@@ -602,6 +603,16 @@ router.post('/cart/checkout', requireType(BUYER_TYPES), async (req: AuthRequest,
       if (cart.items.length === 0) { res.status(400).json({ success: false, message: 'Seçilmiş məhsul yoxdur' }); return; }
     }
 
+    // BİRGƏ ALIŞ yalnız KARTLA: endirim fərqi sonradan geri qaytarılır,
+    // nağd ödənişdə platforma pulu qaytara bilmir (pul satıcıdadır).
+    if (paymentMethod !== 'CARD' && cart.items.some((i) => i.groupBuyId)) {
+      res.status(400).json({
+        success: false,
+        message: 'Birgə alış yalnız kartla ödənişlə mümkündür — endirim fərqi sonradan kartınıza qaytarılır.',
+      });
+      return;
+    }
+
     // Stok kontrolu (preliminary; final atomic check is inside the transaction below)
     for (const item of cart.items) {
       if (item.listing.stock < item.quantity) {
@@ -697,11 +708,9 @@ router.post('/cart/checkout', requireType(BUYER_TYPES), async (req: AuthRequest,
     const unitPrices = new Map<number, number>();
     for (const i of cart.items) {
       const tiers: Tier[] = ((i.listing as any).priceTiers || []).map((t: any) => ({ minQty: t.minQty, price: t.price }));
+      // BİRGƏ ALIŞ: tam qiymət ödənilir, endirim sonra qaytarılır.
       let unit = i.listing.price;
-      if (i.groupBuyId) {
-        const g = await groupQty(i.groupBuyId);
-        unit = unitPriceFor(i.listing.price, tiers, g + i.quantity);
-      } else if (tiers.length) {
+      if (!i.groupBuyId && tiers.length) {
         unit = unitPriceFor(i.listing.price, tiers, i.quantity);
       }
       unitPrices.set(i.id, unit);
@@ -942,11 +951,10 @@ router.post('/cart/checkout', requireType(BUYER_TYPES), async (req: AuthRequest,
       return createdOrders;
     });
 
-    // BİRGƏ ALIŞ: yeni iştirakçı qoşulduğu üçün qrupun sayı artdı — qiymət
-    // düşübsə əvvəlki iştirakçılara fərq qaytarılır (services/groupBuy).
-    for (const gid of new Set(orders.map((o: any) => o.groupBuyId).filter(Boolean))) {
-      applyGroupPrice(gid as number).catch((e) => console.error('[groupBuy] qiymət yenilənmədi:', e?.message));
-    }
+    // BİRGƏ ALIŞ: qiymət BURADA dəyişmir. Hər kəs tam qiyməti ödəyir; endirim
+    // 14 günlük qaytarma müddəti bitəndən sonra, məhsulu SAXLAYANLARIN sayına
+    // görə hesablanır (services/groupBuy → settleDueGroups). Bu, saxta qrup
+    // yığıb sonra məhsulu qaytarmaqla endirim qoparmağın qarşısını alır.
 
     // KART ÖDƏNİŞİ: transaction commit olandan SONRA (xarici API çağırışı
     // tranzaksiya içində olmamalıdır) Kapital-də bir ödəniş yaradılır və
@@ -1251,6 +1259,8 @@ router.put('/orders/:id/status', adminAuth, async (req: AuthRequest, res: Respon
     } else if (next === 'DELIVERED' || next === 'CANCELLED') {
       deliveryDeadline = null; // iş bitdi — nəzarətçi bir daha toxunmasın
     }
+    // Təhvil tarixi — 14 günlük qaytarma müddəti buradan sayılır.
+    const deliveredAt = next === 'DELIVERED' && !order.deliveredAt ? new Date() : undefined;
 
     // LƏĞV: əvvəlcə Yango çatdırılması ləğv olunur. Kuryer malı artıq
     // götürübsə Yango icazə vermir — onda sifariş də ləğv EDİLMİR (əks halda
@@ -1267,6 +1277,7 @@ router.put('/orders/:id/status', adminAuth, async (req: AuthRequest, res: Respon
         status: next as any,
         ...(next === 'CONFIRMED' ? { confirmDeadline: null } : {}),
         ...(deliveryDeadline !== undefined ? { deliveryDeadline } : {}),
+        ...(deliveredAt ? { deliveredAt } : {}),
       },
     });
 
@@ -1413,6 +1424,19 @@ router.post('/returns', adminAuth, async (req: AuthRequest, res: Response) => {
     }
     if (order.status !== 'DELIVERED') {
       res.status(400).json({ success: false, message: 'Yalnız çatdırılmış sifarişlər üçün iadə tələb edə bilərsiniz' }); return;
+    }
+    // QAYTARMA MÜDDƏTİ — təhvildən 14 gün (env: RETURN_WINDOW_DAYS).
+    // Əvvəl müddət YOX idi: illər sonra da iadə açmaq olardı. Birgə alışda bu,
+    // həm də hesablaşmanı sonsuza qədər gözlədərdi.
+    if (order.deliveredAt) {
+      const deadline = new Date(order.deliveredAt.getTime() + RETURN_WINDOW_DAYS * 24 * 3600 * 1000);
+      if (deadline < new Date()) {
+        res.status(400).json({
+          success: false,
+          message: `Qaytarma müddəti bitib (${RETURN_WINDOW_DAYS} gün). Problem varsa dəstəyə yazın.`,
+        });
+        return;
+      }
     }
 
     let refundAmount: number;

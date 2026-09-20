@@ -81,7 +81,7 @@ async function syncOrderStatus(orderId: number, _current: string, yangoStatus: s
   if (mapYangoStatus(yangoStatus) === 'DELIVERED') {
     const r = await prisma.order.updateMany({
       where: { id: orderId, status: { in: ['PENDING', 'CONFIRMED', 'SHIPPED'] } },
-      data: { status: 'DELIVERED', deliveryDeadline: null, yangoError: null },
+      data: { status: 'DELIVERED', deliveredAt: new Date(), deliveryDeadline: null, yangoError: null },
     });
     if (r.count > 0) {
       await recordSettlement(orderId).catch(() => {});   // satıcının qazancı saxlama pəncərəsinə düşür

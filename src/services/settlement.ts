@@ -51,6 +51,8 @@ export async function recordSettlement(orderId: number): Promise<void> {
       select: {
         id: true, sellerId: true, buyerId: true, total: true, status: true,
         paymentStatus: true, paymentMethod: true, refundedAmount: true,
+        // Birgə alış: hesablaşmaya qədər ödəniş açılmır (aşağıya bax).
+        groupBuyId: true, deliveredAt: true,
         // Hesablaşma BİZNES üzrə qruplaşdırılır — ödəniş biznesin bank hesabına gedir.
         items: { select: { listing: { select: { businessId: true } } }, take: 1 },
       },
@@ -74,7 +76,25 @@ export async function recordSettlement(orderId: number): Promise<void> {
 
     // Çatdırılıbsa saxlama pəncərəsinin bitmə vaxtını hesabla.
     const holdDays = delivered ? await getPayoutHoldDays() : 0;
-    const availableAt = delivered ? new Date(Date.now() + holdDays * 24 * 60 * 60 * 1000) : null;
+    let availableAt = delivered ? new Date(Date.now() + holdDays * 24 * 60 * 60 * 1000) : null;
+
+    // BİRGƏ ALIŞ: qrup hesablaşana qədər satıcıya ödəniş AÇILMIR.
+    // Səbəb: hesablaşmada alıcılara endirim fərqi qaytarılır. Satıcıya pul
+    // əvvəl ödənilsə, qaytarma satıcıdan geri tutulmalı olardı (clawback).
+    if (delivered && (order as any).groupBuyId) {
+      const g = await prisma.groupBuy.findUnique({
+        where: { id: (order as any).groupBuyId as number },
+        select: { settledAt: true, expiresAt: true },
+      }).catch(() => null);
+      if (g && !g.settledAt) {
+        const windowDays = Number(process.env.RETURN_WINDOW_DAYS || 14);
+        const eta = new Date(Math.max(
+          g.expiresAt.getTime(),
+          (order.deliveredAt ? order.deliveredAt.getTime() : Date.now()) + windowDays * 24 * 3600 * 1000,
+        ) + 24 * 3600 * 1000); // hesablaşmadan 1 gün sonra
+        if (!availableAt || eta > availableAt) availableAt = eta;
+      }
+    }
 
     // QİSMƏN İADƏ: qaytarılan hissə satıcının qazancından çıxılır.
     // (Tam iadədə status onsuz da REVERSED olur.)

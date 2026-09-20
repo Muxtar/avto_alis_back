@@ -629,17 +629,21 @@ model PriceTier {
 // Alıcı elanın xüsusi linkini paylaşır; həmin link ilə alanların sayı TOPLANIR
 // və endirim hamıya tətbiq olunur. Yalnız say-qiymət pilləsi olan elanlarda.
 model GroupBuy {
-  id        Int        @id @default(autoincrement())
-  code      String     @unique // linkdəki kod: /g/<code>
-  listingId Int
-  creatorId Int
-  status    String     @default("OPEN") // OPEN | CLOSED
-  expiresAt DateTime
-  createdAt DateTime   @default(now())
-  listing   Listing    @relation(fields: [listingId], references: [id], onDelete: Cascade)
-  creator   User       @relation("GroupBuyCreator", fields: [creatorId], references: [id], onDelete: Cascade)
-  orders    Order[]
-  cartItems CartItem[]
+  id             Int        @id @default(autoincrement())
+  code           String     @unique // linkdəki kod: /g/<code>
+  listingId      Int
+  creatorId      Int
+  status         String     @default("OPEN") // OPEN | CLOSED | SETTLED
+  expiresAt      DateTime
+  createdAt      DateTime   @default(now())
+  // Hesablaşma: 14 günlük qaytarma müddəti bitəndən sonra QALAN iştirakçıların
+  // sayına görə son qiymət hesablanır və fərq hamıya geri qaytarılır.
+  settledAt      DateTime?
+  finalUnitPrice Float?
+  listing        Listing    @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  creator        User       @relation("GroupBuyCreator", fields: [creatorId], references: [id], onDelete: Cascade)
+  orders         Order[]
+  cartItems      CartItem[]
 
   @@index([listingId])
 }
@@ -758,7 +762,9 @@ model Order {
   returnRequests      ReturnRequest[]
   refundAttempt       RefundAttempt?
   sellerRating        SellerRating?
-  // Birgə alış sifarişi — qiymət qrupun ÜMUMİ sayına görə hesablanır.
+  // Təhvil tarixi — 14 günlük qaytarma müddəti BURADAN sayılır.
+  deliveredAt         DateTime?
+  // Birgə alış sifarişi — endirim qaytarma müddəti bitəndən sonra hesablanır.
   groupBuyId          Int?
   groupBuy            GroupBuy?       @relation(fields: [groupBuyId], references: [id], onDelete: SetNull)
 

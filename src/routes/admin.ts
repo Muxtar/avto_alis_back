@@ -2448,7 +2448,11 @@ router.put('/admin/orders/:id/status', requirePermission('orders'), async (req: 
         console.error(`[admin] sifariş #${orderId} ləğv edildi, LAKİN pul qaytarılmadı: ${refundFailed}`);
       }
     }
-    const updated = await prisma.order.update({ where: { id: orderId }, data: { status } });
+    const updated = await prisma.order.update({
+      where: { id: orderId },
+      // Təhvil tarixi — qaytarma müddətinin başlanğıcı.
+      data: { status, ...(status === 'DELIVERED' && !order.deliveredAt ? { deliveredAt: new Date() } : {}) },
+    });
     await recordSettlement(orderId).catch(() => {});   // satıcı ledger yenilə
     // Alıcıya bildiriş
     try {
