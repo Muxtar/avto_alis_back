@@ -5,6 +5,7 @@ import { refundOrderSafe, retryFailedRefunds, unstickPendingRefunds, restoreStoc
 import { recordSettlement, releaseHeldLedgers } from './settlement';
 import { endExpiredConsultations } from '../routes/consultations';
 import { cancelActiveYangoClaim } from '../routes/yango';
+import { closeExpiredGroups } from './groupBuy';
 
 const prisma = new PrismaClient();
 
@@ -260,6 +261,8 @@ export function startOrderExpiryJob() {
     unstickPendingRefunds().then(() => retryFailedRefunds()).catch(() => {});
     // Alıcı müdafiəsi pəncərəsi bitmiş hesablaşmaları ödənilə bilən et.
     releaseHeldLedgers().catch(() => {});
+    // Vaxtı bitmiş birgə alışları bağla (yeni qoşulma olmasın).
+    closeExpiredGroups().catch(() => {});
     // Vaxtı bitmiş konsultasiya seanslarını bağla (rəy/şikayət açılsın).
     endExpiredConsultations().catch(() => {});
   };

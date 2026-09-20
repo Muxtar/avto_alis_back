@@ -11,11 +11,17 @@ import { sendVerificationCode } from '../services/mailer';
 import { resolveFlag } from '../services/settings';
 import { emitToAdmins } from '../services/callSignaling';
 import { pushAdmins } from '../services/live';
+import { validateTiers } from '../services/tierPricing';
 import { isValidMonths } from '../services/installment';
 import fs from 'fs';
 import path from 'path';
 
 const router = Router();
+
+/** multipart/form-data-da massivlər sətir kimi gəlir — təhlükəsiz parse. */
+function safeJson(v: string): any {
+  try { return JSON.parse(v); } catch { return null; }
+}
 const prisma = new PrismaClient();
 
 // Get current user full profile
@@ -622,6 +628,16 @@ router.post('/me/listings', listingWriteLimiter, adminAuth, upload.array('images
         status: 'PENDING',
       },
     });
+    // ── ÇOX ALANDA UCUZ (könüllü) ──
+    // «tiers» = [{minQty, price}]. Aralıq saylar düsturla hesablanır
+    // (services/tierPricing). Pilləsi olan elanda BİRGƏ ALIŞ da açılır.
+    const tiersRaw = typeof req.body?.tiers === 'string' ? safeJson(req.body.tiers) : req.body?.tiers;
+    const tv = validateTiers(listing.price, tiersRaw);
+    if (!tv.ok) { res.status(400).json({ success: false, message: tv.error }); return; }
+    if (tv.tiers.length) {
+      await prisma.priceTier.createMany({ data: tv.tiers.map((t) => ({ listingId: listing.id, minQty: t.minQty, price: t.price })) });
+    }
+
     // Moderasiya növbəsinə düşdü — admin paneli dərhal görsün.
     pushAdmins('listing', { id: listing.id, toast: `Yeni elan təsdiq gözləyir: ${listing.title}` });
     res.status(201).json({ success: true, listing });
@@ -714,6 +730,16 @@ router.put('/me/listings/:id', adminAuth, upload.array('images', 5), processImag
         ...(nextImages !== undefined && { images: nextImages }),
       },
     });
+    // Pillələr göndərilibsə TAM əvəz olunur (boş massiv = pillələri sil).
+    if (req.body?.tiers !== undefined) {
+      const raw = typeof req.body.tiers === 'string' ? safeJson(req.body.tiers) : req.body.tiers;
+      const v = validateTiers(listing.price, raw);
+      if (!v.ok) { res.status(400).json({ success: false, message: v.error }); return; }
+      await prisma.priceTier.deleteMany({ where: { listingId: listing.id } });
+      if (v.tiers.length) {
+        await prisma.priceTier.createMany({ data: v.tiers.map((t) => ({ listingId: listing.id, minQty: t.minQty, price: t.price })) });
+      }
+    }
     res.json({ success: true, listing });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });

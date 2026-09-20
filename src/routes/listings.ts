@@ -118,6 +118,8 @@ router.get('/listings', async (req: Request, res: Response) => {
           user: { select: { id: true, name: true, type: true, avgRating: true, ratingCount: true } },
           // VÖEN elanlarda kartda şəxsin yox, obyektin adı/№-si göstərilir.
           businessObject: { select: { id: true, name: true } },
+          // Siyahıda «çox alanda ucuz» nişanı üçün.
+          priceTiers: { orderBy: { minQty: 'asc' }, select: { minQty: true, price: true } },
           _count: { select: { comments: true, favorites: true } },
         },
         orderBy,
@@ -344,6 +346,8 @@ router.get('/listings/:id', async (req: Request, res: Response) => {
           include: { user: { select: { id: true, name: true, type: true, avatar: true } } },
           orderBy: { createdAt: 'desc' },
         },
+        // Çox alanda ucuz pillələri — məhsul səhifəsində cədvəl kimi göstərilir.
+        priceTiers: { orderBy: { minQty: 'asc' }, select: { minQty: true, price: true } },
         _count: { select: { comments: true, favorites: true } },
       },
     }).catch(() => null);

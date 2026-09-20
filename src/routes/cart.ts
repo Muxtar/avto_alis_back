@@ -14,6 +14,8 @@ import { checkPrice as yangoCheckPrice, isYangoConfigured, YANGO_MAX_WEIGHT_KG, 
 import { notifySellersNewOrder } from '../services/orderNotify';
 import { dispatchOrderToYango, cancelActiveYangoClaim } from './yango';
 import { pushLive, pushAdmins } from '../services/live';
+import { unitPriceFor, priceInfo, type Tier } from '../services/tierPricing';
+import { groupQty, applyGroupPrice } from '../services/groupBuy';
 
 const PUBLIC_BACKEND_URL = process.env.PUBLIC_BACKEND_URL || `http://localhost:${process.env.PORT || 5001}`;
 
@@ -38,7 +40,8 @@ router.get('/cart', adminAuth, async (req: AuthRequest, res: Response) => {
       include: {
         items: {
           include: {
-            listing: { include: { user: { select: { id: true, name: true, phone: true } } } },
+            listing: { include: { user: { select: { id: true, name: true, phone: true } }, priceTiers: { orderBy: { minQty: 'asc' } } } },
+            groupBuy: { select: { id: true, code: true, status: true, expiresAt: true } },
           },
         },
       },
@@ -46,11 +49,35 @@ router.get('/cart', adminAuth, async (req: AuthRequest, res: Response) => {
     if (!cart) {
       cart = await prisma.cart.create({
         data: { userId: req.adminId! },
-        include: { items: { include: { listing: { include: { user: { select: { id: true, name: true, phone: true } } } } } } },
+        include: { items: { include: { listing: { include: { user: { select: { id: true, name: true, phone: true } }, priceTiers: { orderBy: { minQty: 'asc' } } } }, groupBuy: { select: { id: true, code: true, status: true, expiresAt: true } } } } },
       });
     }
-    const total = cart.items.reduce((sum, i) => sum + i.listing.price * i.quantity, 0);
-    res.json({ cart, total, count: cart.items.length });
+    // HƏR SƏTİRİN QİYMƏTİ elanın adi qiyməti DEYİL:
+    //   • sətirdə say-qiymət pilləsi varsa → seçilən saya görə (çox alanda ucuz);
+    //   • birgə alış sətridirsə → QRUPUN ümumi sayına görə (hamıya eyni qiymət).
+    const priced = await Promise.all(cart.items.map(async (i) => {
+      const tiers: Tier[] = (i.listing.priceTiers || []).map((t: any) => ({ minQty: t.minQty, price: t.price }));
+      let unit = i.listing.price;
+      let groupTotalQty: number | null = null;
+      if (i.groupBuyId) {
+        groupTotalQty = await groupQty(i.groupBuyId);
+        unit = unitPriceFor(i.listing.price, tiers, Math.max(groupTotalQty + i.quantity, i.quantity));
+      } else if (tiers.length) {
+        unit = unitPriceFor(i.listing.price, tiers, i.quantity);
+      }
+      return {
+        ...i,
+        unitPrice: unit,
+        lineTotal: Math.round(unit * i.quantity * 100) / 100,
+        tiers,
+        groupTotalQty,
+        groupCode: (i as any).groupBuy?.code || null,
+        groupExpiresAt: (i as any).groupBuy?.expiresAt || null,
+        pricing: priceInfo(i.listing.price, tiers, i.groupBuyId ? (groupTotalQty || 0) + i.quantity : i.quantity),
+      };
+    }));
+    const total = Math.round(priced.reduce((sum, i) => sum + i.lineTotal, 0) * 100) / 100;
+    res.json({ cart: { ...cart, items: priced }, total, count: cart.items.length });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }
@@ -372,11 +399,10 @@ router.post('/cart/import/:token', requireType(BUYER_TYPES), async (req: AuthReq
       const lid = Number(it.listingId); const qty = Math.max(1, Number(it.quantity) || 1);
       const listing = await prisma.listing.findUnique({ where: { id: lid }, select: { id: true, expiresAt: true } });
       if (!listing || (listing.expiresAt && listing.expiresAt <= new Date())) continue;
-      await prisma.cartItem.upsert({
-        where: { cartId_listingId: { cartId: cart.id, listingId: lid } },
-        update: { quantity: { increment: qty } },
-        create: { cartId: cart.id, listingId: lid, quantity: qty },
-      });
+      // Paylaşılan səbətdən import — adi (qrupsuz) sətir.
+      const cur = await prisma.cartItem.findFirst({ where: { cartId: cart.id, listingId: lid, groupBuyId: null } });
+      if (cur) await prisma.cartItem.update({ where: { id: cur.id }, data: { quantity: cur.quantity + qty } });
+      else await prisma.cartItem.create({ data: { cartId: cart.id, listingId: lid, quantity: qty } });
       added++;
     }
     res.json({ success: true, added });
@@ -394,15 +420,30 @@ router.post('/cart/add', requireType(BUYER_TYPES), async (req: AuthRequest, res:
     if (!Number.isFinite(quantity) || quantity <= 0) {
       res.status(400).json({ success: false, message: 'Say 0-dan böyük olmalıdır' }); return;
     }
-    const listing = await prisma.listing.findUnique({ where: { id: listingId } });
+    const listing = await prisma.listing.findUnique({ where: { id: listingId }, include: { priceTiers: true } });
     if (!listing) { res.status(404).json({ success: false, message: 'Elan tapılmadı' }); return; }
     if (listing.userId === req.adminId) { res.status(400).json({ success: false, message: 'Öz elanınızı ala bilməzsiniz' }); return; }
+
+    // ── BİRGƏ ALIŞ ──
+    // `groupCode` göndərilibsə məhsul səbətə QRUP SƏTRİ kimi düşür: onun
+    // qiyməti qrupun ümumi sayına görə hesablanır və adi sətirlə BİRLƏŞMİR
+    // (ona görə eyni məhsulun adi və qrup sətri səbətdə ayrı görünür).
+    const groupCodeRaw = String(req.body?.groupCode || '').trim();
+    let groupBuyId: number | null = null;
+    if (groupCodeRaw) {
+      const g = await prisma.groupBuy.findUnique({ where: { code: groupCodeRaw } });
+      if (!g) { res.status(404).json({ success: false, message: 'Birgə alış linki tapılmadı' }); return; }
+      if (g.listingId !== listingId) { res.status(400).json({ success: false, message: 'Bu link başqa məhsul üçündür' }); return; }
+      if (g.status !== 'OPEN' || g.expiresAt <= new Date()) { res.status(400).json({ success: false, message: 'Bu birgə alış bağlanıb' }); return; }
+      if (!listing.priceTiers.length) { res.status(400).json({ success: false, message: 'Bu məhsulda birgə alış yoxdur' }); return; }
+      groupBuyId = g.id;
+    }
 
     let cart = await prisma.cart.findUnique({ where: { userId: req.adminId! } });
     if (!cart) cart = await prisma.cart.create({ data: { userId: req.adminId! } });
 
-    const existing = await prisma.cartItem.findUnique({
-      where: { cartId_listingId: { cartId: cart.id, listingId } },
+    const existing = await prisma.cartItem.findFirst({
+      where: { cartId: cart.id, listingId, groupBuyId },
     });
 
     // H2 fix: validate combined quantity (existing + new) against stock.
@@ -423,7 +464,7 @@ router.post('/cart/add', requireType(BUYER_TYPES), async (req: AuthRequest, res:
       });
     } else {
       item = await prisma.cartItem.create({
-        data: { cartId: cart.id, listingId, quantity },
+        data: { cartId: cart.id, listingId, quantity, groupBuyId },
       });
     }
     res.status(201).json({ success: true, item });
@@ -544,7 +585,9 @@ router.post('/cart/checkout', requireType(BUYER_TYPES), async (req: AuthRequest,
 
     const cart = await prisma.cart.findUnique({
       where: { userId: req.adminId! },
-      include: { items: { include: { listing: true } } },
+      // Pillələr ödənişdə də lazımdır: qiymət elanın adi qiyməti deyil,
+      // seçilən saya (və birgə alışda qrupun sayına) görə hesablanır.
+      include: { items: { include: { listing: { include: { priceTiers: true } } } } },
     });
     if (!cart || cart.items.length === 0) {
       res.status(400).json({ success: false, message: 'Səbət boşdur' });
@@ -648,7 +691,24 @@ router.post('/cart/checkout', requireType(BUYER_TYPES), async (req: AuthRequest,
     // Promo kod dogrulama
     let promoCodeRecord: any = null;
     let promoDiscount = 0;
-    const subtotal = cart.items.reduce((sum, i) => sum + i.listing.price * i.quantity, 0);
+    // ── HƏR SƏTİRİN VAHİD QİYMƏTİ ──
+    // Adi sətir: say-qiymət pilləsinə görə (çox alanda ucuz).
+    // Birgə alış sətri: QRUPUN ümumi sayı + bu alış — qiymət hamıya eynidir.
+    const unitPrices = new Map<number, number>();
+    for (const i of cart.items) {
+      const tiers: Tier[] = ((i.listing as any).priceTiers || []).map((t: any) => ({ minQty: t.minQty, price: t.price }));
+      let unit = i.listing.price;
+      if (i.groupBuyId) {
+        const g = await groupQty(i.groupBuyId);
+        unit = unitPriceFor(i.listing.price, tiers, g + i.quantity);
+      } else if (tiers.length) {
+        unit = unitPriceFor(i.listing.price, tiers, i.quantity);
+      }
+      unitPrices.set(i.id, unit);
+    }
+    const unitOf = (i: { id: number; listing: { price: number } }) => unitPrices.get(i.id) ?? i.listing.price;
+
+    const subtotal = cart.items.reduce((sum, i) => sum + unitOf(i) * i.quantity, 0);
     if (promoCode) {
       promoCodeRecord = await prisma.promoCode.findUnique({ where: { code: promoCode.toUpperCase() } });
       if (promoCodeRecord && promoCodeRecord.active) {
@@ -670,12 +730,19 @@ router.post('/cart/checkout', requireType(BUYER_TYPES), async (req: AuthRequest,
       }
     }
 
-    // Group items by seller (preserve insertion order for deterministic discount allocation)
-    const bySeller = new Map<number, typeof cart.items>();
+    // Sifarişlər SATICI + BİRGƏ ALIŞ üzrə bölünür.
+    // Birgə alış sətri öz sifarişini alır: qiymət sonradan qrupun sayına görə
+    // dəyişə bilir (fərq geri qaytarılır) və bu, adi məhsullarla qarışmamalıdır.
+    const bySeller = new Map<string, typeof cart.items>();
+    const groupOfKey = new Map<string, number | null>();
+    const sellerOfKey = new Map<string, number>();
     for (const item of cart.items) {
-      const arr = bySeller.get(item.listing.userId) || [];
+      const key = `${item.listing.userId}:${item.groupBuyId ?? 0}`;
+      const arr = bySeller.get(key) || [];
       arr.push(item);
-      bySeller.set(item.listing.userId, arr);
+      bySeller.set(key, arr);
+      groupOfKey.set(key, item.groupBuyId ?? null);
+      sellerOfKey.set(key, item.listing.userId);
     }
     const sellerCount = bySeller.size;
 
@@ -687,6 +754,7 @@ router.post('/cart/checkout', requireType(BUYER_TYPES), async (req: AuthRequest,
       // than its naive equal share.
       let promoRemaining = promoDiscount;
       let pointsRemaining = pointsToUse;
+      const feeCharged = new Set<number>();
 
       // Distribute points fairly: integer pieces summing exactly to pointsToUse.
       // Last seller absorbs rounding remainder so total == pointsToUse exactly.
@@ -699,8 +767,10 @@ router.post('/cart/checkout', requireType(BUYER_TYPES), async (req: AuthRequest,
       }
 
       let bucketIdx = 0;
-      for (const [sellerId, items] of bySeller.entries()) {
-        const sellerSubtotal = items.reduce((sum, i) => sum + i.listing.price * i.quantity, 0);
+      for (const [key, items] of bySeller.entries()) {
+        const sellerId = sellerOfKey.get(key)!;
+        const groupBuyId = groupOfKey.get(key) ?? null;
+        const sellerSubtotal = items.reduce((sum, i) => sum + unitOf(i) * i.quantity, 0);
         const sellerPointsUsed = pointsBuckets[bucketIdx++];
 
         // Apply remaining promo first (capped by what this seller's subtotal can absorb).
@@ -715,7 +785,11 @@ router.post('/cart/checkout', requireType(BUYER_TYPES), async (req: AuthRequest,
 
         const actualDiscount = promoApplied + pointsAppliedRaw * 0.01;
         // Yango çatdırılma haqqı (yalnız kuryer+çatdırılma seçimində) cəmə əlavə olunur.
-        const sellerDeliveryFee = deliveryType === 'DELIVERY' && dMethod === 'COURIER' ? (feeBySeller.get(sellerId) || 0) : 0;
+        // Bir satıcının həm adi, həm birgə alış sifarişi ola bilər —
+        // çatdırılma haqqı İKİ DƏFƏ alınmamalıdır (kuryer bir dəfə gəlir).
+        const feeAlready = feeCharged.has(sellerId);
+        const sellerDeliveryFee = deliveryType === 'DELIVERY' && dMethod === 'COURIER' && !feeAlready ? (feeBySeller.get(sellerId) || 0) : 0;
+        if (sellerDeliveryFee > 0) feeCharged.add(sellerId);
         const total = Math.max(0, sellerSubtotal - actualDiscount) + sellerDeliveryFee;
 
         // C8 fix: Never mint loyalty points on portions of an order paid with points.
@@ -782,13 +856,14 @@ router.post('/cart/checkout', requireType(BUYER_TYPES), async (req: AuthRequest,
                 ? Number(installmentMonths)
                 : null,
             promoCodeId: promoCodeRecord?.id || null,
+            groupBuyId,
             latitude: latitude ? parseFloat(latitude) : null,
             longitude: longitude ? parseFloat(longitude) : null,
             items: {
               create: items.map((i) => ({
                 listingId: i.listingId,
                 quantity: i.quantity,
-                price: i.listing.price,
+                price: unitOf(i),          // pillə / birgə alış qiyməti
                 title: i.listing.title,
               })),
             },
@@ -866,6 +941,12 @@ router.post('/cart/checkout', requireType(BUYER_TYPES), async (req: AuthRequest,
 
       return createdOrders;
     });
+
+    // BİRGƏ ALIŞ: yeni iştirakçı qoşulduğu üçün qrupun sayı artdı — qiymət
+    // düşübsə əvvəlki iştirakçılara fərq qaytarılır (services/groupBuy).
+    for (const gid of new Set(orders.map((o: any) => o.groupBuyId).filter(Boolean))) {
+      applyGroupPrice(gid as number).catch((e) => console.error('[groupBuy] qiymət yenilənmədi:', e?.message));
+    }
 
     // KART ÖDƏNİŞİ: transaction commit olandan SONRA (xarici API çağırışı
     // tranzaksiya içində olmamalıdır) Kapital-də bir ödəniş yaradılır və

@@ -229,6 +229,7 @@ model User {
   addresses     SavedAddress[]
   sellerRatings SellerRating[] @relation("SellerRatings")
   givenRatings  SellerRating[] @relation("BuyerRatings")
+  groupBuys     GroupBuy[]     @relation("GroupBuyCreator")
   guestBookings Booking[]      @relation("GuestBookings")
   hostBookings  Booking[]      @relation("HostBookings")
   contacts      Contact[]      @relation("OwnContacts")
@@ -345,42 +346,42 @@ model PhoneNumber {
 }
 
 model Listing {
-  id                Int             @id @default(autoincrement())
-  userId            Int
-  title             String
-  description       String
-  price             Float
-  category          String
-  type              ListingType
-  images            String[]
-  location          String?
-  phone             String?
-  condition         Condition       @default(NEW)
+  id                   Int             @id @default(autoincrement())
+  userId               Int
+  title                String
+  description          String
+  price                Float
+  category             String
+  type                 ListingType
+  images               String[]
+  location             String?
+  phone                String?
+  condition            Condition       @default(NEW)
   // Elana özəl konum — hər elanın öz xəritə nöqtəsi ola bilər (məs. ayrı-ayrı ev/mənzil).
   // Yoxdursa satıcının default konumu istifadə olunur.
-  latitude          Float?
-  longitude         Float?
-  country           String?
-  brand             String?
-  stock             Int             @default(1)
-  forVehicle        String?
-  unit              String?
-  unitValue         Float?
-  year              Int?
-  model             String?
-  city              String?
-  fuelType          FuelType?
-  attributes        Json? // kateqoriyaya xüsusi sahələr (otaq sayı, sahə, ölçü, yürüş...)
-  paymentType       PaymentType?
-  barter            Boolean         @default(false) // dəyiş-düş (barter) qəbul olunur
-  forRent           Boolean         @default(false) // satış yox, icarə/kirayə
+  latitude             Float?
+  longitude            Float?
+  country              String?
+  brand                String?
+  stock                Int             @default(1)
+  forVehicle           String?
+  unit                 String?
+  unitValue            Float?
+  year                 Int?
+  model                String?
+  city                 String?
+  fuelType             FuelType?
+  attributes           Json? // kateqoriyaya xüsusi sahələr (otaq sayı, sahə, ölçü, yürüş...)
+  paymentType          PaymentType?
+  barter               Boolean         @default(false) // dəyiş-düş (barter) qəbul olunur
+  forRent              Boolean         @default(false) // satış yox, icarə/kirayə
   // Bron / rezervasiya — restoran, otel, bağ evi, məkan və s. bron edilə bilər
-  bookable          Boolean         @default(false)
+  bookable             Boolean         @default(false)
   // Satıcı VÖEN elanda "məhsulu özüm də çatdıra bilərəm" seçimini aktiv edə bilər.
   // Yango (kuryer) və mağazadan götürmə həmişə mümkündür; bunu satıcı açır.
-  allowSelfDelivery Boolean         @default(false)
+  allowSelfDelivery    Boolean         @default(false)
   // Yalnız alıcı gəlib götürsün — Yango və satıcı çatdırması bağlıdır (məs. avtomobil).
-  pickupOnly        Boolean         @default(false)
+  pickupOnly           Boolean         @default(false)
   // ── TAKSİT (hissəli alış) — SATICININ SEÇİMİ ──
   // Əvvəl taksit hər biznes elanında avtomatik açıq idi və satıcı onu nə
   // bağlaya, nə də ay sayını məhdudlaşdıra bilirdi. İndi elanı qoyan özü
@@ -389,40 +390,42 @@ model Listing {
   // DİQQƏT: taksit alıcının ÖZ taksit kartı (BirKart/Tamkart) ilə işləyir —
   // satıcı tam məbləği bir dəfəyə alır, bank onu kart sahibi üçün bölür.
   // Bu sahələr yalnız taksitin təklif olunub-olunmadığını idarə edir.
-  installmentEnabled   Boolean        @default(true)
+  installmentEnabled   Boolean         @default(true)
   // Ən çox neçə aya bölünə bilər (3/6/9/12/18). null → limit yoxdur.
   installmentMaxMonths Int?
   // Satıcı özü çatdıranda qeyd/qiymət (məs. "Şəhər içi 10 AZN, kənar 20 AZN").
-  selfDeliveryNote  String?
+  selfDeliveryNote     String?
   // Məhsulun çəkisi (kq, bir ədəd). Yango yük limiti (50 kq) yoxlanışı üçün.
-  weightKg          Float?
-  bookingType       BookingType? // RESERVATION (tarix+saat) | STAY (giriş-çıxış)
-  maxGuests         Int? // maksimum qonaq / nəfər sayı
-  openTime          String? // rezervasiya üçün açılış saatı "10:00"
-  closeTime         String? // rezervasiya üçün bağlanış saatı "23:00"
-  viewCount         Int             @default(0)
+  weightKg             Float?
+  bookingType          BookingType? // RESERVATION (tarix+saat) | STAY (giriş-çıxış)
+  maxGuests            Int? // maksimum qonaq / nəfər sayı
+  openTime             String? // rezervasiya üçün açılış saatı "10:00"
+  closeTime            String? // rezervasiya üçün bağlanış saatı "23:00"
+  viewCount            Int             @default(0)
   // Moderasiya — bax: ListingStatus. Default APPROVED (köhnə elanlar üçün),
   // yeni elanlar create zamanı PENDING olaraq yazılır.
-  status            ListingStatus   @default(APPROVED)
-  archivedAt        DateTime? // obyekt/biznes silinəndə arxivləşdirilib
-  rejectReason      String? // rədd edilibsə səbəb (sahibi görür)
-  reviewedAt        DateTime? // admin nə vaxt baxdı
-  expiresAt         DateTime?
+  status               ListingStatus   @default(APPROVED)
+  archivedAt           DateTime? // obyekt/biznes silinəndə arxivləşdirilib
+  rejectReason         String? // rədd edilibsə səbəb (sahibi görür)
+  reviewedAt           DateTime? // admin nə vaxt baxdı
+  expiresAt            DateTime?
   // Biznes bağlantısı — elan bir obyektə (filiala) aiddirsə kart ödənişi mümkün olur.
-  businessId        Int?
-  businessObjectId  Int?
-  createdAt         DateTime        @default(now())
-  updatedAt         DateTime        @updatedAt
-  user              User            @relation(fields: [userId], references: [id], onDelete: Cascade)
-  business          Business?       @relation(fields: [businessId], references: [id], onDelete: SetNull)
-  businessObject    BusinessObject? @relation(fields: [businessObjectId], references: [id], onDelete: SetNull)
-  messages          Message[]
-  comments          Comment[]
-  cartItems         CartItem[]
-  orderItems        OrderItem[]
-  inquiryOffers     InquiryOffer[]
-  favorites         Favorite[]
-  bookings          Booking[]
+  businessId           Int?
+  businessObjectId     Int?
+  createdAt            DateTime        @default(now())
+  updatedAt            DateTime        @updatedAt
+  user                 User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  business             Business?       @relation(fields: [businessId], references: [id], onDelete: SetNull)
+  businessObject       BusinessObject? @relation(fields: [businessObjectId], references: [id], onDelete: SetNull)
+  messages             Message[]
+  comments             Comment[]
+  cartItems            CartItem[]
+  orderItems           OrderItem[]
+  inquiryOffers        InquiryOffer[]
+  favorites            Favorite[]
+  bookings             Booking[]
+  priceTiers           PriceTier[] // çox alanda ucuz (könüllü)
+  groupBuys            GroupBuy[]
 
   @@index([userId, createdAt])
   @@index([category])
@@ -594,14 +597,51 @@ model SharedCart {
 }
 
 model CartItem {
+  id         Int       @id @default(autoincrement())
+  cartId     Int
+  listingId  Int
+  quantity   Int       @default(1)
+  // Birgə alış sətri — adi sətirdən AYRI saxlanılır (qiyməti qrupun ümumi
+  // sayına görə hesablanır). Ona görə unikal açara da daxildir.
+  groupBuyId Int?
+  cart       Cart      @relation(fields: [cartId], references: [id], onDelete: Cascade)
+  listing    Listing   @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  groupBuy   GroupBuy? @relation(fields: [groupBuyId], references: [id], onDelete: SetNull)
+
+  @@unique([cartId, listingId, groupBuyId])
+}
+
+// ── ÇOX ALANDA UCUZ: elanın say-qiymət pillələri ──
+// Satıcı könüllü qoyur: «100 ədəd alsan — 800 AZN». Aralıq saylar (məs. 50)
+// düsturla hesablanır (services/tierPricing.ts) — pillələr arasında xətti keçid.
+model PriceTier {
   id        Int     @id @default(autoincrement())
-  cartId    Int
   listingId Int
-  quantity  Int     @default(1)
-  cart      Cart    @relation(fields: [cartId], references: [id], onDelete: Cascade)
+  minQty    Int // bu saydan başlayan qiymət
+  price     Float // bir ədədin qiyməti (AZN)
   listing   Listing @relation(fields: [listingId], references: [id], onDelete: Cascade)
 
-  @@unique([cartId, listingId])
+  @@unique([listingId, minQty])
+  @@index([listingId])
+}
+
+// ── BİRGƏ ALIŞ ──
+// Alıcı elanın xüsusi linkini paylaşır; həmin link ilə alanların sayı TOPLANIR
+// və endirim hamıya tətbiq olunur. Yalnız say-qiymət pilləsi olan elanlarda.
+model GroupBuy {
+  id        Int        @id @default(autoincrement())
+  code      String     @unique // linkdəki kod: /g/<code>
+  listingId Int
+  creatorId Int
+  status    String     @default("OPEN") // OPEN | CLOSED
+  expiresAt DateTime
+  createdAt DateTime   @default(now())
+  listing   Listing    @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  creator   User       @relation("GroupBuyCreator", fields: [creatorId], references: [id], onDelete: Cascade)
+  orders    Order[]
+  cartItems CartItem[]
+
+  @@index([listingId])
 }
 
 model Order {
@@ -718,6 +758,9 @@ model Order {
   returnRequests      ReturnRequest[]
   refundAttempt       RefundAttempt?
   sellerRating        SellerRating?
+  // Birgə alış sifarişi — qiymət qrupun ÜMUMİ sayına görə hesablanır.
+  groupBuyId          Int?
+  groupBuy            GroupBuy?       @relation(fields: [groupBuyId], references: [id], onDelete: SetNull)
 
   @@index([buyerId, createdAt])
   @@index([sellerId, createdAt])
@@ -1332,7 +1375,7 @@ model Banner {
 /// Cədvəlin adı tarixi səbəbdəndir — `purpose` sahəsi ödənişin nə üçün
 /// olduğunu ayırır, callback və hesablaşma məntiqi hər ikisi üçün ortaqdır.
 model BusinessFee {
-  id     Int    @id @default(autoincrement())
+  id     Int   @id @default(autoincrement())
   userId Int
   amount Float // ödəniş anındakı tarif (sonradan tarif dəyişsə də bu qalır)
 
