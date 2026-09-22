@@ -12,11 +12,20 @@ import { resolveFlag } from '../services/settings';
 import { emitToAdmins } from '../services/callSignaling';
 import { pushAdmins } from '../services/live';
 import { validateTiers } from '../services/tierPricing';
+import { MIN_WINDOW_DAYS, MAX_WINDOW_DAYS } from '../services/groupBuy';
 import { isValidMonths } from '../services/installment';
 import fs from 'fs';
 import path from 'path';
 
 const router = Router();
+
+/** Birgə alış pəncərəsi (gün): boş/0 → bağlı, əks halda 1–30 aralığına sıxılır. */
+function groupBuyDaysOf(raw: any): number | null {
+  if (raw === undefined || raw === null || raw === '' || raw === 'null') return null;
+  const n = parseInt(String(raw));
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return Math.min(MAX_WINDOW_DAYS, Math.max(MIN_WINDOW_DAYS, n));
+}
 
 /** multipart/form-data-da massivlər sətir kimi gəlir — təhlükəsiz parse. */
 function safeJson(v: string): any {
@@ -597,6 +606,8 @@ router.post('/me/listings', listingWriteLimiter, adminAuth, upload.array('images
         country: country || null,
         brand: brand || null,
         stock: stock ? parseInt(stock) : 1,
+        // Birgə alış pəncərəsi (gün) — aşağıda pillələrlə birlikdə yoxlanılır.
+        groupBuyDays: null,
         forVehicle: forVehicle || null,
         unit: unit || null,
         unitValue: unitValue ? parseFloat(unitValue) : null,
@@ -632,10 +643,28 @@ router.post('/me/listings', listingWriteLimiter, adminAuth, upload.array('images
     // «tiers» = [{minQty, price}]. Aralıq saylar düsturla hesablanır
     // (services/tierPricing). Pilləsi olan elanda BİRGƏ ALIŞ da açılır.
     const tiersRaw = typeof req.body?.tiers === 'string' ? safeJson(req.body.tiers) : req.body?.tiers;
-    const tv = validateTiers(listing.price, tiersRaw);
-    if (!tv.ok) { res.status(400).json({ success: false, message: tv.error }); return; }
+    const tv = validateTiers(listing.price, tiersRaw, listing.stock);
+    if (!tv.ok) {
+      await prisma.listing.delete({ where: { id: listing.id } }).catch(() => {});
+      res.status(400).json({ success: false, message: tv.error }); return;
+    }
     if (tv.tiers.length) {
       await prisma.priceTier.createMany({ data: tv.tiers.map((t) => ({ listingId: listing.id, minQty: t.minQty, price: t.price })) });
+    }
+    // ── BİRGƏ ALIŞ PƏNCƏRƏSİ ──
+    // Satıcı müddət seçibsə (məs. 3 gün) elan birgə alışa açılır: ilk sifariş
+    // pəncərəni başladır, pəncərə boyu alanların sayı toplanır və hamı eyni
+    // endirimi alır. Şərt: stok > 1 və ən azı bir pillə.
+    const gbDays = groupBuyDaysOf(req.body?.groupBuyDays);
+    if (gbDays) {
+      if (!tv.tiers.length) { res.status(400).json({ success: false, message: 'Birgə alış üçün ən azı bir say-qiymət pilləsi lazımdır' }); return; }
+      if (listing.stock <= 1) { res.status(400).json({ success: false, message: 'Birgə alış üçün stok 1-dən çox olmalıdır' }); return; }
+      // Endirim fərqi kartla qaytarılır — ona görə elan kartla alına bilməlidir (VÖEN).
+      if (!listing.businessId && !listing.businessObjectId) {
+        res.status(400).json({ success: false, message: 'Birgə alış yalnız VÖEN-li (biznes) elanlarda mümkündür — endirim fərqi kartla qaytarılır' }); return;
+      }
+      await prisma.listing.update({ where: { id: listing.id }, data: { groupBuyDays: gbDays } });
+      (listing as any).groupBuyDays = gbDays;
     }
 
     // Moderasiya növbəsinə düşdü — admin paneli dərhal görsün.
@@ -731,14 +760,28 @@ router.put('/me/listings/:id', adminAuth, upload.array('images', 5), processImag
       },
     });
     // Pillələr göndərilibsə TAM əvəz olunur (boş massiv = pillələri sil).
+    let tierCount = await prisma.priceTier.count({ where: { listingId: listing.id } });
     if (req.body?.tiers !== undefined) {
       const raw = typeof req.body.tiers === 'string' ? safeJson(req.body.tiers) : req.body.tiers;
-      const v = validateTiers(listing.price, raw);
+      const v = validateTiers(listing.price, raw, listing.stock);
       if (!v.ok) { res.status(400).json({ success: false, message: v.error }); return; }
       await prisma.priceTier.deleteMany({ where: { listingId: listing.id } });
       if (v.tiers.length) {
         await prisma.priceTier.createMany({ data: v.tiers.map((t) => ({ listingId: listing.id, minQty: t.minQty, price: t.price })) });
       }
+      tierCount = v.tiers.length;
+    }
+    // Birgə alış pəncərəsi. 0 və ya boş → bağlanır. AÇIQ pəncərə varsa o,
+    // öz müddətini sona qədər yaşayır (alıcılara verilən söz pozulmasın).
+    if (req.body?.groupBuyDays !== undefined) {
+      const gbDays = groupBuyDaysOf(req.body.groupBuyDays);
+      if (gbDays && !tierCount) { res.status(400).json({ success: false, message: 'Birgə alış üçün ən azı bir say-qiymət pilləsi lazımdır' }); return; }
+      if (gbDays && listing.stock <= 1) { res.status(400).json({ success: false, message: 'Birgə alış üçün stok 1-dən çox olmalıdır' }); return; }
+      if (gbDays && !listing.businessId && !listing.businessObjectId) {
+        res.status(400).json({ success: false, message: 'Birgə alış yalnız VÖEN-li (biznes) elanlarda mümkündür — endirim fərqi kartla qaytarılır' }); return;
+      }
+      await prisma.listing.update({ where: { id: listing.id }, data: { groupBuyDays: gbDays } });
+      (listing as any).groupBuyDays = gbDays;
     }
     res.json({ success: true, listing });
   } catch (error: any) {

@@ -15,7 +15,7 @@ import { notifySellersNewOrder } from '../services/orderNotify';
 import { dispatchOrderToYango, cancelActiveYangoClaim } from './yango';
 import { pushLive, pushAdmins } from '../services/live';
 import { unitPriceFor, priceInfo, type Tier } from '../services/tierPricing';
-import { groupQty, RETURN_WINDOW_DAYS } from '../services/groupBuy';
+import { groupQty, RETURN_WINDOW_DAYS, groupBuyEnabled, activeGroup, ensureActiveGroup } from '../services/groupBuy';
 
 const PUBLIC_BACKEND_URL = process.env.PUBLIC_BACKEND_URL || `http://localhost:${process.env.PORT || 5001}`;
 
@@ -53,28 +53,43 @@ router.get('/cart', adminAuth, async (req: AuthRequest, res: Response) => {
       });
     }
     // HƏR SƏTİRİN QİYMƏTİ elanın adi qiyməti DEYİL:
-    //   • sətirdə say-qiymət pilləsi varsa → seçilən saya görə (çox alanda ucuz);
-    //   • birgə alış sətridirsə → QRUPUN ümumi sayına görə (hamıya eyni qiymət).
+    //   • adi sətir + say-qiymət pilləsi → seçilən saya görə (çox alanda ucuz);
+    //   • elanda BİRGƏ ALIŞ açıqdırsa → indi TAM qiymət ödənilir, endirim
+    //     pəncərə + qaytarma müddəti bitəndən sonra kartа qaytarılır.
     const priced = await Promise.all(cart.items.map(async (i) => {
       const tiers: Tier[] = (i.listing.priceTiers || []).map((t: any) => ({ minQty: t.minQty, price: t.price }));
-      // BİRGƏ ALIŞ sətri TAM qiymətlə ödənilir; endirim qaytarma müddəti
-      // bitəndən sonra geri qaytarılır (gözlənilən qiymət `pricing`-dədir).
+      const inGroupBuy = groupBuyEnabled(i.listing as any);
       let unit = i.listing.price;
       let groupTotalQty: number | null = null;
-      if (i.groupBuyId) groupTotalQty = await groupQty(i.groupBuyId);
-      else if (tiers.length) unit = unitPriceFor(i.listing.price, tiers, i.quantity);
+      let groupCode: string | null = null;
+      let groupExpiresAt: Date | null = null;
+      if (inGroupBuy) {
+        // Elanın açıq pəncərəsi (varsa) — alış ona qoşulacaq.
+        const g = await activeGroup(i.listing.id);
+        if (g) {
+          groupCode = g.code;
+          groupExpiresAt = g.expiresAt;
+          groupTotalQty = await groupQty(g.id);
+        } else {
+          groupTotalQty = 0;   // ilk alan pəncərəni özü başladır
+        }
+      } else if (tiers.length) {
+        unit = unitPriceFor(i.listing.price, tiers, i.quantity);
+      }
       return {
         ...i,
         unitPrice: unit,
         lineTotal: Math.round(unit * i.quantity * 100) / 100,
         tiers,
         groupTotalQty,
-        groupCode: (i as any).groupBuy?.code || null,
-        groupExpiresAt: (i as any).groupBuy?.expiresAt || null,
+        groupCode,
+        groupExpiresAt,
+        groupWindowDays: inGroupBuy ? (i.listing as any).groupBuyDays : null,
+        groupStartsNow: inGroupBuy && !groupCode,
         // Birgə alışda endirim sonra qaytarılır — alıcı bunu səbətdə görür.
-        groupRefundLater: !!i.groupBuyId,
+        groupRefundLater: inGroupBuy,
         returnWindowDays: RETURN_WINDOW_DAYS,
-        pricing: priceInfo(i.listing.price, tiers, i.groupBuyId ? (groupTotalQty || 0) + i.quantity : i.quantity),
+        pricing: priceInfo(i.listing.price, tiers, inGroupBuy ? (groupTotalQty || 0) + i.quantity : i.quantity),
       };
     }));
     const total = Math.round(priced.reduce((sum, i) => sum + i.lineTotal, 0) * 100) / 100;
@@ -426,25 +441,13 @@ router.post('/cart/add', requireType(BUYER_TYPES), async (req: AuthRequest, res:
     if (listing.userId === req.adminId) { res.status(400).json({ success: false, message: 'Öz elanınızı ala bilməzsiniz' }); return; }
 
     // ── BİRGƏ ALIŞ ──
-    // `groupCode` göndərilibsə məhsul səbətə QRUP SƏTRİ kimi düşür: onun
-    // qiyməti qrupun ümumi sayına görə hesablanır və adi sətirlə BİRLƏŞMİR
-    // (ona görə eyni məhsulun adi və qrup sətri səbətdə ayrı görünür).
-    const groupCodeRaw = String(req.body?.groupCode || '').trim();
-    let groupBuyId: number | null = null;
-    if (groupCodeRaw) {
-      const g = await prisma.groupBuy.findUnique({ where: { code: groupCodeRaw } });
-      if (!g) { res.status(404).json({ success: false, message: 'Birgə alış linki tapılmadı' }); return; }
-      if (g.listingId !== listingId) { res.status(400).json({ success: false, message: 'Bu link başqa məhsul üçündür' }); return; }
-      if (g.status !== 'OPEN' || g.expiresAt <= new Date()) { res.status(400).json({ success: false, message: 'Bu birgə alış bağlanıb' }); return; }
-      if (!listing.priceTiers.length) { res.status(400).json({ success: false, message: 'Bu məhsulda birgə alış yoxdur' }); return; }
-      groupBuyId = g.id;
-    }
-
+    // Səbətdə ayrıca «qrup sətri» YOXDUR: elanda birgə alış açıqdırsa alış
+    // sifariş verilən anda avtomatik aktiv pəncərəyə qoşulur (checkout-da).
     let cart = await prisma.cart.findUnique({ where: { userId: req.adminId! } });
     if (!cart) cart = await prisma.cart.create({ data: { userId: req.adminId! } });
 
     const existing = await prisma.cartItem.findFirst({
-      where: { cartId: cart.id, listingId, groupBuyId },
+      where: { cartId: cart.id, listingId },
     });
 
     // H2 fix: validate combined quantity (existing + new) against stock.
@@ -465,7 +468,7 @@ router.post('/cart/add', requireType(BUYER_TYPES), async (req: AuthRequest, res:
       });
     } else {
       item = await prisma.cartItem.create({
-        data: { cartId: cart.id, listingId, quantity, groupBuyId },
+        data: { cartId: cart.id, listingId, quantity },
       });
     }
     res.status(201).json({ success: true, item });
@@ -617,7 +620,7 @@ router.post('/cart/checkout', requireType(BUYER_TYPES), async (req: AuthRequest,
 
     // BİRGƏ ALIŞ yalnız KARTLA: endirim fərqi sonradan geri qaytarılır,
     // nağd ödənişdə platforma pulu qaytara bilmir (pul satıcıdadır).
-    if (paymentMethod !== 'CARD' && cart.items.some((i) => i.groupBuyId)) {
+    if (paymentMethod !== 'CARD' && cart.items.some((i) => groupBuyEnabled(i.listing as any))) {
       res.status(400).json({
         success: false,
         message: 'Birgə alış yalnız kartla ödənişlə mümkündür — endirim fərqi sonradan kartınıza qaytarılır.',
@@ -722,7 +725,7 @@ router.post('/cart/checkout', requireType(BUYER_TYPES), async (req: AuthRequest,
       const tiers: Tier[] = ((i.listing as any).priceTiers || []).map((t: any) => ({ minQty: t.minQty, price: t.price }));
       // BİRGƏ ALIŞ: tam qiymət ödənilir, endirim sonra qaytarılır.
       let unit = i.listing.price;
-      if (!i.groupBuyId && tiers.length) {
+      if (!groupBuyEnabled(i.listing as any) && tiers.length) {
         unit = unitPriceFor(i.listing.price, tiers, i.quantity);
       }
       unitPrices.set(i.id, unit);
@@ -754,15 +757,24 @@ router.post('/cart/checkout', requireType(BUYER_TYPES), async (req: AuthRequest,
     // Sifarişlər SATICI + BİRGƏ ALIŞ üzrə bölünür.
     // Birgə alış sətri öz sifarişini alır: qiymət sonradan qrupun sayına görə
     // dəyişə bilir (fərq geri qaytarılır) və bu, adi məhsullarla qarışmamalıdır.
+    // Hansı sətir hansı BİRGƏ ALIŞ pəncərəsinə düşür — pəncərə yoxdursa
+    // elə burada açılır (ilk alıcı geri sayımı başladır).
+    const groupOfItem = new Map<number, number | null>();
+    for (const item of cart.items) {
+      groupOfItem.set(item.id, groupBuyEnabled(item.listing as any)
+        ? await ensureActiveGroup(item.listingId, req.adminId!)
+        : null);
+    }
+
     const bySeller = new Map<string, typeof cart.items>();
     const groupOfKey = new Map<string, number | null>();
     const sellerOfKey = new Map<string, number>();
     for (const item of cart.items) {
-      const key = `${item.listing.userId}:${item.groupBuyId ?? 0}`;
+      const key = `${item.listing.userId}:${groupOfItem.get(item.id) ?? 0}`;
       const arr = bySeller.get(key) || [];
       arr.push(item);
       bySeller.set(key, arr);
-      groupOfKey.set(key, item.groupBuyId ?? null);
+      groupOfKey.set(key, groupOfItem.get(item.id) ?? null);
       sellerOfKey.set(key, item.listing.userId);
     }
     const sellerCount = bySeller.size;

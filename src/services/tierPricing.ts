@@ -15,13 +15,15 @@
 //   • minQty ≥ 2, artan sırada, təkrarsız
 //   • hər pillənin qiyməti adi qiymətdən və əvvəlki pillədən KİÇİK olmalıdır
 //   • maksimum 5 pillə
+//   • pillədəki say STOKDAN çox ola bilməz — satıcı 1000 ədəd qoyubsa endirim
+//     cədvəli 1000-ə qədər olmalıdır, olmayan malı vəd etmək olmaz
 
 export interface Tier { minQty: number; price: number }
 
 export const MAX_TIERS = 5;
 
 /** Pillələri təmizlə + yoxla. Xəta varsa `error` qaytarır. */
-export function validateTiers(basePrice: number, raw: any): { ok: true; tiers: Tier[] } | { ok: false; error: string } {
+export function validateTiers(basePrice: number, raw: any, stock?: number): { ok: true; tiers: Tier[] } | { ok: false; error: string } {
   if (raw == null) return { ok: true, tiers: [] };
   if (!Array.isArray(raw)) return { ok: false, error: 'Qiymət pillələri siyahı olmalıdır' };
   const tiers: Tier[] = [];
@@ -34,6 +36,11 @@ export function validateTiers(basePrice: number, raw: any): { ok: true; tiers: T
     tiers.push({ minQty, price: Math.round(price * 100) / 100 });
   }
   if (tiers.length > MAX_TIERS) return { ok: false, error: `Ən çox ${MAX_TIERS} pillə ola bilər` };
+  // Stokdan çox saya endirim vəd etmək olmaz.
+  if (Number.isFinite(stock as number) && (stock as number) > 0) {
+    const over = tiers.find((t) => t.minQty > (stock as number));
+    if (over) return { ok: false, error: `Pillədəki say (${over.minQty}) stokdan çox ola bilməz — stok: ${stock}` };
+  }
   tiers.sort((a, b) => a.minQty - b.minQty);
   for (let i = 1; i < tiers.length; i++) {
     if (tiers[i].minQty === tiers[i - 1].minQty) return { ok: false, error: 'Eyni say iki dəfə yazılıb' };

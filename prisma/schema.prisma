@@ -364,6 +364,12 @@ model Listing {
   country              String?
   brand                String?
   stock                Int             @default(1)
+  // ── BİRGƏ ALIŞ PƏNCƏRƏSİ (satıcının seçimi) ──
+  // Stok 1-dən çoxdursa və say-qiymət pillələri varsa satıcı birgə alışı açır
+  // və pəncərənin uzunluğunu (gün) özü seçir: ilk sifarişdən sonra elanın
+  // altında geri sayım başlayır, pəncərə bitənə qədər alanların sayı toplanır.
+  // null → birgə alış bağlıdır.
+  groupBuyDays         Int?
   forVehicle           String?
   unit                 String?
   unitValue            Float?
@@ -634,7 +640,10 @@ model GroupBuy {
   listingId      Int
   creatorId      Int
   status         String     @default("OPEN") // OPEN | CLOSED | SETTLED
-  expiresAt      DateTime
+  expiresAt      DateTime // pəncərənin bitmə vaxtı (ilk sifariş + windowDays)
+  windowDays     Int        @default(3) // satıcının seçdiyi pəncərə uzunluğu
+  // Hesablaşma tarixi = expiresAt + qaytarma müddəti (14 gün).
+  settleAt       DateTime?
   createdAt      DateTime   @default(now())
   // Hesablaşma: 14 günlük qaytarma müddəti bitəndən sonra QALAN iştirakçıların
   // sayına görə son qiymət hesablanır və fərq hamıya geri qaytarılır.

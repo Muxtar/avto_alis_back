@@ -1,25 +1,27 @@
-// BİRGƏ ALIŞ — bir neçə alıcı eyni məhsulu birlikdə alıb ucuzlaşdırır.
+// BİRGƏ ALIŞ — eyni elandan eyni pəncərədə alanların sayı toplanır və hamı ucuz alır.
 //
-// NECƏ İŞLƏYİR
-//   1. Elanda say-qiymət pilləsi VARSA alıcı «birgə alış» yarada bilər.
-//   2. Yaradan xüsusi link alır: /g/<code>. Qrupa YALNIZ bu linklə qoşulmaq olar,
-//      ona görə kimin neçə ədəd aldığı düzgün qruplaşır.
-//   3. HƏR İŞTİRAKÇI ƏVVƏLCƏ TAM QİYMƏTİ ÖDƏYİR (endirimsiz).
-//   4. Qaytarma müddəti (default 14 gün, hər kəs üçün öz təhvil tarixindən)
-//      bitəndən sonra qrup HESABLAŞIR: məhsulu SAXLAYAN iştirakçıların ümumi
-//      sayına görə son qiymət tapılır və fərq hər kəsə geri qaytarılır.
+// NECƏ İŞLƏYİR (AVTOMATİK — link və ya «qrup yarat» düyməsi YOXDUR)
+//   1. Satıcı elanı qoyanda stok 1-dən çoxdursa «birgə alış» seçimi çıxır:
+//      say-qiymət pillələrini yazır (stokun tam sayına qədər) və PƏNCƏRƏ
+//      uzunluğunu seçir (məs. 3 gün) → Listing.groupBuyDays.
+//   2. İlk alıcı həmin elandan sifariş verən kimi pəncərə AVTOMATİK açılır:
+//      elanın altında geri sayım başlayır və onu BÜTÜN alıcılar görür.
+//   3. Pəncərə bitənə qədər alanların sayı toplanır. Pəncərə bağlananda
+//      toplanan saya uyğun pillə qiyməti hamıya tətbiq olunur.
+//   4. Pəncərə bitəndən sonra YENİ alıcı gələndə yenidən 3 günlük TƏZƏ
+//      pəncərə açılır — sayma sıfırdan başlayır.
+//   5. Stok bitəndə (məs. 1000 ədəd satılanda) pəncərə də bağlanır.
 //
-// NİYƏ ƏVVƏLCƏ TAM QİYMƏT (fırıldağın qarşısı)
-//   Əvvəl endirim dərhal tətbiq olunurdu. Bu, belə bir fırıldağa imkan verirdi:
-//   bir nəfər saxta «qrup» yığır (tanışları ilə), qiymət düşür, sonra o adamlar
-//   məhsulu geri qaytarır — nəticədə təkbaşına alan ən ucuz qiyməti qoparırdı.
-//   İndi endirim YALNIZ qaytarma müddəti bitəndən sonra, HƏQİQƏTƏN məhsulu
-//   saxlayanların sayına görə verilir. Qaytaran adam qrupdan çıxır və onun
-//   sayı hesablamaya daxil olmur.
-//
-// ÖDƏNİŞ: birgə alış yalnız KARTLA mümkündür — fərqi geri qaytarmaq üçün
-// ödəniş şlüzü lazımdır (nağdda platforma pulu geri qaytara bilməz).
-import { PrismaClient } from '@prisma/client';
+// PUL AXINI (fırıldağın qarşısı)
+//   • Hər alıcı ƏVVƏLCƏ TAM QİYMƏTİ ödəyir — pəncərə bitməmiş son qiymət
+//     məlum deyil. Ödəniş yalnız KARTLA (fərqi geri qaytarmaq üçün).
+//   • Pəncərə bitəndən sonra 14 GÜN qaytarma müddəti gözlənilir. Bu müddətdə
+//     məhsulu geri qaytaran iştirakçı qrupdan DÜŞÜR və sayı hesaba alınmır.
+//   • 14 gün bitəndə hesablaşma aparılır: məhsulu SAXLAYANLARIN ümumi sayına
+//     görə son qiymət tapılır və fərq hər alıcının kartına qaytarılır.
+//   Beləcə saxta qrupla (tanışlar alıb sonra qaytarmaqla) ucuz qiymət qoparmaq
+//   mümkün olmur.
+import { PrismaClient, Prisma } from '@prisma/client';
 import { unitPriceFor, priceInfo, type Tier } from './tierPricing';
 import { refundOrderSafe } from './refunds';
 import { recordSettlement } from './settlement';
@@ -27,8 +29,16 @@ import { pushLive } from './live';
 
 const prisma = new PrismaClient();
 
-// Qrupun standart müddəti (gün) — bu müddətdən sonra qoşulma bağlanır.
-export const GROUP_DAYS = Number(process.env.GROUP_BUY_DAYS || 7);
+/** Satıcı müddət seçməyibsə istifadə olunan default pəncərə (gün). */
+export const GROUP_DAYS = Number(process.env.GROUP_BUY_DAYS || 3);
+/** Pəncərə üçün icazə verilən aralıq (gün). */
+export const MIN_WINDOW_DAYS = 1;
+export const MAX_WINDOW_DAYS = 30;
+
+/** Qaytarma (iadə) müddəti — gün. Pəncərə bitəndən sonra bu qədər gözlənilir. */
+export const RETURN_WINDOW_DAYS = Number(process.env.RETURN_WINDOW_DAYS || 14);
+
+const DAY = 24 * 3600 * 1000;
 
 const ALPHABET = 'abcdefghijkmnpqrstuvwxyz23456789'; // oxşar simvollar (l,o,0,1) yoxdur
 export function groupCode(len = 8): string {
@@ -62,6 +72,79 @@ export async function groupQty(groupBuyId: number): Promise<number> {
   return orders.reduce((s, o) => s + keptQtyOf(o as any), 0);
 }
 
+// ─────────────────────────── PƏNCƏRƏ İDARƏSİ ───────────────────────────
+
+/** Elanda birgə alış açıqdırmı? (satıcı müddət seçib + pillə var + stok > 1) */
+export function groupBuyEnabled(listing: { stock: number; groupBuyDays: number | null; priceTiers: any[] }): boolean {
+  return !!listing.groupBuyDays && listing.groupBuyDays > 0 && listing.stock > 1 && (listing.priceTiers?.length || 0) > 0;
+}
+
+/** Elanın AÇIQ pəncərəsi (varsa). Vaxtı keçibsə null qaytarır. */
+export async function activeGroup(listingId: number) {
+  return prisma.groupBuy.findFirst({
+    where: { listingId, status: 'OPEN', settledAt: null, expiresAt: { gt: new Date() } },
+    orderBy: { createdAt: 'desc' },
+  });
+}
+
+/**
+ * Sifariş verilən anda pəncərəni tap, yoxdursa AÇ.
+ *
+ * İlk alıcı pəncərəni başladır (creator = həmin alıcı); sonrakılar hazır
+ * pəncərəyə düşür. Pəncərə bitibsə növbəti alıcı üçün təzəsi açılır.
+ */
+export async function ensureActiveGroup(listingId: number, buyerId: number, tx?: Prisma.TransactionClient): Promise<number | null> {
+  const db = (tx || prisma) as Prisma.TransactionClient;
+  const listing = await db.listing.findUnique({
+    where: { id: listingId },
+    select: { id: true, stock: true, groupBuyDays: true, priceTiers: { select: { id: true } } },
+  });
+  if (!listing || !groupBuyEnabled(listing as any)) return null;
+
+  const now = new Date();
+  const open = await db.groupBuy.findFirst({
+    where: { listingId, status: 'OPEN', settledAt: null, expiresAt: { gt: now } },
+    orderBy: { createdAt: 'desc' },
+    select: { id: true, _count: { select: { orders: { where: COUNTED } } } },
+  });
+  const days = Math.min(MAX_WINDOW_DAYS, Math.max(MIN_WINDOW_DAYS, listing.groupBuyDays || GROUP_DAYS));
+  const expiresAt = new Date(now.getTime() + days * DAY);
+  if (open) {
+    // Açıq pəncərədə heç bir qüvvədə sifariş qalmayıbsa (ödənilməyib ləğv
+    // olunub) geri sayım bu alıcıdan YENİDƏN başlayır — boş pəncərə kimsənin
+    // vaxtını yeməsin.
+    if (open._count.orders === 0) {
+      await db.groupBuy.update({
+        where: { id: open.id },
+        data: { expiresAt, windowDays: days, creatorId: buyerId, settleAt: new Date(expiresAt.getTime() + RETURN_WINDOW_DAYS * DAY) },
+      });
+    }
+    return open.id;
+  }
+
+  let code = groupCode();
+  for (let i = 0; i < 5 && (await db.groupBuy.findUnique({ where: { code }, select: { id: true } })); i++) code = groupCode();
+  const g = await db.groupBuy.create({
+    data: {
+      code, listingId, creatorId: buyerId, windowDays: days, expiresAt,
+      settleAt: new Date(expiresAt.getTime() + RETURN_WINDOW_DAYS * DAY),
+    },
+    select: { id: true },
+  });
+  console.log(`[groupBuy] elan #${listingId} üçün ${days} günlük pəncərə açıldı (kod ${code}).`);
+  return g.id;
+}
+
+/** Elanın hazırkı pəncərəsi — məhsul səhifəsi üçün (yoxdursa null). */
+export async function listingGroupState(listingId: number) {
+  const g = await activeGroup(listingId);
+  if (!g) return null;
+  const st = await groupState(g.code);
+  // Sifarişi ləğv olunubsa pəncərə faktiki başlamayıb — geri sayım
+  // göstərilmir, növbəti həqiqi alıcı təzə pəncərə açır.
+  return st && st.participants.length ? st : null;
+}
+
 /** Qrupun tam vəziyyəti — səhifə və səbət üçün. */
 export async function groupState(code: string) {
   const g = await prisma.groupBuy.findUnique({
@@ -91,23 +174,19 @@ export async function groupState(code: string) {
   const tiers: Tier[] = g.listing.priceTiers.map((t) => ({ minQty: t.minQty, price: t.price }));
   // Say = məhsulu SAXLAYANLAR (qaytaranlar çıxılır).
   const qty = g.orders.reduce((s, o) => s + keptQtyOf(o as any), 0);
-  const expired = g.expiresAt <= new Date();
+  const now = Date.now();
+  const expired = g.expiresAt.getTime() <= now;
   const open = g.status === 'OPEN' && !expired && !g.settledAt;
-  // Hesablaşma nə vaxt olacaq: ən son təhvil + qaytarma müddəti (yoxdursa
-  // qrupun bitmə vaxtı + müddət).
-  const deadlines = g.orders
-    .map((o) => (o.deliveredAt ? new Date(o.deliveredAt.getTime() + RETURN_WINDOW_DAYS * 24 * 3600 * 1000) : null))
-    .filter((d): d is Date => !!d);
-  const settleEta = g.settledAt
-    ? null
-    : new Date(Math.max(
-        g.expiresAt.getTime(),
-        ...(deadlines.length ? deadlines.map((d) => d.getTime()) : [g.expiresAt.getTime() + RETURN_WINDOW_DAYS * 24 * 3600 * 1000]),
-      ));
+  // Hesablaşma: pəncərə bitir → 14 gün qaytarma müddəti → hesablaşma.
+  const settleEta = g.settledAt ? null : (g.settleAt || new Date(g.expiresAt.getTime() + RETURN_WINDOW_DAYS * DAY));
   return {
     code: g.code,
-    status: open ? 'OPEN' : 'CLOSED',
+    status: g.settledAt ? 'SETTLED' : open ? 'OPEN' : 'CLOSED',
     expiresAt: g.expiresAt,
+    startedAt: g.createdAt,
+    windowDays: g.windowDays,
+    // Geri sayım üçün — saat fərqindən asılı olmasın deyə saniyə göndəririk.
+    secondsLeft: open ? Math.max(0, Math.round((g.expiresAt.getTime() - now) / 1000)) : 0,
     creator: g.creator,
     listing: {
       id: g.listing.id, title: g.listing.title, images: g.listing.images, price: g.listing.price,
@@ -133,13 +212,10 @@ export async function groupState(code: string) {
   };
 }
 
-/** Qaytarma (iadə) müddəti — gün. Bu müddət bitəndən sonra qrup hesablaşır. */
-export const RETURN_WINDOW_DAYS = Number(process.env.RETURN_WINDOW_DAYS || 14);
-
 /** Sifarişin qaytarma müddətinin bitmə vaxtı (təhvildən sayılır). */
 export function returnDeadline(order: { deliveredAt: Date | null; status: string }): Date | null {
   if (order.status !== 'DELIVERED' || !order.deliveredAt) return null;
-  return new Date(order.deliveredAt.getTime() + RETURN_WINDOW_DAYS * 24 * 3600 * 1000);
+  return new Date(order.deliveredAt.getTime() + RETURN_WINDOW_DAYS * DAY);
 }
 
 /**
@@ -210,9 +286,9 @@ export async function settleGroup(groupBuyId: number): Promise<{ ok: boolean; re
  * Hesablaşma vaxtı çatmış qrupları tap və hesablaşdır (fon işi).
  *
  * Şərtlər:
- *   • qrup bağlanıb (vaxtı bitib və ya yaradan bağlayıb);
- *   • HƏR iştirakçının sifarişi çatdırılıb və 14 günlük qaytarma müddəti bitib;
- *   • gözləyən (cavablandırılmamış) iadə sorğusu qalmayıb.
+ *   • pəncərə bağlanıb və üstündən 14 gün (qaytarma müddəti) keçib — settleAt;
+ *   • sifariş hələ çatdırılmayıbsa və ya cavablandırılmamış iadə sorğusu varsa
+ *     gözlənilir (alıcı məhsulu görməmiş endirim hesablanmasın).
  * 60 gündən sonra qrup hər halda hesablaşır (ilişib qalmasın).
  */
 export async function settleDueGroups(): Promise<number> {
@@ -232,14 +308,15 @@ export async function settleDueGroups(): Promise<number> {
   });
   let done = 0;
   for (const g of groups) {
-    const hardDeadline = new Date(g.expiresAt.getTime() + 60 * 24 * 3600 * 1000) < now;
+    const settleAt = g.settleAt || new Date(g.expiresAt.getTime() + RETURN_WINDOW_DAYS * DAY);
+    const hardDeadline = new Date(g.expiresAt.getTime() + 60 * DAY) < now;
     if (!hardDeadline) {
-      // Bütün sifarişlər təhvil verilib və müddəti bitibmi?
+      if (settleAt > now) continue;                                    // 14 gün hələ bitməyib
+      // Təhvil verilməyən sifariş və ya açıq iadə sorğusu varsa gözləyirik.
       const pending = g.orders.some((o) => {
         if (o.status !== 'DELIVERED' || !o.deliveredAt) return true;   // hələ çatmayıb
-        const dl = new Date(o.deliveredAt.getTime() + RETURN_WINDOW_DAYS * 24 * 3600 * 1000);
+        const dl = new Date(o.deliveredAt.getTime() + RETURN_WINDOW_DAYS * DAY);
         if (dl > now) return true;                                     // müddət davam edir
-        // Cavablandırılmamış iadə sorğusu varsa gözləyirik.
         return o.returnRequests.some((r) => ['REQUESTED', 'APPROVED', 'RETURN_SHIPPED'].includes(r.status));
       });
       if (pending) continue;
@@ -254,12 +331,42 @@ export async function settleDueGroups(): Promise<number> {
   return done;
 }
 
-/** Vaxtı bitmiş qrupları bağla (fon işi). */
+/**
+ * Vaxtı bitmiş (və stoku bitmiş) pəncərələri bağla (fon işi).
+ * Bağlananda iştirakçılara xəbər verilir: say bəlli oldu, 14 gündən sonra
+ * fərq qaytarılacaq.
+ */
 export async function closeExpiredGroups(): Promise<number> {
-  const r = await prisma.groupBuy.updateMany({
-    where: { status: 'OPEN', expiresAt: { lt: new Date() } },
-    data: { status: 'CLOSED' },
-  }).catch(() => ({ count: 0 }));
-  if (r.count) console.log(`[groupBuy] ${r.count} birgə alış vaxtı bitdiyi üçün bağlandı.`);
-  return r.count;
+  const now = new Date();
+  const due = await prisma.groupBuy.findMany({
+    where: { status: 'OPEN', OR: [{ expiresAt: { lt: now } }, { listing: { stock: { lte: 0 } } }] },
+    select: {
+      id: true, code: true, expiresAt: true, settleAt: true,
+      listing: { select: { id: true, price: true, priceTiers: true } },
+      orders: { where: COUNTED, select: { id: true, buyerId: true, items: { select: { quantity: true } }, returnRequests: { select: { status: true, quantity: true } } } },
+    },
+    take: 50,
+  });
+  for (const g of due) {
+    const settleAt = g.settleAt || new Date(Math.max(g.expiresAt.getTime(), now.getTime()) + RETURN_WINDOW_DAYS * DAY);
+    await prisma.groupBuy.update({ where: { id: g.id }, data: { status: 'CLOSED', settleAt } }).catch(() => {});
+    if (!g.orders.length) continue;
+    const tiers: Tier[] = g.listing.priceTiers.map((t) => ({ minQty: t.minQty, price: t.price }));
+    const qty = g.orders.reduce((s, o) => s + keptQtyOf(o as any), 0);
+    const unit = unitPriceFor(g.listing.price, tiers, qty);
+    const when = settleAt.toLocaleDateString('az-AZ');
+    for (const o of g.orders) {
+      await prisma.notification.create({
+        data: {
+          userId: o.buyerId, type: 'ORDER', title: `Sifariş #${o.id}`,
+          body: `Birgə alış bağlandı: qrupda ${qty} ədəd toplandı, gözlənilən qiymət ${unit} AZN. `
+            + `${RETURN_WINDOW_DAYS} günlük qaytarma müddəti bitəndən sonra (${when}) fərq kartınıza qaytarılacaq.`,
+          link: `/orders/${o.id}`,
+        },
+      }).catch(() => {});
+      pushLive(o.buyerId, { kind: 'order', id: o.id });
+    }
+  }
+  if (due.length) console.log(`[groupBuy] ${due.length} birgə alış pəncərəsi bağlandı.`);
+  return due.length;
 }

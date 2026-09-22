@@ -1,9 +1,12 @@
-// BİRGƏ ALIŞ marşrutları — qrup yaratmaq, qrupa baxmaq, qrupu bağlamaq.
-// Məntiq services/groupBuy.ts-dədir.
+// BİRGƏ ALIŞ marşrutları — pəncərəyə baxmaq (yaratmaq AVTOMATİKdir).
+//
+// Pəncərə alıcı tərəfindən YARADILMIR: elanda birgə alış açıqdırsa ilk sifariş
+// verilən anda server özü açır (services/groupBuy → ensureActiveGroup).
+// Ona görə burada yalnız OXUMA marşrutları var.
 import { Router, Request, Response } from 'express';
 import { PrismaClient } from '@prisma/client';
 import { adminAuth, AuthRequest } from '../middleware/auth';
-import { groupCode, groupState, GROUP_DAYS } from '../services/groupBuy';
+import { groupState, listingGroupState, groupBuyEnabled, RETURN_WINDOW_DAYS } from '../services/groupBuy';
 import { priceInfo, type Tier } from '../services/tierPricing';
 
 const router = Router();
@@ -18,56 +21,50 @@ router.get('/listings/:id/price', async (req: Request, res: Response) => {
     const qty = Math.max(1, parseInt(String(req.query.qty || '1')) || 1);
     const listing = await prisma.listing.findUnique({
       where: { id },
-      select: { id: true, price: true, stock: true, priceTiers: { orderBy: { minQty: 'asc' } } },
+      select: { id: true, price: true, stock: true, groupBuyDays: true, priceTiers: { orderBy: { minQty: 'asc' } } },
     });
     if (!listing) { res.status(404).json({ success: false, message: 'Elan tapılmadı' }); return; }
     const tiers: Tier[] = listing.priceTiers.map((t) => ({ minQty: t.minQty, price: t.price }));
     res.json({
       success: true,
       tiers,
-      // Birgə alış YALNIZ pilləsi olan elanda mümkündür.
-      groupBuyAvailable: tiers.length > 0,
+      // Birgə alış: satıcı açıbsa (müddət seçib), pillə varsa və stok 1-dən çoxdursa.
+      groupBuyAvailable: groupBuyEnabled(listing as any),
+      groupBuyDays: listing.groupBuyDays || null,
+      returnWindowDays: RETURN_WINDOW_DAYS,
       ...priceInfo(listing.price, tiers, qty),
     });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
 
-// ── Birgə alış yarat (alıcı) ──
-router.post('/listings/:id/group-buy', adminAuth, async (req: AuthRequest, res: Response) => {
+// ── Elanın AKTİV birgə alış pəncərəsi (ictimai) ──
+// Məhsul səhifəsindəki geri sayım bunu oxuyur. Pəncərə hələ açılmayıbsa
+// (heç kim almayıb) `group: null` qayıdır, amma şərtlər göndərilir ki,
+// səhifə «ilk alan pəncərəni başladır» izahını göstərə bilsin.
+router.get('/listings/:id/group-buy', async (req: Request, res: Response) => {
   try {
     const id = parseInt(String(req.params.id));
     const listing = await prisma.listing.findUnique({
       where: { id },
-      select: { id: true, userId: true, status: true, stock: true, priceTiers: { select: { id: true } } },
+      select: { id: true, price: true, stock: true, groupBuyDays: true, priceTiers: { orderBy: { minQty: 'asc' } } },
     });
     if (!listing) { res.status(404).json({ success: false, message: 'Elan tapılmadı' }); return; }
-    if (!listing.priceTiers.length) {
-      res.status(400).json({ success: false, message: 'Bu məhsulda çox alanda endirim yoxdur — birgə alış mümkün deyil' }); return;
-    }
-    if (listing.status !== 'APPROVED') { res.status(400).json({ success: false, message: 'Elan aktiv deyil' }); return; }
-    if (listing.userId === req.adminId) { res.status(400).json({ success: false, message: 'Öz elanınıza birgə alış aça bilməzsiniz' }); return; }
-
-    // Eyni istifadəçinin həmin elan üçün AÇIQ qrupu varsa onu qaytar —
-    // hər dəfə yeni link yaradılsa iştirakçılar müxtəlif qruplara dağılardı.
-    const existing = await prisma.groupBuy.findFirst({
-      where: { listingId: id, creatorId: req.adminId!, status: 'OPEN', expiresAt: { gt: new Date() } },
+    const enabled = groupBuyEnabled(listing as any);
+    const tiers: Tier[] = listing.priceTiers.map((t) => ({ minQty: t.minQty, price: t.price }));
+    res.json({
+      success: true,
+      enabled,
+      windowDays: listing.groupBuyDays || null,
+      returnWindowDays: RETURN_WINDOW_DAYS,
+      stock: listing.stock,
+      tiers,
+      bestPrice: tiers.length ? tiers[tiers.length - 1].price : listing.price,
+      group: enabled ? await listingGroupState(id) : null,
     });
-    if (existing) { res.json({ success: true, code: existing.code, expiresAt: existing.expiresAt, reused: true }); return; }
-
-    const days = Math.min(30, Math.max(1, parseInt(String(req.body?.days || GROUP_DAYS)) || GROUP_DAYS));
-    let code = groupCode();
-    for (let i = 0; i < 5 && (await prisma.groupBuy.findUnique({ where: { code } })); i++) code = groupCode();
-    const g = await prisma.groupBuy.create({
-      data: {
-        code, listingId: id, creatorId: req.adminId!,
-        expiresAt: new Date(Date.now() + days * 24 * 3600 * 1000),
-      },
-    });
-    res.status(201).json({ success: true, code: g.code, expiresAt: g.expiresAt });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
 
-// ── Qrupun vəziyyəti (link açılanda) ──
+// ── Qrupun vəziyyəti (kod ilə) ──
 // Açıqdır: linki alan hər kəs (qeydiyyatsız da) görə bilməlidir.
 router.get('/group-buy/:code', async (req: Request, res: Response) => {
   try {
@@ -77,11 +74,11 @@ router.get('/group-buy/:code', async (req: Request, res: Response) => {
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
 
-// ── Mənim birgə alışlarım (yaratdığım + qoşulduğum) ──
+// ── Mənim birgə alışlarım (iştirak etdiyim pəncərələr) ──
 router.get('/me/group-buys', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
     const mine = await prisma.groupBuy.findMany({
-      where: { OR: [{ creatorId: req.adminId! }, { orders: { some: { buyerId: req.adminId! } } }] },
+      where: { orders: { some: { buyerId: req.adminId!, status: { not: 'CANCELLED' } } } },
       orderBy: { createdAt: 'desc' },
       take: 30,
       select: { code: true },
@@ -89,17 +86,6 @@ router.get('/me/group-buys', adminAuth, async (req: AuthRequest, res: Response) 
     const list = [];
     for (const m of mine) { const st = await groupState(m.code); if (st) list.push(st); }
     res.json({ success: true, groups: list });
-  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
-});
-
-// ── Qrupu bağla (yaradan) ──
-router.post('/group-buy/:code/close', adminAuth, async (req: AuthRequest, res: Response) => {
-  try {
-    const g = await prisma.groupBuy.findUnique({ where: { code: String(req.params.code) } });
-    if (!g) { res.status(404).json({ success: false, message: 'Tapılmadı' }); return; }
-    if (g.creatorId !== req.adminId) { res.status(403).json({ success: false, message: 'Yalnız qrupu yaradan bağlaya bilər' }); return; }
-    await prisma.groupBuy.update({ where: { id: g.id }, data: { status: 'CLOSED' } });
-    res.json({ success: true });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
 

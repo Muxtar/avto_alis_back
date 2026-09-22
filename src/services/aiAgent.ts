@@ -121,14 +121,14 @@ const TOOLS: Anthropic.Tool[] = [
   { name: 'request_consultation', description: 'Peşəkardan konsultasiya sorğusu (təsdiqli). offerId lazımdır.', input_schema: { type: 'object', properties: { offerId: { type: 'number' } }, required: ['offerId'] } },
   { name: 'update_order_status', description: 'Sifarişin statusunu dəyiş (təsdiqli, məs. CONFIRMED/CANCELLED/SHIPPED/DELIVERED).', input_schema: { type: 'object', properties: { orderId: { type: 'number' }, status: { type: 'string' } }, required: ['orderId', 'status'] } },
   { name: 'price_for_quantity', description: 'Çox alanda ucuz: verilmiş say üçün bir ədədin qiyməti və qənaət (elanda pillə varsa).', input_schema: { type: 'object', properties: { listingId: { type: 'number' }, quantity: { type: 'number' } }, required: ['listingId', 'quantity'] } },
-  { name: 'my_group_buys', description: 'Birgə alışlarım (yaratdığım və qoşulduğum) — say, qiymət, vəziyyət.', input_schema: { type: 'object', properties: {} } },
+  { name: 'my_group_buys', description: 'İştirak etdiyim birgə alışlar — say, gözlənilən qiymət, pəncərənin bitmə vaxtı.', input_schema: { type: 'object', properties: {} } },
+  { name: 'group_buy_of_listing', description: 'Elanın aktiv birgə alış pəncərəsi: nə qədər vaxt qalıb, indiyə qədər neçə ədəd alınıb, gözlənilən qiymət.', input_schema: { type: 'object', properties: { listingId: { type: 'number' } }, required: ['listingId'] } },
   { name: 'my_returns', description: 'İadə sorğularım (alıcı kimi).', input_schema: { type: 'object', properties: {} } },
   { name: 'my_earnings', description: 'Satıcı qazancım: ödəniləcək, gözləyən, ödənilmiş.', input_schema: { type: 'object', properties: {} } },
   { name: 'update_cart_item', description: 'Səbətdəki məhsulun sayını dəyiş (dərhal icra olunur). cartItemId get_cart-dan gəlir.', input_schema: { type: 'object', properties: { cartItemId: { type: 'number' }, quantity: { type: 'number' } }, required: ['cartItemId', 'quantity'] } },
   { name: 'remove_from_cart', description: 'Səbətdən məhsulu sil (dərhal icra olunur).', input_schema: { type: 'object', properties: { cartItemId: { type: 'number' } }, required: ['cartItemId'] } },
   { name: 'clear_cart', description: 'Səbəti tamamilə boşalt (dərhal icra olunur).', input_schema: { type: 'object', properties: {} } },
   { name: 'request_return', description: 'Məhsulu geri qaytarmaq üçün iadə sorğusu (təsdiqli). Təhvildən 14 gün ərzində.', input_schema: { type: 'object', properties: { orderId: { type: 'number' }, orderItemId: { type: 'number' }, reason: { type: 'string' }, reasonText: { type: 'string' }, quantity: { type: 'number' } }, required: ['orderId', 'reason'] } },
-  { name: 'create_group_buy', description: 'Məhsul üçün birgə alış başlat və paylaşma linki al (təsdiqli). Yalnız say-qiymət pilləsi olan elanda.', input_schema: { type: 'object', properties: { listingId: { type: 'number' } }, required: ['listingId'] } },
   { name: 'file_complaint', description: 'Şikayət yarat (təsdiqli).', input_schema: { type: 'object', properties: { targetUserId: { type: 'number' }, category: { type: 'string' }, description: { type: 'string' } }, required: ['category', 'description'] } },
 ];
 
@@ -147,7 +147,7 @@ const AUTO_ACTIONS = new Set([
 ]);
 const CONFIRM_ACTIONS = new Set([
   'send_message', 'review_listing', 'review_object', 'delete_listing',
-  'update_order_status', 'file_complaint', 'request_consultation', 'request_return', 'create_group_buy',
+  'update_order_status', 'file_complaint', 'request_consultation', 'request_return',
 ]);
 const ACTION_NAMES = new Set([...AUTO_ACTIONS, ...CONFIRM_ACTIONS]);
 
@@ -164,7 +164,7 @@ Qaydalar:
     bildirişləri oxundu et, öz elanını yenilə. Aləti çağır — nəticə dərhal gəlir,
     sonra qısa "əlavə etdim ✓" de. İstifadəçidən təsdiq İSTƏMƏ.
   · TƏSDİQLİ: mesaj göndərmək, rəy yazmaq, elan silmək, sifariş statusu,
-    şikayət, konsultasiya sorğusu, iadə sorğusu, birgə alış yaratmaq.
+    şikayət, konsultasiya sorğusu, iadə sorğusu.
     Bunlarda DƏRHAL aləti çağır — təsdiq pəncərəsini sistem özü göstərir.
     İstifadəçidən mətnlə "təsdiqləyirsiniz?" DEYƏ SORUŞMA: bu, iki dəfə
     təsdiq deməkdir. Alət çağırışından sonra yalnız bir cümlə yaz:
@@ -183,10 +183,14 @@ PLATFORMA QAYDALARI (soruşulanda düzgün izah et, uydurma):
 - Ödəniş: kartla yalnız VÖEN-li (biznes) elanlarda; fərdi elanlar nağddır.
 - Çox alanda ucuz: satıcı say-qiymət pilləsi qoya bilər (məs. 100 ədəd → 800 AZN).
   Aralıq saylar avtomatik hesablanır — price_for_quantity aləti ilə dəqiq de.
-- Birgə alış: yalnız pilləsi olan məhsullarda, xüsusi link ilə. HƏR KƏS əvvəlcə
-  TAM qiyməti ödəyir; 14 günlük qaytarma müddəti bitəndən sonra məhsulu
-  saxlayanların sayına görə endirim hesablanıb fərq kartlara qaytarılır.
-  Yalnız kartla mümkündür.
+- Birgə alış AVTOMATİKDİR — link və ya «qrup yarat» düyməsi YOXDUR. Satıcı
+  stoku 1-dən çox olan elanda pillə qoyub müddət seçir (məs. 3 gün). İlk alıcı
+  sifariş verəndə elanın altında geri sayım başlayır və onu hamı görür; həmin
+  pəncərədə alanların sayı toplanır. Pəncərə bitəndən sonra 14 gün qaytarma
+  müddəti gözlənilir (qaytaran qrupdan düşür), sonra məhsulu saxlayanların
+  sayına görə son qiymət hesablanır və fərq kartlara qaytarılır. Hər kəs
+  əvvəlcə TAM qiyməti ödəyir, yalnız kartla. Pəncərə bitəndən sonra növbəti
+  alıcı təzə pəncərə başladır. Vəziyyəti group_buy_of_listing aləti ilə de.
 - Qaytarma: təhvildən 14 gün ərzində. Alıcı iadə sorğusu göndərir, məhsulu
   satıcıya təhvil verir, satıcı təsdiqləyəndən sonra pul qaytarılır.
 - Rəy: məhsulu alan hər kəs yaza bilər; mağazaya hər alışdan sonra bir rəy.`;
@@ -296,6 +300,11 @@ async function runReadTool(name: string, input: any, userId: number, token: stri
       return getJson(`/listings/${id}/price?qty=${q}`, token);
     }
     case 'my_group_buys': return getJson('/me/group-buys', token);
+    case 'group_buy_of_listing': {
+      const id = parseInt(String(input.listingId));
+      if (!Number.isFinite(id)) return { error: 'listingId lazımdır.' };
+      return getJson(`/listings/${id}/group-buy`, token);
+    }
     case 'my_returns': return getJson('/returns/buying', token);
     case 'my_earnings': return getJson('/me/earnings', token);
     case 'my_favorites': return getJson('/favorites', token);
@@ -368,13 +377,6 @@ async function buildAction(name: string, input: any, userId: number): Promise<Pe
       if (input.reasonText) body.reasonText = String(input.reasonText).slice(0, 500);
       if (Number.isFinite(num(input.quantity))) body.quantity = num(input.quantity);
       return { type: name, endpoint: '/returns', method: 'POST', body, summary: `Sifariş #${orderId} üçün iadə sorğusu (${reason})` };
-    }
-    case 'create_group_buy': {
-      const id = num(input.listingId);
-      if (Number.isNaN(id)) return { error: 'listingId lazımdır.' };
-      const tiers = await prisma.priceTier.count({ where: { listingId: id } });
-      if (!tiers) return { error: 'Bu məhsulda «çox alanda ucuz» pilləsi yoxdur — birgə alış mümkün deyil.' };
-      return { type: name, endpoint: `/listings/${id}/group-buy`, method: 'POST', body: {}, summary: `Birgə alış başlat: elan #${id}` };
     }
     case 'add_to_favorites': {
       const id = num(input.listingId); if (Number.isNaN(id)) return { error: 'listingId lazımdır.' };
