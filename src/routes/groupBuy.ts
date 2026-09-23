@@ -6,8 +6,8 @@
 import { Router, Request, Response } from 'express';
 import { PrismaClient } from '@prisma/client';
 import { adminAuth, AuthRequest } from '../middleware/auth';
-import { groupState, listingGroupState, groupBuyEnabled, RETURN_WINDOW_DAYS } from '../services/groupBuy';
-import { priceInfo, type Tier } from '../services/tierPricing';
+import { groupState, listingGroupState, groupBuyEnabled, keptQtyOf, RETURN_WINDOW_DAYS } from '../services/groupBuy';
+import { priceInfo, unitPriceFor, type Tier } from '../services/tierPricing';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -61,6 +61,48 @@ router.get('/listings/:id/group-buy', async (req: Request, res: Response) => {
       bestPrice: tiers.length ? tiers[tiers.length - 1].price : listing.price,
       group: enabled ? await listingGroupState(id) : null,
     });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
+// ── Bir neçə elanın aktiv pəncərəsi (ictimai, toplu) ──
+// Elan KARTLARI üçün: siyahıdakı hər kart ayrıca sorğu göndərməsin deyə
+// görünən elanların id-ləri bir sorğuda soruşulur. Yalnız HƏQİQƏTƏN başlamış
+// (ən azı bir qüvvədə sifarişi olan) pəncərələr qaytarılır.
+router.get('/group-buys/active', async (req: Request, res: Response) => {
+  try {
+    const ids = String(req.query.ids || '')
+      .split(',').map((n) => parseInt(n.trim())).filter((n) => Number.isFinite(n) && n > 0)
+      .slice(0, 60);
+    if (!ids.length) { res.json({ success: true, groups: {} }); return; }
+    const rows = await prisma.groupBuy.findMany({
+      where: { listingId: { in: ids }, status: 'OPEN', settledAt: null, expiresAt: { gt: new Date() } },
+      orderBy: { createdAt: 'desc' },
+      select: {
+        code: true, listingId: true, expiresAt: true, windowDays: true,
+        listing: { select: { price: true, priceTiers: { orderBy: { minQty: 'asc' } } } },
+        orders: {
+          where: { status: { not: 'CANCELLED' } },
+          select: { items: { select: { quantity: true } }, returnRequests: { select: { status: true, quantity: true } } },
+        },
+      },
+    });
+    const groups: Record<number, any> = {};
+    for (const g of rows) {
+      if (groups[g.listingId]) continue;                    // hər elan üçün ən təzəsi
+      const qty = g.orders.reduce((s, o) => s + keptQtyOf(o as any), 0);
+      if (qty <= 0 && !g.orders.length) continue;           // pəncərə faktiki başlamayıb
+      const tiers: Tier[] = g.listing.priceTiers.map((t) => ({ minQty: t.minQty, price: t.price }));
+      const unit = unitPriceFor(g.listing.price, tiers, Math.max(1, qty));
+      groups[g.listingId] = {
+        code: g.code,
+        expiresAt: g.expiresAt,
+        windowDays: g.windowDays,
+        totalQty: qty,
+        unitPrice: unit,
+        discountPercent: g.listing.price > 0 ? Math.round(((g.listing.price - unit) / g.listing.price) * 100) : 0,
+      };
+    }
+    res.json({ success: true, groups });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
 
