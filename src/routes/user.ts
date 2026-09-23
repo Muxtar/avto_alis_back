@@ -520,6 +520,10 @@ router.get('/me/listings', adminAuth, async (req: AuthRequest, res: Response) =>
       orderBy: { createdAt: 'desc' },
       include: {
         user: { select: { id: true, name: true, phone: true, type: true } },
+        // Redaktə forması pillələri buradan doldurur. Əvvəl göndərilmirdi:
+        // elan redaktə ediləndə forma boş pillə göndərir və mövcud pillələr
+        // (və onunla birlikdə birgə alış) silinirdi.
+        priceTiers: { orderBy: { minQty: 'asc' } },
         _count: { select: { comments: true } },
       },
     });
