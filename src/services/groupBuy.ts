@@ -332,6 +332,35 @@ export async function settleDueGroups(): Promise<number> {
 }
 
 /**
+ * AÇIQ pəncərələri elanın hazırkı müddəti ilə uyğunlaşdır (fon işi).
+ *
+ * Satıcı müddəti dəyişəndə (məs. 14 gündən 3 günə) açıq pəncərə köhnə geri
+ * sayımla qalırdı — alıcı elanda 14 gün görürdü, halbuki elanda 3 gün yazılıb.
+ * Müddət pəncərənin BAŞLADIĞI andan hesablanır; vaxt artıq keçibsə növbəti
+ * addımda (closeExpiredGroups) bağlanır və iştirakçılara bildiriş gedir.
+ */
+export async function syncGroupWindows(): Promise<number> {
+  const open = await prisma.groupBuy.findMany({
+    where: { status: 'OPEN', settledAt: null },
+    select: { id: true, code: true, createdAt: true, windowDays: true, listing: { select: { groupBuyDays: true } } },
+    take: 100,
+  });
+  let n = 0;
+  for (const g of open) {
+    const want = g.listing.groupBuyDays;
+    if (!want || want === g.windowDays) continue;
+    const end = new Date(g.createdAt.getTime() + want * DAY);
+    await prisma.groupBuy.update({
+      where: { id: g.id },
+      data: { windowDays: want, expiresAt: end, settleAt: new Date(end.getTime() + RETURN_WINDOW_DAYS * DAY) },
+    }).catch(() => {});
+    console.log(`[groupBuy] ${g.code}: pəncərə ${g.windowDays} gündən ${want} günə uyğunlaşdırıldı.`);
+    n++;
+  }
+  return n;
+}
+
+/**
  * Vaxtı bitmiş (və stoku bitmiş) pəncərələri bağla (fon işi).
  * Bağlananda iştirakçılara xəbər verilir: say bəlli oldu, 14 gündən sonra
  * fərq qaytarılacaq.

@@ -12,7 +12,7 @@ import { resolveFlag } from '../services/settings';
 import { emitToAdmins } from '../services/callSignaling';
 import { pushAdmins } from '../services/live';
 import { validateTiers } from '../services/tierPricing';
-import { MIN_WINDOW_DAYS, MAX_WINDOW_DAYS } from '../services/groupBuy';
+import { MIN_WINDOW_DAYS, MAX_WINDOW_DAYS, RETURN_WINDOW_DAYS } from '../services/groupBuy';
 import { isValidMonths } from '../services/installment';
 import fs from 'fs';
 import path from 'path';
@@ -763,20 +763,42 @@ router.put('/me/listings/:id', adminAuth, upload.array('images', 5), processImag
         ...(nextImages !== undefined && { images: nextImages }),
       },
     });
+    // HESABLAŞMAMIŞ BİRGƏ ALIŞ varsa pillələr dondurulur: hesablaşma cari
+    // pillələrə görə aparılır, ona görə pəncərə açıq ikən cədvəli dəyişmək
+    // alıcılara verilmiş sözü pozardı (və pillələr silinsə hesablaşma
+    // ümumiyyətlə mümkün olmazdı).
+    const liveGroup = await prisma.groupBuy.findFirst({
+      where: { listingId: listing.id, settledAt: null },
+      orderBy: { createdAt: 'desc' },
+      select: { id: true, createdAt: true, expiresAt: true, status: true },
+    });
+
     // Pillələr göndərilibsə TAM əvəz olunur (boş massiv = pillələri sil).
     let tierCount = await prisma.priceTier.count({ where: { listingId: listing.id } });
     if (req.body?.tiers !== undefined) {
       const raw = typeof req.body.tiers === 'string' ? safeJson(req.body.tiers) : req.body.tiers;
       const v = validateTiers(listing.price, raw, listing.stock);
       if (!v.ok) { res.status(400).json({ success: false, message: v.error }); return; }
-      await prisma.priceTier.deleteMany({ where: { listingId: listing.id } });
-      if (v.tiers.length) {
-        await prisma.priceTier.createMany({ data: v.tiers.map((t) => ({ listingId: listing.id, minQty: t.minQty, price: t.price })) });
+      const current = await prisma.priceTier.findMany({ where: { listingId: listing.id }, orderBy: { minQty: 'asc' }, select: { minQty: true, price: true } });
+      const same = current.length === v.tiers.length
+        && current.every((c, i) => c.minQty === v.tiers[i].minQty && c.price === v.tiers[i].price);
+      if (!same && liveGroup) {
+        res.status(400).json({
+          success: false,
+          message: 'Bu elanda gedişatda olan birgə alış var — hesablaşma bitənə qədər say-qiymət pillələrini dəyişmək olmaz. '
+            + 'Pəncərə bitir: ' + liveGroup.expiresAt.toLocaleString('az-AZ'),
+        });
+        return;
+      }
+      if (!same) {
+        await prisma.priceTier.deleteMany({ where: { listingId: listing.id } });
+        if (v.tiers.length) {
+          await prisma.priceTier.createMany({ data: v.tiers.map((t) => ({ listingId: listing.id, minQty: t.minQty, price: t.price })) });
+        }
       }
       tierCount = v.tiers.length;
     }
-    // Birgə alış pəncərəsi. 0 və ya boş → bağlanır. AÇIQ pəncərə varsa o,
-    // öz müddətini sona qədər yaşayır (alıcılara verilən söz pozulmasın).
+    // Birgə alış pəncərəsi. 0 və ya boş → yeni pəncərə açılmır.
     if (req.body?.groupBuyDays !== undefined) {
       const gbDays = groupBuyDaysOf(req.body.groupBuyDays);
       if (gbDays && !tierCount) { res.status(400).json({ success: false, message: 'Birgə alış üçün ən azı bir say-qiymət pilləsi lazımdır' }); return; }
@@ -786,6 +808,17 @@ router.put('/me/listings/:id', adminAuth, upload.array('images', 5), processImag
       }
       await prisma.listing.update({ where: { id: listing.id }, data: { groupBuyDays: gbDays } });
       (listing as any).groupBuyDays = gbDays;
+      // AÇIQ pəncərə də yeni müddətə uyğunlaşdırılır: satıcı «3 gün» seçəndə
+      // elanın altında 14 günlük köhnə geri sayım qalmamalıdır. Müddət
+      // pəncərənin BAŞLADIĞI andan hesablanır; vaxt artıq keçibsə növbəti
+      // yoxlamada (10 dəq) bağlanır və iştirakçılara bildiriş gedir.
+      if (gbDays && liveGroup && liveGroup.status === 'OPEN') {
+        const end = new Date(liveGroup.createdAt.getTime() + gbDays * 24 * 3600 * 1000);
+        await prisma.groupBuy.update({
+          where: { id: liveGroup.id },
+          data: { windowDays: gbDays, expiresAt: end, settleAt: new Date(end.getTime() + RETURN_WINDOW_DAYS * 24 * 3600 * 1000) },
+        });
+      }
     }
     res.json({ success: true, listing });
   } catch (error: any) {
