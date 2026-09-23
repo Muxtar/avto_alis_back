@@ -32,7 +32,18 @@ export function validateTiers(basePrice: number, raw: any, stock?: number): { ok
     const price = Number(t?.price);
     if (!Number.isFinite(minQty) || minQty < 2) return { ok: false, error: 'Pillədə say ən azı 2 olmalıdır' };
     if (!Number.isFinite(price) || price <= 0) return { ok: false, error: 'Pillə qiyməti 0-dan böyük olmalıdır' };
-    if (price >= basePrice) return { ok: false, error: `Pillə qiyməti adi qiymətdən (${basePrice} AZN) kiçik olmalıdır` };
+    if (price >= basePrice) {
+      // Ən çox rast gəlinən səhv: satıcı bura CƏMİ məbləği yazır («20 ədəd
+      // 80 AZN»). Sahə isə BİR ədədin qiymətidir — düzgün rəqəmi də deyirik.
+      const perUnit = minQty > 0 ? Math.round((price / minQty) * 100) / 100 : null;
+      return {
+        ok: false,
+        error: `Pillədə BİR ədədin qiyməti yazılır və o, adi qiymətdən (${basePrice} AZN) kiçik olmalıdır.`
+          + (perUnit !== null && perUnit < basePrice
+            ? ` ${minQty} ədədə cəmi ${price} AZN istəyirsinizsə pillə qiymətinə ${perUnit} yazın.`
+            : ''),
+      };
+    }
     tiers.push({ minQty, price: Math.round(price * 100) / 100 });
   }
   if (tiers.length > MAX_TIERS) return { ok: false, error: `Ən çox ${MAX_TIERS} pillə ola bilər` };
