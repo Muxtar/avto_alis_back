@@ -4,7 +4,6 @@ import bcrypt from 'bcryptjs';
 import { adminAuth, requireAdmin, requirePermission, requireSuperAdmin, AuthRequest, generateToken, isAdminPhone, ADMIN_MODULES, SENSITIVE_MODULES, canAdminLogin, nationalPhone } from '../middleware/auth';
 import { authLimiter } from '../middleware/rateLimiter';
 import { createOtp } from '../services/otp';
-import { refund as kapitalRefund } from '../services/kapital';
 import { listFlags, setFlag, listNumbers, setNumber } from '../services/settings';
 import { checkAllServices } from '../services/serviceHealth';
 import { pushLive, pushPublicListings } from '../services/live';
@@ -2350,40 +2349,80 @@ router.put('/admin/returns/:id/override', requirePermission('returns'), async (r
     });
     if (!ret) { res.status(404).json({ success: false, message: 'İadə sorğusu tapılmadı' }); return; }
 
-    // If forcing refund, restore stock
+    // ── ADMİNİN «GERİ ÖDƏNİLDİ» QƏRARI ──
+    // Əvvəl burada birbaşa Kapital çağırılırdı: (1) YIĞIM sifarişlərində şərt
+    // heç vaxt ödənmirdi — pul QAYTARILMADAN status REFUNDED yazılırdı;
+    // (2) hesablaşma yenilənmirdi — satıcıya da tam məbləğ ödənilirdi;
+    // (3) təkrar çağırışda stok iki dəfə artırdı. İndi hər şey ortaq
+    // servisdən keçir: qıfıl, qismən iadə uçotu, təkrar cəhd, bildiriş.
     if (status === 'REFUNDED') {
-      if (ret.orderItem) {
-        try {
-          await prisma.listing.update({
-            where: { id: ret.orderItem.listingId },
-            data: { stock: { increment: ret.quantity } },
-          });
-        } catch { /* listing may be deleted */ }
-      } else {
-        for (const item of ret.order.items) {
-          try {
-            await prisma.listing.update({
-              where: { id: item.listingId },
-              data: { stock: { increment: item.quantity } },
-            });
-          } catch { /* listing may be deleted */ }
+      if (ret.status === 'REFUNDED') {
+        res.status(400).json({ success: false, message: 'Bu iadə artıq tamamlanıb' }); return;
+      }
+      const order = ret.order;
+      const requested = refundAmount !== undefined ? parseFloat(String(refundAmount)) : (ret.refundAmount ?? order.total);
+      if (!Number.isFinite(requested) || requested < 0) {
+        res.status(400).json({ success: false, message: 'Geri ödəmə məbləği düzgün deyil' }); return;
+      }
+      const remaining = Math.round((order.total - (order.refundedAmount || 0)) * 100) / 100;
+      const amt = Math.min(requested, remaining);
+
+      // 1) Pul — kartla ödənilibsə şlüzdən qaytarılır.
+      const isCardPaid = !!((order.gatewayRef || order.gatewayOrderId) && order.paymentStatus === 'PAID');
+      let cashRefund = false;
+      if (isCardPaid && amt > 0.009) {
+        const r = await refundOrderSafe(order.id, 'ADMIN', amt);
+        if (!r.ok) {
+          res.status(502).json({ success: false, message: 'Bank iadəsi alınmadı: ' + (r.error || ''), retrying: true }); return;
         }
+      } else {
+        // Nağd (və ya ödənilməmiş) sifariş: pul platformadan keçməyib —
+        // alıcıya NAĞD satıcı qaytarır. Alıcıya düzgün mətn göstərilsin deyə
+        // işarələnir; «bankdan qayıdacaq» kimi yanlış vəd verilmir.
+        cashRefund = true;
       }
 
-      // Kart ödənişidirsə — pulu Kapital Bank vasitəsilə həqiqətən geri qaytar.
-      const order = ret.order;
-      if (order.gatewayOrderId && order.gatewayPassword && order.paymentStatus === 'PAID') {
-        const amt = refundAmount !== undefined ? parseFloat(refundAmount) : (ret.refundAmount ?? order.total);
-        try {
-          await kapitalRefund(order.gatewayOrderId, order.gatewayPassword, amt);
-          await prisma.order.update({
-            where: { id: order.id },
-            data: { paymentStatus: 'REFUNDED', gatewayStatus: 'Refunded' },
-          });
-        } catch (err: any) {
-          res.status(502).json({ success: false, message: 'Bank iadəsi alınmadı: ' + err.message }); return;
+      // 2) Stok + referal — bir tranzaksiyada, təkrar icradan qorunmuş.
+      await prisma.$transaction(async (tx) => {
+        if (ret.orderItem) {
+          await tx.listing.update({
+            where: { id: ret.orderItem.listingId },
+            data: { stock: { increment: ret.quantity } },
+          }).catch(() => { /* elan silinib */ });
+        } else {
+          for (const item of order.items) {
+            await tx.listing.update({
+              where: { id: item.listingId },
+              data: { stock: { increment: item.quantity } },
+            }).catch(() => { /* elan silinib */ });
+          }
         }
-      }
+        if (order.referrerId && !order.referralVoided) {
+          await tx.order.update({ where: { id: order.id }, data: { referralVoided: true } });
+          await tx.notification.create({
+            data: {
+              userId: order.referrerId, type: 'REFERRAL', title: 'Referal komissiyası ləğv edildi',
+              body: `Sifariş #${order.id} qaytarıldığı üçün komissiya ləğv olundu.`, link: '/referral-earnings',
+            },
+          }).catch(() => {});
+        }
+      });
+
+      // 3) Hesablaşma — bu olmasa satıcıya da tam məbləğ ödənilə bilər.
+      await recordSettlement(order.id).catch(() => {});
+
+      // 4) Alıcıya qalıcı bildiriş (socket toast-dan əlavə).
+      await prisma.notification.create({
+        data: {
+          userId: ret.buyerId, type: 'ORDER', title: `Sifariş #${order.id}`,
+          body: cashRefund
+            ? `İadəniz təsdiqləndi. Məbləğ (${amt.toFixed(2)} AZN) nağd ödəniş olduğu üçün satıcı tərəfindən nağd qaytarılır.`
+            : `İadəniz təsdiqləndi — ${amt.toFixed(2)} AZN kartınıza qaytarıldı. Banka düşməsi bir neçə iş günü çəkə bilər.`,
+          link: '/orders',
+        },
+      }).catch(() => {});
+
+      await prisma.returnRequest.update({ where: { id: ret.id }, data: { cashRefund } }).catch(() => {});
     }
 
     const updated = await prisma.returnRequest.update({

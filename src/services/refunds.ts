@@ -39,6 +39,21 @@ export interface RefundResult {
 const MAX_ATTEMPTS = 5;
 
 /**
+ * ŞÜBHƏLİ XƏTA: şlüzə sorğu getdi, amma CAVAB gəlmədi (timeout, şəbəkə qırılması,
+ * 5xx). Belə halda pul çıxmış OLA BİLƏR — avtomatik təkrar cəhd ikiqat qaytarma
+ * riskidir. Şlüz açıq cavabla rədd edibsə (bizim get() JSON mesajı ilə throw
+ * edirsə) əməliyyat DƏQİQ baş tutmayıb — onu təhlükəsiz təkrarlamaq olar.
+ */
+function isAmbiguousError(e: any): boolean {
+  const msg = String(e?.message || '').toLowerCase();
+  const network = ['fetch failed', 'timeout', 'timed out', 'etimedout', 'econnreset', 'econnrefused',
+    'socket hang up', 'network', 'aborted', 'enotfound', 'eai_again'];
+  if (network.some((k) => msg.includes(k))) return true;
+  // HTTP səviyyəli xəta mətnləri: «(502)», «(504)» — cavab gövdəsi yoxdur.
+  return /\((5\d\d)\)/.test(msg);
+}
+
+/**
  * Sifarişin pulunu alıcıya qaytar. İdempotentdir — təkrar çağırmaq təhlükəsizdir.
  * Sifarişin statusunu DƏYİŞMİR (ləğv qərarını çağıran tərəf verir); yalnız
  * ödəniş tərəfini idarə edir.
@@ -102,7 +117,7 @@ export async function refundOrderSafe(
       }),
       prisma.refundAttempt.update({
         where: { orderId },
-        data: { status: 'DONE', doneAt: new Date(), lastError: null, attempts: { increment: 1 } },
+        data: { status: 'DONE', doneAt: new Date(), lastError: null, needsReview: false, attempts: { increment: 1 } },
       }),
     ]);
     await prisma.notification.create({
@@ -115,13 +130,21 @@ export async function refundOrderSafe(
     return { ok: true };
   } catch (e: any) {
     const msg = String(e?.message || 'Şlüz xətası').slice(0, 500);
+    const ambiguous = isAmbiguousError(e);
     const row = await prisma.refundAttempt.update({
       where: { orderId },
-      data: { status: 'FAILED', lastError: msg, attempts: { increment: 1 } },
+      data: {
+        status: 'FAILED',
+        lastError: (ambiguous ? 'ŞÜBHƏLİ (cavab gəlmədi, pul çıxmış ola bilər): ' : '') + msg,
+        needsReview: ambiguous,
+        attempts: { increment: 1 },
+      },
     }).catch(() => null);
-    console.error(`[refund] sifariş #${orderId} qaytarıla bilmədi (cəhd ${row?.attempts ?? '?'}): ${msg}`);
-    // Cəhdlər tükənibsə adminləri xəbərdar et — pul alıcıda deyil, bizdədir.
-    if ((row?.attempts ?? 0) >= MAX_ATTEMPTS) await notifyAdmins(orderId, sum, msg).catch(() => {});
+    console.error(`[refund] sifariş #${orderId} qaytarıla bilmədi (cəhd ${row?.attempts ?? '?'}${ambiguous ? ', ŞÜBHƏLİ' : ''}): ${msg}`);
+    // Şübhəli hal DƏRHAL adminə gedir — avtomatik təkrar cəhd olmayacaq.
+    if (ambiguous || (row?.attempts ?? 0) >= MAX_ATTEMPTS) {
+      await notifyAdmins(orderId, sum, ambiguous ? `ŞÜBHƏLİ: ${msg} — şlüzdə yoxlayın, təkrar göndərmə DAYANDIRILDI` : msg).catch(() => {});
+    }
     return { ok: false, error: msg };
   }
 }
@@ -130,7 +153,10 @@ export async function refundOrderSafe(
 export async function retryFailedRefunds(): Promise<number> {
   let done = 0;
   const rows = await prisma.refundAttempt.findMany({
-    where: { status: 'FAILED', attempts: { lt: MAX_ATTEMPTS } },
+    // ŞÜBHƏLİ sətirlər (needsReview) BURAYA DÜŞMÜR: pul çıxmış ola bilər,
+    // avtomatik təkrar göndərmək alıcıya ikinci dəfə pul qaytarmaq deməkdir.
+    // Onları admin şlüzdə yoxlayıb /admin/refunds-dan həll edir.
+    where: { status: 'FAILED', needsReview: false, attempts: { lt: MAX_ATTEMPTS } },
     orderBy: { updatedAt: 'asc' },
     take: 25,
   }).catch(() => []);
@@ -142,14 +168,33 @@ export async function retryFailedRefunds(): Promise<number> {
   return done;
 }
 
-// PENDING sətir asılı qalıbsa (proses ölüb) 15 dəqiqədən sonra FAILED et ki,
-// təkrar cəhd mexanizmi onu götürə bilsin — əks halda qıfıl əbədi bağlı qalar.
+/**
+ * PENDING sətir asılı qalıbsa (proses ölüb, sorğu yarımçıq qalıb) 15 dəqiqədən
+ * sonra qıfılı aç — əks halda sifariş üçün bir daha qaytarma başladıla bilməz.
+ *
+ * DİQQƏT: belə sətir ŞÜBHƏLİdir — şlüzə sorğu getmiş və pul çıxmış ola bilər.
+ * Ona görə status FAILED + needsReview olur: avtomatik təkrar cəhd YOXDUR,
+ * admin şlüzdə yoxlayıb qərar verir. (Əvvəl bu sətirlər avtomatik təkrar
+ * göndərilirdi — ikiqat qaytarmanın əsas mənbəyi bu idi.)
+ */
 export async function unstickPendingRefunds(): Promise<void> {
   const cutoff = new Date(Date.now() - 15 * 60 * 1000);
+  const stuck = await prisma.refundAttempt.findMany({
+    where: { status: 'PENDING', updatedAt: { lt: cutoff } },
+    select: { orderId: true, amount: true },
+  }).catch(() => []);
+  if (!stuck.length) return;
   await prisma.refundAttempt.updateMany({
     where: { status: 'PENDING', updatedAt: { lt: cutoff } },
-    data: { status: 'FAILED', lastError: 'Cəhd yarımçıq qaldı (server yenidən başladı?)' },
+    data: {
+      status: 'FAILED',
+      needsReview: true,
+      lastError: 'ŞÜBHƏLİ: cəhd yarımçıq qaldı (server yenidən başladı?) — pul çıxmış ola bilər, şlüzdə yoxlayın',
+    },
   }).catch(() => {});
+  for (const r of stuck) {
+    await notifyAdmins(r.orderId, r.amount, 'Qaytarma yarımçıq qaldı — şlüzdə yoxlayın, avtomatik təkrar göndərmə DAYANDIRILDI').catch(() => {});
+  }
 }
 
 // Ləğv olunmuş sifarişin stokunu geri qaytar. Ödənişdən ASILI DEYİL —

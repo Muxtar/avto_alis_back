@@ -856,6 +856,9 @@ model ReturnRequest {
   reasonText   String?
   quantity     Int
   refundAmount Float?
+  // Nağd ödənişdə pul platformadan keçmir — satıcı alıcıya NAĞD qaytarır.
+  // Bu bayraq alıcıya «bankdan qayıdacaq» əvəzinə düzgün mətn göstərmək üçündür.
+  cashRefund   Boolean      @default(false)
   sellerNote   String?
   adminNote    String?
   createdAt    DateTime     @default(now())
@@ -1626,6 +1629,11 @@ model RefundAttempt {
   status    String    @default("PENDING") // PENDING | DONE | FAILED
   attempts  Int       @default(0)
   lastError String?
+  // ŞÜBHƏLİ CƏHD: şlüzə sorğu getdi, amma cavab gəlmədi (timeout/şəbəkə) və ya
+  // sətir yarımçıq qaldı. Pul ÇIXMIŞ ola bilər — avtomatik təkrar cəhd
+  // İKİQAT qaytarma deməkdir, ona görə belə sətirlər yalnız admin baxışı ilə
+  // həll olunur (retryFailedRefunds onları götürmür).
+  needsReview Boolean @default(false)
   provider  String?
   adminNote String? // admin əl ilə həll edibsə (məs. bankdan köçürüldü)
   doneAt    DateTime?
