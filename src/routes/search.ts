@@ -6,6 +6,7 @@ import { analyzeImage } from '../services/aiText';
 import { imageToSearchQuery, visionSearchEnabled } from '../services/visionSearchAI';
 import { adminAuth, AuthRequest } from '../middleware/auth';
 import { imageSearchLimiter, webSearchLimiter } from '../middleware/rateLimiter';
+import { searchWords } from '../services/searchTerms';
 import { webSearch, webSearchEnabled, socialHandle, WebResult, type SearchMode } from '../services/webSearchAI';
 import { enrichProfiles, isApifyConfigured } from '../services/apifyProfiles';
 import { fetchPreviews, fallbackAvatar, probeProfiles, probeHandle, looksLikeHandle } from '../services/socialPreview';
@@ -260,11 +261,17 @@ router.post('/search/web', webSearchLimiter, adminAuth, async (req: AuthRequest,
 // GET /api/search/cities-summary — returns aggregated counts of active
 // listings + distinct sellers per city. Powers the /locations browse page.
 // Public endpoint — no auth required so anyone can browse.
-// GET /api/professionals?q=<peşə>&city=<şəhər> — peşəyə görə mütəxəssis axtarışı.
+// GET /api/professionals?q=<peşə>&city=<şəhər>&match=profession — mütəxəssis axtarışı.
+//
+// `match=profession` → YALNIZ peşə üzrə axtarır (ad üzrə yox). Bu rejim ana
+// axtarış üçündür: «proqramçı» yazanda həmin xidməti verən şəxslər çıxsın,
+// amma şəxsin ADI ilə axtarış ana səhifəyə deyil, CHAT bölməsinə aiddir.
+// Default (match verilməyəndə) ad + peşə — chat axtarışı və «İxtisas» tabı.
 router.get('/professionals', async (req: Request, res: Response) => {
   try {
     const q = String(req.query.q || '').trim();
     const city = String(req.query.city || '').trim();
+    const byProfessionOnly = String(req.query.match || '').toLowerCase() === 'profession';
     const where: any = { isBlocked: false };
     // Yalnız ixtisası olan istifadəçilər; q peşə VƏ YA ad ilə uyğun gəlir
     // (ad yalnız ixtisas sahibi üçün — istifadəçi tələbi).
@@ -275,7 +282,18 @@ router.get('/professionals', async (req: Request, res: Response) => {
         hasProfession,
         // q peşə (əsas/massiv) VƏ YA ad üzrə uyğun gəlir. Massivdə `has` dəqiq uyğunluq
         // (sektor seçicisindən tam ad gəlir); əsas profession isə `contains` (sərbəst mətn).
-        { OR: [{ profession: { contains: q, mode: 'insensitive' } }, { professions: { has: q } }, { name: { contains: q, mode: 'insensitive' } }] },
+        {
+          // Söz kökü ilə də axtarılır: «proqramçılar» → «proqramçı»,
+          // «santexniki» → «santexnik». Əks halda şəkilçili söz tapılmırdı.
+          OR: [
+            ...Array.from(new Set([q, ...searchWords(q)])).flatMap((w) => ([
+              { profession: { contains: w, mode: 'insensitive' } as any },
+              { professions: { has: w } as any },
+            ])),
+            // Ad üzrə uyğunluq yalnız ümumi rejimdə (chat / İxtisas tabı).
+            ...(byProfessionOnly ? [] : [{ name: { contains: q, mode: 'insensitive' } as any }]),
+          ],
+        },
       ];
     } else {
       where.AND = [hasProfession];
