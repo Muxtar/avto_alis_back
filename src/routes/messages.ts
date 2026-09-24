@@ -327,6 +327,64 @@ router.delete('/messages/thread/:partnerId', adminAuth, async (req: AuthRequest,
   }
 });
 
+/**
+ * BÜTÜN SÖHBƏTLƏRİ MƏNDƏ SİL (toplu).
+ *
+ * Əvvəl söhbətləri yalnız bir-bir silmək olurdu. Bu marşrut eyni məntiqi
+ * (yalnız MƏNDƏ gizlətmə — qarşı tərəfdə mesajlar qalır) bütün yazışmalara
+ * tətbiq edir.
+ *
+ * Süzgəclər:
+ *   segment = PERSONAL | BUSINESS  → yalnız həmin axın silinir (verilməsə hamısı)
+ *   scope   = direct | groups | all (default: all)
+ * Qruplarda yalnız ÜZV olduğum söhbətlərə toxunulur; qrupdan çıxmır —
+ * sadəcə yazışma məndə gizlənir.
+ */
+router.delete('/messages/threads/all', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.adminId!;
+    const scope = String(req.query.scope || 'all').toLowerCase();
+    const seg = segWhere(req.query.segment);
+    let deleted = 0;
+
+    if (scope === 'direct' || scope === 'all') {
+      const r = await prisma.message.updateMany({
+        where: {
+          conversationId: null,
+          AND: [
+            { OR: [{ senderId: userId }, { receiverId: userId }] },
+            seg,
+          ],
+          NOT: { deletedForIds: { has: userId } },
+        },
+        data: { deletedForIds: { push: userId } },
+      });
+      deleted += r.count;
+    }
+
+    // Qrup söhbətləri yalnız «hamısı» və ya «groups» seçimində və yalnız
+    // ŞƏXSİ axın süzgəci olmayanda silinir (qrup mesajları seqmentə düşmür).
+    if ((scope === 'groups' || scope === 'all') && String(req.query.segment || '').toUpperCase() !== 'BUSINESS') {
+      const memberships = await prisma.conversationMember.findMany({
+        where: { userId },
+        select: { conversationId: true },
+      });
+      const ids = memberships.map((m) => m.conversationId);
+      if (ids.length) {
+        const r = await prisma.message.updateMany({
+          where: { conversationId: { in: ids }, NOT: { deletedForIds: { has: userId } } },
+          data: { deletedForIds: { push: userId } },
+        });
+        deleted += r.count;
+      }
+    }
+
+    res.json({ success: true, deleted });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
 // Qrup söhbətini məndə sil — qrupun bütün mesajları yalnız məndə gizlədilir.
 router.delete('/messages/group/:conversationId', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
