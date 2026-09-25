@@ -1159,7 +1159,8 @@ router.get('/orders/buying', adminAuth, async (req: AuthRequest, res: Response) 
       // sanki heç yaranmayıb (nə alıcı, nə satıcı görür). Nağd/wallet normal görünür.
       where: { buyerId: req.adminId!, hiddenForBuyer: false, OR: [{ paymentMethod: { not: 'CARD' } }, { paymentStatus: 'PAID' }] },
       include: {
-        items: true,
+        // Kart görünüşü üçün məhsulun ilk şəkli.
+        items: { include: { listing: { select: { images: true } } } },
         seller: {
           select: {
             id: true, name: true, phone: true,
@@ -1200,7 +1201,8 @@ router.get('/orders/selling', adminAuth, async (req: AuthRequest, res: Response)
       // Ödənilməmiş KART sifarişi satıcıya da görünmür (uğursuz ödənişdə qəbul/rədd çıxmasın).
       where: { sellerId: req.adminId!, hiddenForSeller: false, OR: [{ paymentMethod: { not: 'CARD' } }, { paymentStatus: 'PAID' }] },
       include: {
-        items: true,
+        // Kart görünüşü üçün məhsulun ilk şəkli.
+        items: { include: { listing: { select: { images: true } } } },
         buyer: { select: { id: true, name: true, phone: true } },
         buyerObject: { select: { id: true, name: true } },
         referrer: { select: { id: true, name: true, profession: true } },
