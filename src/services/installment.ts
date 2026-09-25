@@ -5,15 +5,19 @@
 // Necə işləyir: alıcı planı (məs. 6 ay) seçir, sifariş kartla ödənilir.
 // Kapital Bank sifarişinin təsvirinə «TAKSIT=N» yazılır — bank ödənişi
 // BirKart/taksit kartı sahibi üçün N aya bölür, merchant (biz) isə tam
-// məbləği alır. YIĞIM (MAGNET) API-də taksit göstəricisi YOXDUR — ona görə
-// şlüz YIĞIM olanda taksit ümumiyyətlə təklif edilmir (vəd edib yerinə
-// yetirməmək olmasın).
+// məbləği alır.
+// YIĞIM: API-də ay parametri yoxdur — YIĞIM taksiti öz kart səhifəsində
+// təklif edir (ABB, Bank of Baku, Kapital Bank kartları), alıcı ayı orada
+// seçir. Biz taksit bölməsi olan şablonu (YIGIM_TEMPLATE_INSTALLMENT) açırıq;
+// saytdakı ay seçimi təxmini hesablamadır. Şablon təyin olunmayıbsa taksit
+// təklif edilmir.
 //
 // Admin paneldən idarə olunur (services/settings): planlar (installment_mN),
 // minimal məbləğ, hər planın bank komissiyası (installment_fee_mN) və
 // komissiyanı kimin ödədiyi (installment_buyer_pays_fee).
 import { resolveFlag, getNumber } from './settings';
 import { activeProvider } from './paymentGateway';
+import { installmentConfigured as yigimInstallmentConfigured } from './yigimPay';
 
 // Mümkün bütün planlar — hansının aktiv olduğunu admin seçir.
 export const ALL_INSTALLMENT_MONTHS = [2, 3, 6, 9, 12, 18, 24] as const;
@@ -33,6 +37,8 @@ export interface InstallmentConfig {
   minAmount: number;
   buyerPaysFee: boolean;
   provider: string;
+  // YIĞIM: ay sayını alıcı bankın (YIĞIM) ödəniş səhifəsində seçir — saytdakı seçim təxminidir.
+  monthsChosenOnBankPage: boolean;
 }
 
 export async function getInstallmentConfig(): Promise<InstallmentConfig> {
@@ -49,10 +55,10 @@ export async function getInstallmentConfig(): Promise<InstallmentConfig> {
   }
   let reason: string | null = null;
   if (!enabled) reason = 'Hissəli ödəniş hazırda deaktivdir';
-  else if (provider !== 'kapital') reason = 'Cari ödəniş şlüzü taksiti dəstəkləmir';
-  else if (!toKapital) reason = 'Taksitin banka ötürülməsi deaktivdir';
+  else if (provider === 'yigim' && !yigimInstallmentConfigured()) reason = 'YIĞIM taksit şablonu hələ qoşulmayıb';
+  else if (provider === 'kapital' && !toKapital) reason = 'Taksitin banka ötürülməsi deaktivdir';
   else if (!months.length) reason = 'Aktiv taksit planı yoxdur';
-  return { available: !reason, reason, months, fees, minAmount, buyerPaysFee, provider };
+  return { available: !reason, reason, months, fees, minAmount, buyerPaysFee, provider, monthsChosenOnBankPage: provider === 'yigim' };
 }
 
 // Elanın taksit parametrləri — satıcının seçimi.

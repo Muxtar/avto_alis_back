@@ -41,6 +41,11 @@ export interface CreatedPayment {
 export async function createPayment(input: CreateInput): Promise<CreatedPayment> {
   const provider = activeProvider();
   if (provider === 'yigim') {
+    // TAKSİT: YIĞIM-də ay sayı API ilə ötürülmür — alıcı onu YIĞIM-in kart
+    // səhifəsində seçir. Biz yalnız taksit bölməsi olan şablonu açırıq.
+    if (input.installmentMonths && !yigim.installmentConfigured()) {
+      throw new Error('YIĞIM taksit şablonu (YIGIM_TEMPLATE_INSTALLMENT) təyin olunmayıb');
+    }
     // İstifadəçi WebView-da ödənişi bitirdikdən sonra saytına qayıtsın deyə
     // şablona back-url/fail-url ötürürük (callback ayrıca server webhook-udur).
     const fe = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/$/, '');
@@ -52,13 +57,11 @@ export async function createPayment(input: CreateInput): Promise<CreatedPayment>
       language: input.language,
       callbackUrl: `${input.callbackBase}/api/payment/yigim/callback`,
       type: 'SMS',
-      saveCard: input.saveCard,
+      saveCard: input.saveCard && !input.installmentMonths,
+      installment: !!input.installmentMonths,
       extra,
     });
     return { provider, redirectUrl: r.url, ref: input.reference, gatewayOrderId: null, password: null, status: null };
-  }
-  if (input.installmentMonths && provider !== 'kapital') {
-    throw new Error('Cari ödəniş şlüzü hissəli ödənişi dəstəkləmir');
   }
   const k = await kapital.createOrder({
     amount: input.amount,

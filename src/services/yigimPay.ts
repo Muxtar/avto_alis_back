@@ -17,6 +17,11 @@ const MERCHANT = process.env.YIGIM_MERCHANT || '';
 const API_KEY = process.env.YIGIM_API_KEY || '';
 const BILLER = process.env.YIGIM_BILLER || '';
 const TEMPLATE = process.env.YIGIM_TEMPLATE || '';
+// TAKSİT: YIĞIM taksiti öz kart səhifəsində təklif edir — alıcı ayı orada seçir
+// (ABB, Bank of Baku, Kapital Bank kartları). API-də ay parametri YOXDUR; taksit
+// bölməsi olan kart səhifəsi ayrıca ŞABLONLA açılır. Şablonun adını YIĞIM verir.
+const TEMPLATE_INSTALLMENT = process.env.YIGIM_TEMPLATE_INSTALLMENT || '';
+export function installmentConfigured(): boolean { return isConfigured() && !!TEMPLATE_INSTALLMENT; }
 const CURRENCY_AZN = '944';
 
 export function isConfigured(): boolean {
@@ -58,6 +63,7 @@ export interface YigimCreateInput {
   // Şablonun "geri qayıt" düymələri üçün: name=value;name=value (URL-encoded).
   // Adətən back-url/fail-url — istifadəçi ödənişdən sonra saytına qaytarılsın.
   extra?: string;
+  installment?: boolean; // taksit bölməsi olan kart səhifəsi (YIGIM_TEMPLATE_INSTALLMENT)
 }
 
 export interface YigimCreated { url: string; code: number; message: string; }
@@ -73,7 +79,7 @@ export async function createPayment(input: YigimCreateInput): Promise<YigimCreat
     amount: coins,
     currency: CURRENCY_AZN,
     biller: BILLER,
-    template: TEMPLATE,
+    template: input.installment ? TEMPLATE_INSTALLMENT : TEMPLATE,
     language: input.language || 'az',
     description: input.description,
     callback: input.callbackUrl,

@@ -9,6 +9,7 @@ router.get('/installment/config', async (_req, res: Response) => {
     const c = await getInstallmentConfig();
     res.json({
       success: true, available: c.available, reason: c.reason, minAmount: c.minAmount, buyerPaysFee: c.buyerPaysFee,
+      provider: c.provider, monthsChosenOnBankPage: c.monthsChosenOnBankPage,
       months: c.months, plans: c.months.map((m) => ({ months: m, feePercent: c.fees[m] || 0 })), allMonths: ALL_INSTALLMENT_MONTHS,
     });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
