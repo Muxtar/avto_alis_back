@@ -780,6 +780,10 @@ model Order {
   // SELLER → satıcının qazancından çıxılır. Hər iki halda satıcının hesablaşmasında nəzərə alınır.
   installmentFee      Float           @default(0)
   installmentFeePayer String?
+  // MAĞAZADAN GÖTÜRMƏ: satıcı «təhvil verdim» dedi → alıcının təsdiqi gözlənilir.
+  // pickupConfirmBy keçərsə sistem təsdiqləyir; alıcı «götürmədim» desə mübahisə açılır.
+  pickupHandedAt      DateTime?
+  pickupConfirmBy     DateTime?
   // Şlüzün ödəniş detalları (YIĞIM /payment/status: issuer, fee, method, extra…) —
   // taksitin faktiki ay sayı və bank məlumatı buradan oxunur.
   gatewayDetails      Json?

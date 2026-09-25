@@ -34,6 +34,7 @@ export interface DeliveryChoice {
 export interface ValidatedLine {
   listingId: number; title: string; quantity: number; unit: number; lineTotal: number;
   sellerId: number; referralCartId: number | null; note: string | null;
+  groupBuy: boolean; // elanda birgə alış açıqdır → sifariş pəncərəyə qoşulmalıdır
 }
 
 /**
@@ -59,8 +60,10 @@ export async function validateSharedItems(items: SharedItemInput[], delivery: De
       return { ok: false as const, message: `«${l.title}» fərdi satıcınındır — kartla (başqasının ödəməsi ilə) alına bilməz, yalnız satıcı ilə nağd` };
     }
     const tiers: Tier[] = (l.priceTiers || []).map((t) => ({ minQty: t.minQty, price: t.price }));
-    const unit = !groupBuyEnabled(l as any) && tiers.length ? unitPriceFor(l.price, tiers, qty) : l.price;
-    lines.push({ listingId: l.id, title: l.title, quantity: qty, unit, lineTotal: Math.round(unit * qty * 100) / 100, sellerId: l.userId, referralCartId: it.referralCartId ?? null, note: it.note ?? null });
+    // BİRGƏ ALIŞ: tam qiymət ödənilir, pəncərə bağlananda fərq qaytarılır (checkout ilə eyni).
+    const gb = groupBuyEnabled(l as any);
+    const unit = !gb && tiers.length ? unitPriceFor(l.price, tiers, qty) : l.price;
+    lines.push({ listingId: l.id, title: l.title, quantity: qty, unit, lineTotal: Math.round(unit * qty * 100) / 100, sellerId: l.userId, referralCartId: it.referralCartId ?? null, note: it.note ?? null, groupBuy: gb });
   }
   if (opts.card) {
     // Biznes aktiv və təsdiqli olmalıdır.

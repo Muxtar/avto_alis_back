@@ -22,6 +22,7 @@ import {
   RETURN_SELLER_RESPOND_HOURS, RETURN_RECEIVE_DAYS, RETURN_REFUND_HOURS, RETURN_DISPUTE_DAYS, RETURN_METHODS, RETURN_METHOD_AZ,
 } from '../services/returnFlow';
 import { openDispute } from '../services/disputeDecision';
+import { isPickup, onPickupReady, onPickupHandedOver, onPickupReceived, PICKUP_DEADLINE_HOURS } from '../services/pickupFlow';
 import { computeOrderReferral } from '../services/referral';
 import { validateSharedItems, attachReferral, SHARE_LINK_DAYS, type SharedItemInput, type DeliveryChoice } from '../services/sharedCart';
 import { unitPriceFor, priceInfo, type Tier } from '../services/tierPricing';
@@ -342,13 +343,24 @@ router.post('/shared-cart/:token/pay', guestPayLimiter, async (req: AuthRequest,
     const payerName = String(req.body?.payerName || '').trim().slice(0, 80) || null;
     const payerPhone = String(req.body?.payerPhone || '').trim().slice(0, 32) || null;
     const payerUserId = req.adminId || null;
-    const bySeller = new Map<number, typeof v.lines>();
-    for (const l of v.lines) { const a = bySeller.get(l.sellerId) || []; a.push(l); bySeller.set(l.sellerId, a); }
+    // Sifarişlər SATICI + BİRGƏ ALIŞ pəncərəsi üzrə bölünür (checkout ilə eyni):
+    // birgə alış məhsulu öz sifarişini alır və pəncərəyə qoşulur — əks halda alıcı
+    // tam qiyməti ödəyib qrup endirimindən kənarda qalardı.
+    const byKey = new Map<string, { sellerId: number; groupBuyId: number | null; lines: typeof v.lines }>();
+    for (const l of v.lines) {
+      const gid = l.groupBuy ? await ensureActiveGroup(l.listingId, buyerId) : null;
+      const key = `${l.sellerId}:${gid ?? 0}`;
+      const e = byKey.get(key) || { sellerId: l.sellerId, groupBuyId: gid, lines: [] as typeof v.lines };
+      e.lines.push(l); byKey.set(key, e);
+    }
+    const feeCharged = new Set<number>();
 
     const created: { id: number; total: number }[] = [];
-    for (const [sellerId, lines] of bySeller.entries()) {
+    for (const { sellerId, groupBuyId, lines } of byKey.values()) {
       const goods = Math.round(lines.reduce((s, l) => s + l.lineTotal, 0) * 100) / 100;
-      const fee = v.feeBySeller.get(sellerId) || 0;
+      // Kuryer bir dəfə gəlir — çatdırılma haqqı satıcı üzrə BİR dəfə.
+      const fee = feeCharged.has(sellerId) ? 0 : (v.feeBySeller.get(sellerId) || 0);
+      if (fee > 0) feeCharged.add(sellerId);
       const ref = await computeOrderReferral(buyerId, lines.map((l) => ({ referralCartId: l.referralCartId, listingId: l.listingId, lineTotal: l.lineTotal })));
       const order = await prisma.order.create({
         data: {
@@ -361,7 +373,7 @@ router.post('/shared-cart/:token/pay', guestPayLimiter, async (req: AuthRequest,
           phone: sc.phone, latitude: sc.latitude, longitude: sc.longitude,
           note: sc.note || null,
           pickupCode: genPickupCode(),
-          sharedCartId: sc.id, payerName, payerPhone, payerUserId,
+          sharedCartId: sc.id, payerName, payerPhone, payerUserId, groupBuyId,
           referrerId: ref?.referrerId ?? null, referralPercent: ref?.percent ?? null, referralAmount: ref?.amount ?? null, referralCartId: ref?.referralCartId ?? null,
           items: { create: lines.map((l) => ({ listingId: l.listingId, quantity: l.quantity, price: l.unit, title: l.title, referralPercent: ref?.perItem.get(l.listingId)?.percent ?? null, referralAmount: ref?.perItem.get(l.listingId)?.amount ?? null })) },
         } as any,
@@ -447,6 +459,23 @@ router.post('/cart/import/:token', requireType(BUYER_TYPES), async (req: AuthReq
       }).catch(() => {});
     }
     res.json({ success: true, added, skipped });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
+// Alıcı: «Götürmədim» — satıcı təhvil verdiyini bildirib, amma alıcı məhsulu almayıb → mübahisə.
+router.post('/orders/:id/pickup-not-received', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const o = await prisma.order.findUnique({ where: { id: parseInt(String(req.params.id)) } });
+    if (!o || o.buyerId !== req.adminId) { res.status(404).json({ success: false, message: 'Sifariş tapılmadı' }); return; }
+    if (!isPickup(o) || o.status !== 'SHIPPED') { res.status(400).json({ success: false, message: 'Bu sifarişdə bu əməl mümkün deyil' }); return; }
+    const description = String(req.body?.description || '').trim();
+    if (description.length < 5) { res.status(400).json({ success: false, message: 'Nə baş verdiyini qısaca yazın' }); return; }
+    await prisma.order.update({ where: { id: o.id }, data: { pickupConfirmBy: null } }); // avtomatik təsdiq dayanır
+    const complaint = await openDispute({
+      complainantId: o.buyerId, targetUserId: o.sellerId, orderId: o.id, category: 'PICKUP_NOT_RECEIVED',
+      description: `Satıcı «təhvil verdim» dedi, amma alıcı məhsulu götürmədiyini bildirir: ${description}`, actor: 'BUYER',
+    });
+    res.json({ success: true, complaint });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
 
@@ -1268,7 +1297,10 @@ router.put('/orders/:id/status', adminAuth, async (req: AuthRequest, res: Respon
     // Alıcı: gözləyəni və ya təsdiqlənib hələ GÖNDƏRİLMƏMİŞ sifarişi ləğv edə bilər (ödənilibsə refund olunur);
     // göndərilən sifarişi "təhvil aldım" edə bilər. (Göndərildikdən sonra ləğv yoxdur — mallar yoldadır.)
     const BUYER_TRANSITIONS: Record<string, string[]> = { PENDING: ['CANCELLED'], CONFIRMED: ['CANCELLED'], SHIPPED: ['DELIVERED'] };
-    const allowed = isSeller ? (ORDER_TRANSITIONS[order.status] || []) : (BUYER_TRANSITIONS[order.status] || []);
+    const allowed = [...(isSeller ? (ORDER_TRANSITIONS[order.status] || []) : (BUYER_TRANSITIONS[order.status] || []))];
+    // MAĞAZADAN GÖTÜRMƏ: alıcı satıcıdan əvvəl də «götürdüm» deyə bilər; satıcı isə
+    // alıcının təhvil kodunu yazaraq birbaşa tamamlaya bilər (kod aşağıda yoxlanır).
+    if (isPickup(order) && order.status === 'CONFIRMED') allowed.push('DELIVERED');
 
     // ── ÇIXILMAZ VƏZİYYƏTİN QARŞISI: dağılmış çatdırılma ──
     //
@@ -1334,6 +1366,10 @@ router.put('/orders/:id/status', adminAuth, async (req: AuthRequest, res: Respon
     } else if (next === 'DELIVERED' || next === 'CANCELLED') {
       deliveryDeadline = null; // iş bitdi — nəzarətçi bir daha toxunmasın
     }
+    // Götürmədə alıcı mağazaya gec gələ bilər — avtomatik ləğv üçün daha uzun müddət.
+    if (next === 'CONFIRMED' && order.paymentMethod === 'CARD' && isPickup(order)) {
+      deliveryDeadline = new Date(Date.now() + Math.max(PICKUP_DEADLINE_HOURS, await getDeliveryDeadlineHours()) * 3600 * 1000);
+    }
     // Təhvil tarixi — 14 günlük qaytarma müddəti buradan sayılır.
     const deliveredAt = next === 'DELIVERED' && !order.deliveredAt ? new Date() : undefined;
 
@@ -1368,6 +1404,13 @@ router.put('/orders/:id/status', adminAuth, async (req: AuthRequest, res: Respon
         ...(deliveredAt ? { deliveredAt } : {}),
       },
     });
+
+    // MAĞAZADAN GÖTÜRMƏ bildirişləri.
+    if (isPickup(order)) {
+      if (next === 'CONFIRMED') onPickupReady(order.id).catch(() => {});
+      if (next === 'SHIPPED') await onPickupHandedOver(order.id).catch(() => {});
+      if (next === 'DELIVERED' && isBuyer) onPickupReceived(order.id, 'BUYER').catch(() => {});
+    }
 
     // Satıcı təsdiqləyəndə Yango kuryerinə göndər. isYangoConfigured() yoxlaması BURADA
     // deyil — dispatchOrderToYango özü yoxlayır və uğursuzluq səbəbini (token yoxdur,

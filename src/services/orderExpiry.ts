@@ -10,6 +10,7 @@ import { notifyExpiredListings } from './listingExpiry';
 import { runDisputeDeadlines } from './disputeDecision';
 import { expireVips } from './vip';
 import { releaseReferralLedgers } from './referral';
+import { autoConfirmPickups } from './pickupFlow';
 
 const prisma = new PrismaClient();
 
@@ -280,6 +281,8 @@ export function startOrderExpiryJob() {
     runDisputeDeadlines().catch((e) => console.error('[orderExpiry] runDisputeDeadlines:', e?.message));
     // Satışı başlamış, amma stoku götürülməmiş sifarişlər (təhlükəsizlik şəbəkəsi).
     syncCommittedStock().catch((e) => console.error('[orderExpiry] syncCommittedStock:', e?.message));
+    // Götürmə: satıcı təhvil verdi, alıcı cavab vermədi → avtomatik təsdiq.
+    autoConfirmPickups().catch((e) => console.error('[orderExpiry] autoConfirmPickups:', e?.message));
     // Qaytarma müddəti bitmiş referal komissiyaları ödənilə bilən et.
     releaseReferralLedgers().catch(() => {});
     // Müddəti bitmiş VIP elanları adi elana çevir.

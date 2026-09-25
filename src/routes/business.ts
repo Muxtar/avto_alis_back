@@ -3,6 +3,7 @@ import { recordSettlement } from '../services/settlement';
 import { validateIban } from '../services/iban';
 import { Prisma, PrismaClient } from '@prisma/client';
 import { commitStockForOrder, restoreStockForOrder } from '../services/refunds';
+import { isPickup, onPickupReady, onPickupHandedOver } from '../services/pickupFlow';
 import { adminAuth, requirePermission, AuthRequest } from '../middleware/auth';
 import { upload, docUpload, UPLOADS_DIR } from '../middleware/upload';
 import { processImages } from '../middleware/imageProcess';
@@ -1061,7 +1062,15 @@ router.put('/me/business-orders/:orderId/status', adminAuth, async (req: AuthReq
     if (status === 'CANCELLED' && order.status !== 'CANCELLED') {
       await restoreStockForOrder(order.id).catch(() => {});
     }
-    const updated = await prisma.order.update({ where: { id: orderId }, data: { status: status as any } });
+    // Təhvil tarixi — qaytarma müddəti və hesablaşma buradan sayılır (əvvəl yazılmırdı).
+    const updated = await prisma.order.update({
+      where: { id: orderId },
+      data: { status: status as any, ...(status === 'DELIVERED' && !order.deliveredAt ? { deliveredAt: new Date(), pickupConfirmBy: null } : {}) },
+    });
+    if (isPickup(order)) {
+      if (status === 'CONFIRMED') onPickupReady(order.id).catch(() => {});
+      if (status === 'SHIPPED') await onPickupHandedOver(order.id).catch(() => {});
+    }
 
     // Satıcı hesablaşması — status dəyişdi. BU ÇAĞIRIŞ OLMADAN biznesin
     // "çatdırıldı" etdiyi sifariş ledger-də PENDING qalır və heç vaxt

@@ -44,6 +44,7 @@ export const CATEGORY_AZ: Record<string, string> = {
   DEFECTIVE: 'Qüsurlu məhsul', DAMAGED: 'Zədələnmiş məhsul', NOT_AS_DESCRIBED: 'Təsvirə uyğun deyil',
   WRONG_ITEM: 'Səhv məhsul', CHANGED_MIND: 'Bəyənmədim / fikrimi dəyişdim', RETURN_REJECTED: 'İadə əsassız rədd edildi',
   RETURN_NOT_RECEIVED: 'Satıcı qaytarılan məhsulu təsdiqləmir', RETURN_DAMAGED: 'Qaytarılan məhsul zədəli/fərqlidir',
+  PICKUP_NOT_RECEIVED: 'Məhsul mağazadan götürülməyib',
   FRAUD: 'Fırıldaqçılıq', FAKE_INFO: 'Yalan məlumat', RUDE: 'Kobud davranış', TIME_WASTED: 'Vaxt itkisi', OTHER: 'Digər',
 };
 
