@@ -23,6 +23,7 @@ import {
 } from '../services/returnFlow';
 import { openDispute } from '../services/disputeDecision';
 import { computeOrderReferral } from '../services/referral';
+import { validateSharedItems, attachReferral, SHARE_LINK_DAYS, type SharedItemInput, type DeliveryChoice } from '../services/sharedCart';
 import { unitPriceFor, priceInfo, type Tier } from '../services/tierPricing';
 import { groupQty, RETURN_WINDOW_DAYS, groupBuyEnabled, activeGroup, ensureActiveGroup } from '../services/groupBuy';
 
@@ -109,49 +110,154 @@ router.get('/cart', adminAuth, async (req: AuthRequest, res: Response) => {
 });
 
 // ====================== SƏBƏT PAYLAŞIMI ======================
+// Məntiq və yoxlamalar: services/sharedCart.ts.
 const SHARE_ALPHABET = 'abcdefghijklmnopqrstuvwxyz0123456789';
 function shareToken(len = 10): string {
   let s = '';
   for (let i = 0; i < len; i++) s += SHARE_ALPHABET[Math.floor(Math.random() * SHARE_ALPHABET.length)];
   return s;
 }
+const shareNum = (v: any) => (v != null && v !== '' && Number.isFinite(parseFloat(String(v))) ? parseFloat(String(v)) : null);
 
-// Səbəti paylaş — cari səbətin surətini link kimi yarat.
+function deliveryFromShare(sc: { deliveryType: string; deliveryMethod: string | null; latitude: number | null; longitude: number | null }): DeliveryChoice {
+  return {
+    deliveryType: sc.deliveryType === 'PICKUP' ? 'PICKUP' : 'DELIVERY',
+    deliveryMethod: sc.deliveryType === 'PICKUP' ? null : (sc.deliveryMethod === 'SELF' ? 'SELF' : sc.deliveryMethod === 'COURIER' ? 'COURIER' : null),
+    latitude: sc.latitude, longitude: sc.longitude,
+  };
+}
+
+// Səbəti paylaş.
+//   deliveryMode=SENDER    → «başqası ödəsin»: ünvan + çatdırılma üsulunu paylaşan seçir, açan yalnız ödəyir
+//   deliveryMode=RECIPIENT → açan öz səbətinə atıb adi qaydada alır; kind=BUNDLE → «paket / resept»
+// Məhsullar ya səbətdən (itemIds), ya da birbaşa (items:[{listingId,quantity}]) gəlir.
+// notes: {cartItemId|listingId: "qeyd"} — hər məhsula istifadə qeydi (resept üçün).
 router.post('/cart/share', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
-    const cart = await prisma.cart.findUnique({ where: { userId: req.adminId! }, include: { items: true } });
-    if (!cart || cart.items.length === 0) { res.status(400).json({ success: false, message: 'Səbət boşdur' }); return; }
-    // Yalnız seçilmiş məhsulları paylaş (itemIds verilməyibsə hamısı).
-    const rawSel: any[] = Array.isArray(req.body.itemIds) ? req.body.itemIds : [];
-    const selIds = new Set(rawSel.map((x) => parseInt(String(x))).filter((n) => n > 0));
-    const chosen = selIds.size ? cart.items.filter((i) => selIds.has(i.id)) : cart.items;
-    if (chosen.length === 0) { res.status(400).json({ success: false, message: 'Məhsul seçilməyib' }); return; }
-    const items = chosen.map((i) => ({ listingId: i.listingId, quantity: i.quantity }));
-    // Çatdırılma rejimi: SENDER (göndərənin ünvanına) və ya RECIPIENT (alıcı seçir).
+    const me = req.adminId!;
+    const notes: Record<string, string> = req.body?.notes && typeof req.body.notes === 'object' ? req.body.notes : {};
+    const noteFor = (...keys: any[]) => { for (const k of keys) { const v = notes[String(k)]; if (typeof v === 'string' && v.trim()) return v.trim().slice(0, 300); } return null; };
+    let items: SharedItemInput[] = [];
+    let chosenCartItemIds: number[] = [];
+    if (Array.isArray(req.body?.items) && req.body.items.length) {
+      items = req.body.items.slice(0, 50).map((i: any) => ({ listingId: parseInt(String(i.listingId)), quantity: Math.max(1, parseInt(String(i.quantity)) || 1), note: (i.note ? String(i.note).trim().slice(0, 300) : null) || noteFor(i.listingId) }))
+        .filter((i: SharedItemInput) => Number.isFinite(i.listingId));
+    } else {
+      const cart = await prisma.cart.findUnique({ where: { userId: me }, include: { items: true } });
+      if (!cart || cart.items.length === 0) { res.status(400).json({ success: false, message: 'Səbət boşdur' }); return; }
+      const rawSel: any[] = Array.isArray(req.body.itemIds) ? req.body.itemIds : [];
+      const selIds = new Set(rawSel.map((x) => parseInt(String(x))).filter((n) => n > 0));
+      const chosen = selIds.size ? cart.items.filter((i) => selIds.has(i.id)) : cart.items;
+      chosenCartItemIds = chosen.map((i) => i.id);
+      items = chosen.map((i) => ({ listingId: i.listingId, quantity: i.quantity, note: noteFor(i.id, i.listingId) }));
+    }
+    if (items.length === 0) { res.status(400).json({ success: false, message: 'Məhsul seçilməyib' }); return; }
+    if (items.some((i) => i.listingId && false)) void 0;
+
     const deliveryMode = String(req.body.deliveryMode || '').toUpperCase() === 'SENDER' ? 'SENDER' : 'RECIPIENT';
-    const num = (v: any) => (v != null && v !== '' ? parseFloat(String(v)) : null);
-    const loc = deliveryMode === 'SENDER' ? {
-      address: req.body.address?.trim() || null, city: req.body.city?.trim() || null,
-      latitude: num(req.body.latitude), longitude: num(req.body.longitude), phone: req.body.phone?.trim() || null,
-    } : {};
-    // Məhsulu KİM alacaq: paylaşanın özü (default) və ya seçilmiş QEYDİYYATLI dost.
-    // Dost qeydiyyatlı olmalıdır — sifariş, bildiriş və ünvan ona bağlanır.
-    // (Ödəyən isə qeydiyyatlı olmaya bilər; link hamıya açıqdır.)
+    const kind = String(req.body.kind || '').toUpperCase() === 'BUNDLE' ? 'BUNDLE' : 'CART';
+    const note = req.body?.note ? String(req.body.note).trim().slice(0, 1000) : null;
+
+    // Məhsulu KİM alacaq / linki KİMƏ göndəririk.
+    //   SENDER: recipientUserId → məhsul dosta gedir (yoxsa paylaşanın özünə).
+    //   RECIPIENT/BUNDLE: recipientUserId → linki həmin şəxsə bildiriş + mesajla göndəririk.
     let recipientUserId: number | null = null;
     const rawRecipient = parseInt(String(req.body?.recipientUserId ?? ''));
-    if (rawRecipient > 0 && rawRecipient !== req.adminId!) {
+    if (rawRecipient > 0 && rawRecipient !== me) {
       const r = await prisma.user.findUnique({ where: { id: rawRecipient }, select: { id: true, isBlocked: true, type: true } });
       if (!r) { res.status(400).json({ success: false, message: 'Seçilmiş şəxs saytda qeydiyyatlı deyil' }); return; }
       if (r.isBlocked) { res.status(400).json({ success: false, message: 'Seçilmiş şəxsin hesabı bloklanıb' }); return; }
       if (!BUYER_TYPES.includes(r.type)) { res.status(400).json({ success: false, message: 'Bu hesab məhsul ala bilməz' }); return; }
       recipientUserId = r.id;
     }
+
+    // SENDER: ünvan + çatdırılma üsulu İNDİ seçilir və ödəniş qaydaları ilə yoxlanır —
+    // ödəyən sonra heç nə seçmir, yalnız ödəyir.
+    let loc: any = {};
+    let delivery: DeliveryChoice | null = null;
+    if (deliveryMode === 'SENDER') {
+      const dType = String(req.body.deliveryType || 'DELIVERY').toUpperCase() === 'PICKUP' ? 'PICKUP' : 'DELIVERY';
+      const dMethod = dType === 'PICKUP' ? null : (String(req.body.deliveryMethod || 'COURIER').toUpperCase() === 'SELF' ? 'SELF' : 'COURIER');
+      loc = {
+        address: req.body.address?.trim() || null, city: req.body.city?.trim() || null,
+        latitude: shareNum(req.body.latitude), longitude: shareNum(req.body.longitude), phone: req.body.phone?.trim() || null,
+        deliveryType: dType, deliveryMethod: dMethod,
+      };
+      if (dType === 'DELIVERY' && !loc.address) { res.status(400).json({ success: false, message: 'Çatdırılma ünvanını seçin' }); return; }
+      if (!loc.phone) { res.status(400).json({ success: false, message: 'Əlaqə telefonunu yazın (kuryer/satıcı zəng edə bilsin)' }); return; }
+      delivery = { deliveryType: dType, deliveryMethod: dMethod as any, latitude: loc.latitude, longitude: loc.longitude };
+    }
+    const v = await validateSharedItems(items, delivery, { card: deliveryMode === 'SENDER' });
+    if (!v.ok) { res.status(400).json({ success: false, message: v.message }); return; }
+
+    // Qiymət surəti (ödəyən qiymət dəyişibsə xəbərdar olsun) + referal (paylaşan uyğundursa).
+    const snap = items.map((i) => ({ ...i, price: v.lines.find((l) => l.listingId === i.listingId)?.unit }));
+    const withRef = await attachReferral(me, snap);
+
     let token = shareToken();
     for (let i = 0; i < 5; i++) {
-      try { await prisma.sharedCart.create({ data: { token, userId: req.adminId!, title: req.body?.title?.trim() || null, items, deliveryMode, recipientUserId, ...loc } }); break; }
-      catch { token = shareToken(); }
+      try {
+        await prisma.sharedCart.create({
+          data: {
+            token, userId: me, title: req.body?.title?.trim()?.slice(0, 80) || null, items: withRef as any, deliveryMode, recipientUserId,
+            kind, note, expiresAt: new Date(Date.now() + SHARE_LINK_DAYS * 24 * 3600 * 1000), ...loc,
+          },
+        });
+        break;
+      } catch { token = shareToken(); }
     }
-    res.json({ success: true, token });
+
+    // Paket/link konkret şəxsə göndərilirsə — bildiriş + söhbətdə mesaj.
+    if (recipientUserId && deliveryMode !== 'SENDER') {
+      const meU = await prisma.user.findUnique({ where: { id: me }, select: { name: true, profession: true } });
+      const fe = (process.env.FRONTEND_URL || '').replace(/\/$/, '');
+      const label = kind === 'BUNDLE' ? 'məhsul paketi (resept)' : 'səbət';
+      const text = `${kind === 'BUNDLE' ? '📋' : '🛒'} Sizin üçün ${label} hazırladım${note ? `: ${note}` : ''}\n${fe}/shared/${token}`;
+      await prisma.message.create({ data: { senderId: me, receiverId: recipientUserId, content: text } }).catch(() => {});
+      await prisma.notification.create({
+        data: { userId: recipientUserId, type: 'MESSAGE', title: `${meU?.name || 'İstifadəçi'} sizə ${label} göndərdi`, body: `${items.length} məhsul${note ? ` — ${note.slice(0, 120)}` : ''}. Açıb səbətinizə əlavə edin.`, link: `/shared/${token}` },
+      }).catch(() => {});
+      pushLive(recipientUserId, { kind: 'notification', toast: `${meU?.name || 'İstifadəçi'} sizə ${label} göndərdi`, tone: 'info' });
+    }
+    // Paylaşılan məhsulları öz səbətindən çıxar (paket göndərəndə — öz alışı ilə qarışmasın).
+    if (req.body?.removeFromCart === true && chosenCartItemIds.length) {
+      await prisma.cartItem.deleteMany({ where: { id: { in: chosenCartItemIds }, cart: { userId: me } } }).catch(() => {});
+    }
+    res.json({ success: true, token, expiresAt: new Date(Date.now() + SHARE_LINK_DAYS * 24 * 3600 * 1000), referral: withRef.some((i) => i.referralCartId) });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
+// Mənim paylaşdığım linklər (status ilə).
+router.get('/me/shared-carts', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const rows = await prisma.sharedCart.findMany({ where: { userId: req.adminId! }, orderBy: { createdAt: 'desc' }, take: 100 });
+    const orderIds = rows.flatMap((r) => r.orderIds);
+    const orders = orderIds.length ? await prisma.order.findMany({ where: { id: { in: orderIds } }, select: { id: true, paymentStatus: true, status: true, total: true } }) : [];
+    const recips = await prisma.user.findMany({ where: { id: { in: rows.map((r) => r.recipientUserId).filter((x): x is number => !!x) } }, select: { id: true, name: true } });
+    const now = new Date();
+    res.json({
+      success: true,
+      links: rows.map((r) => {
+        const os = orders.filter((o) => r.orderIds.includes(o.id));
+        return {
+          token: r.token, title: r.title, kind: r.kind, deliveryMode: r.deliveryMode, note: r.note, createdAt: r.createdAt, expiresAt: r.expiresAt,
+          itemCount: Array.isArray(r.items) ? (r.items as any[]).length : 0,
+          recipient: recips.find((u) => u.id === r.recipientUserId)?.name || null,
+          state: r.cancelledAt ? 'CANCELLED' : os.some((o) => o.paymentStatus === 'PAID') ? 'PAID' : r.expiresAt && r.expiresAt < now ? 'EXPIRED' : 'OPEN',
+          paidTotal: os.filter((o) => o.paymentStatus === 'PAID').reduce((s, o) => s + o.total, 0),
+        };
+      }),
+    });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
+// Paylaşan linki dayandırır.
+router.delete('/shared-cart/:token', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const sc = await prisma.sharedCart.findUnique({ where: { token: String(req.params.token) } });
+    if (!sc || sc.userId !== req.adminId) { res.status(404).json({ success: false, message: 'Link tapılmadı' }); return; }
+    await prisma.sharedCart.update({ where: { id: sc.id }, data: { cancelledAt: new Date() } });
+    res.json({ success: true });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
 
@@ -160,173 +266,125 @@ router.get('/shared-cart/:token', async (req: AuthRequest, res: Response) => {
   try {
     const sc = await prisma.sharedCart.findUnique({ where: { token: req.params.token } });
     if (!sc) { res.status(404).json({ success: false, message: 'Səbət tapılmadı' }); return; }
-    const by = await prisma.user.findUnique({ where: { id: sc.userId }, select: { id: true, name: true } });
-    const items = Array.isArray(sc.items) ? (sc.items as any[]) : [];
-    const ids = items.map((i) => i.listingId);
+    const by = await prisma.user.findUnique({ where: { id: sc.userId }, select: { id: true, name: true, profession: true, avatar: true } });
+    const raw = Array.isArray(sc.items) ? (sc.items as any[]) : [];
     const listings = await prisma.listing.findMany({
-      where: { id: { in: ids }, OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }] },
-      select: { id: true, title: true, price: true, images: true, stock: true, businessId: true, user: { select: { id: true, name: true } } },
+      where: { id: { in: raw.map((i) => Number(i.listingId)) } },
+      select: { id: true, title: true, price: true, images: true, stock: true, status: true, archivedAt: true, expiresAt: true, businessId: true, businessObjectId: true, user: { select: { id: true, name: true } } },
     });
-    const byId = new Map(listings.map((l) => [l.id, l]));
-    const result = items
-      .map((i) => { const l = byId.get(i.listingId); return l ? { ...l, quantity: i.quantity } : null; })
-      .filter(Boolean);
-    const total = result.reduce((s: number, x: any) => s + x.price * x.quantity, 0);
-    // Məhsulu alacaq şəxs (paylaşan, ya da onun seçdiyi qeydiyyatlı dost).
+    const now = new Date();
+    const result = raw.map((i) => {
+      const l = listings.find((x) => x.id === Number(i.listingId));
+      if (!l) return null;
+      const onSale = l.status === 'APPROVED' && !l.archivedAt && (!l.expiresAt || l.expiresAt > now);
+      return {
+        ...l, quantity: i.quantity, note: i.note || null,
+        available: onSale && l.stock >= i.quantity,
+        unavailableReason: !onSale ? 'Satışda deyil' : l.stock < i.quantity ? `Stokda ${l.stock} ədəd var` : null,
+        sharedPrice: i.price ?? null, priceChanged: i.price != null && Math.abs(i.price - l.price) > 0.009,
+        referral: !!i.referralCartId,
+      };
+    }).filter(Boolean) as any[];
+    const total = result.filter((x) => x.available).reduce((s: number, x: any) => s + x.price * x.quantity, 0);
     const recipient = sc.recipientUserId
       ? await prisma.user.findUnique({ where: { id: sc.recipientUserId }, select: { id: true, name: true, avatar: true } })
       : by;
-    // Link artıq ödənilibmi? (təkrar ödənişin qarşısını alır)
     const paidOrder = sc.orderIds.length
       ? await prisma.order.findFirst({ where: { id: { in: sc.orderIds }, paymentStatus: 'PAID' }, select: { id: true } })
       : null;
+    const closed = sc.cancelledAt ? 'Paylaşan bu linki dayandırıb' : sc.expiresAt && sc.expiresAt < now ? 'Linkin müddəti bitib' : null;
     res.json({
-      success: true, title: sc.title, by, items: result, total, count: result.length,
-      deliveryMode: sc.deliveryMode, recipient,
-      // Ünvan paylaşan tərəfindən əvvəlcədən seçilibsə link BİRBAŞA ödənişə hazırdır
-      // (ödəyən heç nə seçmir — sadəcə ödəyir). Qeydiyyat tələb olunmur.
-      // Link kartla ödənilə bilər (ödənilməyibsə). İki rejim var:
-      //   SENDER    → ünvan hazırdır, açan yalnız ödəyir (hesab lazım DEYİL)
-      //   RECIPIENT → açan məhsulu özü alır: ünvanı O yazır və hesabı OLMALIDIR
-      payable: !paidOrder && (sc.deliveryMode === 'SENDER' ? !!sc.address : true),
-      needsAddress: sc.deliveryMode !== 'SENDER',
+      success: true, title: sc.title, kind: sc.kind, note: sc.note, by, items: result, total, count: result.length,
+      deliveryMode: sc.deliveryMode, recipient, expiresAt: sc.expiresAt, closed,
+      // SENDER: ünvan + çatdırılma paylaşan tərəfindən seçilib → açan yalnız ödəyir (hesab lazım deyil).
+      // RECIPIENT/BUNDLE: açan məhsulları öz səbətinə atıb adi qaydada alır.
+      payable: !paidOrder && !closed && sc.deliveryMode === 'SENDER' && result.every((x: any) => x.available),
+      needsAddress: false,
       paid: !!paidOrder,
-      // SENDER rejimində göndərənin çatdırılma ünvanı (alıcı görür, dəyişə bilmir).
+      delivery: sc.deliveryMode === 'SENDER' ? {
+        type: sc.deliveryType, method: sc.deliveryMethod,
+        address: sc.address, city: sc.city, latitude: sc.latitude, longitude: sc.longitude, phone: sc.phone,
+      } : null,
       deliveryAddress: sc.deliveryMode === 'SENDER' ? { address: sc.address, city: sc.city, latitude: sc.latitude, longitude: sc.longitude, phone: sc.phone } : null,
     });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// "PAYLAŞ — BAŞQASI ÖDƏSİN" (qonaq ödənişi)
-//
-// Axın: paylaşan hər şeyi seçir (məhsullar + çatdırılma ünvanı) → linki göndərir
-// → linki açan BİRBAŞA ödəniş pəncərəsinə düşür → ödəyəndə sifariş verilir.
-// Ödəyən saytda QEYDİYYATLI OLMAYA BİLƏR — bu endpoint auth tələb etmir.
-// Məhsul isə həmişə qeydiyyatlı şəxsə gedir: paylaşanın özünə, ya da onun
-// seçdiyi qeydiyyatlı dosta (buyerId). Ödəyənin adı/telefonu sifarişdə saxlanılır.
-//
-// Ödəniş kartla və şlüz üzərindən gedir; uğurlu callback-dən sonra mövcud axın
-// işləyir: stok azalır, satıcı təsdiqi gözlənilir, vaxtında təsdiqləməsə pul
-// avtomatik geri qaytarılır.
-// Eyni IP-dən 10 dəqiqədə 12 ödəniş cəhdi (link açıq olduğu üçün sui-istifadəyə qarşı).
+// "BAŞQASI ÖDƏSİN" (qonaq ödənişi) — yalnız SENDER linki.
+// Paylaşan hər şeyi seçib (məhsullar, ünvan/konum, çatdırılma üsulu). Linki açan
+// YALNIZ ödəyir, hesabı olmaya bilər. Sifariş adi kart sifarişi kimi yaranır:
+// pillə qiyməti, çatdırılma haqqı (Yango), konum, referal — checkout ilə eyni.
 const guestPayLimiter = rateLimit(12, 10 * 60 * 1000);
 
 router.post('/shared-cart/:token/pay', guestPayLimiter, async (req: AuthRequest, res: Response) => {
   try {
     const sc = await prisma.sharedCart.findUnique({ where: { token: String(req.params.token) } });
     if (!sc) { res.status(404).json({ success: false, message: 'Link tapılmadı' }); return; }
-    // Təkrar ödənişin qarşısını al.
+    if (sc.cancelledAt) { res.status(410).json({ success: false, message: 'Paylaşan bu linki dayandırıb' }); return; }
+    if (sc.expiresAt && sc.expiresAt < new Date()) { res.status(410).json({ success: false, message: 'Linkin müddəti bitib' }); return; }
+    if (sc.deliveryMode !== 'SENDER') {
+      res.status(400).json({ success: false, message: 'Bu linkdə məhsulları öz səbətinizə əlavə edib adi qaydada alırsınız', importInstead: true }); return;
+    }
     if (sc.orderIds.length) {
       const already = await prisma.order.findFirst({ where: { id: { in: sc.orderIds }, paymentStatus: 'PAID' }, select: { id: true } });
       if (already) { res.status(409).json({ success: false, message: 'Bu link artıq ödənilib' }); return; }
     }
-
-    // ── İKİ SSENARİ ──────────────────────────────────────────────────────────
-    // A) SENDER — məhsul PAYLAŞANA (və ya onun seçdiyi qeydiyyatlı dosta) gedir.
-    //    Ünvanı paylaşan əvvəlcədən yazıb. Linki açan YALNIZ ödəyir; onun
-    //    saytda hesabı olmasına ehtiyac yoxdur.
-    // B) RECIPIENT — məhsulu LİNKİ AÇAN özü alır. Ona görə ünvanı O yazır və
-    //    hesabı OLMALIDIR: sifariş, bildiriş, qaytarma və çatdırılma onun
-    //    hesabına bağlanır (istifadəçinin öz qoyduğu qayda).
-    let buyerId: number;
-    let delAddress: string | null;
-    let delCity: string | null;
-    let delPhone: string | null;
-
-    if (sc.deliveryMode === 'SENDER') {
-      if (!sc.address) { res.status(400).json({ success: false, message: 'Bu linkdə çatdırılma ünvanı yoxdur' }); return; }
-      buyerId = sc.recipientUserId || sc.userId;
-      delAddress = sc.address; delCity = sc.city; delPhone = sc.phone;
-    } else {
-      if (!req.adminId) {
-        res.status(401).json({ success: false, message: 'Məhsulu özünüz aldığınız üçün hesabınıza daxil olmalısınız', needLogin: true });
-        return;
-      }
-      buyerId = req.adminId;
-      const rawAddr = String(req.body?.address || '').trim();
-      delCity = String(req.body?.city || '').trim() || null;
-      delPhone = String(req.body?.phone || '').trim() || null;
-      if (!rawAddr) { res.status(400).json({ success: false, message: 'Çatdırılma ünvanınızı seçin' }); return; }
-      // Order-də ayrıca `city` sahəsi yoxdur — şəhər ünvanın əvvəlinə qatılır.
-      delAddress = [delCity, rawAddr].filter(Boolean).join(', ');
-    }
-
+    const buyerId = sc.recipientUserId || sc.userId;
     const buyer = await prisma.user.findUnique({ where: { id: buyerId }, select: { id: true, isBlocked: true } });
     if (!buyer || buyer.isBlocked) { res.status(400).json({ success: false, message: 'Alıcı hesabı əlçatan deyil' }); return; }
+    if (req.adminId && req.adminId === buyerId && !req.body?.selfPay) void 0;
 
-    const items = Array.isArray(sc.items) ? (sc.items as any[]) : [];
-    const ids = items.map((i) => Number(i.listingId));
-    const listings = await prisma.listing.findMany({
-      where: { id: { in: ids }, OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }] },
-      select: { id: true, title: true, price: true, stock: true, userId: true },
-    });
-    const byId = new Map(listings.map((l) => [l.id, l]));
-    const rows = items
-      .map((i) => { const l = byId.get(Number(i.listingId)); return l ? { ...l, quantity: Math.max(1, Number(i.quantity) || 1) } : null; })
-      .filter(Boolean) as any[];
-    if (rows.length === 0) { res.status(400).json({ success: false, message: 'Bu linkdə aktiv məhsul qalmayıb' }); return; }
-    // Stok yoxlaması (KARTDA stok yalnız ödəniş təsdiqindən sonra azalır — burada
-    // sadəcə əvvəlcədən xəbərdarlıq edirik ki, ödəyən boş yerə pul verməsin).
-    const short = rows.find((r) => r.stock < r.quantity);
-    if (short) { res.status(400).json({ success: false, message: `"${short.title}" üçün kifayət qədər stok yoxdur` }); return; }
+    const items = (Array.isArray(sc.items) ? (sc.items as any[]) : []) as SharedItemInput[];
+    const v = await validateSharedItems(items, deliveryFromShare(sc), { card: true });
+    if (!v.ok) { res.status(400).json({ success: false, message: v.message }); return; }
 
     const payerName = String(req.body?.payerName || '').trim().slice(0, 80) || null;
     const payerPhone = String(req.body?.payerPhone || '').trim().slice(0, 32) || null;
-    // Ödəyən qeydiyyatlıdırsa (öz hesabı ilə açıbsa) id-si də yazılır — məcburi deyil.
     const payerUserId = req.adminId || null;
-
-    const bySeller = new Map<number, any[]>();
-    for (const r of rows) { const a = bySeller.get(r.userId) || []; a.push(r); bySeller.set(r.userId, a); }
+    const bySeller = new Map<number, typeof v.lines>();
+    for (const l of v.lines) { const a = bySeller.get(l.sellerId) || []; a.push(l); bySeller.set(l.sellerId, a); }
 
     const created: { id: number; total: number }[] = [];
-    await prisma.$transaction(async (tx) => {
-      for (const [sellerId, its] of bySeller.entries()) {
-        const total = its.reduce((sum: number, it: any) => sum + it.price * it.quantity, 0);
-        const order = await tx.order.create({
-          data: {
-            buyerId, sellerId, total,
-            status: 'PENDING', paymentMethod: 'CARD', paymentStatus: 'PENDING',
-            deliveryType: 'DELIVERY', address: delAddress, phone: delPhone,
-            pickupCode: genPickupCode(),
-            sharedCartId: sc.id, payerName, payerPhone, payerUserId,
-            items: { create: its.map((it: any) => ({ listingId: it.id, quantity: it.quantity, price: it.price, title: it.title })) },
-          },
-          select: { id: true, total: true },
-        });
-        created.push(order);
-      }
-    });
+    for (const [sellerId, lines] of bySeller.entries()) {
+      const goods = Math.round(lines.reduce((s, l) => s + l.lineTotal, 0) * 100) / 100;
+      const fee = v.feeBySeller.get(sellerId) || 0;
+      const ref = await computeOrderReferral(buyerId, lines.map((l) => ({ referralCartId: l.referralCartId, listingId: l.listingId, lineTotal: l.lineTotal })));
+      const order = await prisma.order.create({
+        data: {
+          buyerId, sellerId, subtotal: goods, total: Math.round((goods + fee) * 100) / 100,
+          status: 'PENDING', paymentMethod: 'CARD', paymentStatus: 'PENDING',
+          deliveryType: sc.deliveryType === 'PICKUP' ? 'PICKUP' : 'DELIVERY',
+          deliveryMethod: sc.deliveryType === 'PICKUP' ? null : (sc.deliveryMethod === 'SELF' ? 'SELF' : 'COURIER'),
+          deliveryFee: fee,
+          address: sc.deliveryType === 'PICKUP' ? null : [sc.city, sc.address].filter(Boolean).join(', '),
+          phone: sc.phone, latitude: sc.latitude, longitude: sc.longitude,
+          note: sc.note || null,
+          pickupCode: genPickupCode(),
+          sharedCartId: sc.id, payerName, payerPhone, payerUserId,
+          referrerId: ref?.referrerId ?? null, referralPercent: ref?.percent ?? null, referralAmount: ref?.amount ?? null, referralCartId: ref?.referralCartId ?? null,
+          items: { create: lines.map((l) => ({ listingId: l.listingId, quantity: l.quantity, price: l.unit, title: l.title, referralPercent: ref?.perItem.get(l.listingId)?.percent ?? null, referralAmount: ref?.perItem.get(l.listingId)?.amount ?? null })) },
+        } as any,
+        select: { id: true, total: true },
+      });
+      created.push(order);
+    }
 
-    // Şlüzdə ödəniş yarat (tranzaksiyadan SONRA — xarici çağırış).
-    const grandTotal = created.reduce((sum, o) => sum + o.total, 0);
+    const grandTotal = Math.round(created.reduce((sum, o) => sum + o.total, 0) * 100) / 100;
     try {
       const pay = await createGatewayPayment({
-        amount: grandTotal,
-        reference: `SH${created[0].id}`,
-        title: 'tradixai',
-        description: `Paylaşılan alış #${created.map((o) => o.id).join(',')}`,
-        callbackBase: PUBLIC_BACKEND_URL,
+        amount: grandTotal, reference: `SH${created[0].id}`, title: 'tradixai',
+        description: `Paylaşılan alış #${created.map((o) => o.id).join(',')}`, callbackBase: PUBLIC_BACKEND_URL,
       });
       await prisma.order.updateMany({
         where: { id: { in: created.map((o) => o.id) } },
-        data: {
-          gatewayProvider: pay.provider, gatewayRef: pay.ref, gatewayOrderId: pay.gatewayOrderId,
-          gatewayPassword: pay.password, gatewayStatus: pay.status,
-        },
+        data: { gatewayProvider: pay.provider, gatewayRef: pay.ref, gatewayOrderId: pay.gatewayOrderId, gatewayPassword: pay.password, gatewayStatus: pay.status },
       });
-      await prisma.sharedCart.update({
-        where: { id: sc.id },
-        data: { orderIds: { set: [...sc.orderIds, ...created.map((o) => o.id)] } },
-      }).catch(() => {});
+      await prisma.sharedCart.update({ where: { id: sc.id }, data: { orderIds: { set: [...sc.orderIds, ...created.map((o) => o.id)] } } }).catch(() => {});
       res.json({ success: true, paymentUrl: pay.redirectUrl, orderIds: created.map((o) => o.id), total: grandTotal });
     } catch (err: any) {
-      // Ödəniş başlaya bilmədi → yaradılmış sifarişləri ləğv et (stok toxunulmayıb).
       console.error('[shared-cart/pay] gateway failed:', err.message);
-      await prisma.order.updateMany({
-        where: { id: { in: created.map((o) => o.id) } },
-        data: { status: 'CANCELLED', paymentStatus: 'FAILED' },
-      }).catch(() => {});
+      await prisma.order.updateMany({ where: { id: { in: created.map((o) => o.id) } }, data: { status: 'CANCELLED', paymentStatus: 'FAILED' } }).catch(() => {});
       res.status(502).json({ success: false, message: 'Ödəniş başladıla bilmədi: ' + err.message });
     }
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
@@ -338,11 +396,7 @@ router.get('/shared-cart/:token/status', async (req: AuthRequest, res: Response)
     const sc = await prisma.sharedCart.findUnique({ where: { token: String(req.params.token) }, select: { orderIds: true } });
     if (!sc) { res.status(404).json({ success: false, message: 'Link tapılmadı' }); return; }
     if (!sc.orderIds.length) { res.json({ success: true, status: 'NONE' }); return; }
-    const orders = await prisma.order.findMany({
-      where: { id: { in: sc.orderIds } },
-      select: { id: true, paymentStatus: true, status: true, total: true },
-      orderBy: { id: 'desc' },
-    });
+    const orders = await prisma.order.findMany({ where: { id: { in: sc.orderIds } }, select: { id: true, paymentStatus: true, status: true, total: true }, orderBy: { id: 'desc' } });
     const paid = orders.filter((o) => o.paymentStatus === 'PAID');
     res.json({
       success: true,
@@ -352,86 +406,47 @@ router.get('/shared-cart/:token/status', async (req: AuthRequest, res: Response)
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
 
-// Paylaşılan səbəti birbaşa al (linki alan ödəyir). Rejimə görə çatdırılma:
-// SENDER → göndərənin ünvanına; RECIPIENT → alıcının verdiyi ünvana.
-router.post('/shared-cart/:token/checkout', requireType(BUYER_TYPES), async (req: AuthRequest, res: Response) => {
-  try {
-    const sc = await prisma.sharedCart.findUnique({ where: { token: req.params.token } });
-    if (!sc) { res.status(404).json({ success: false, message: 'Səbət tapılmadı' }); return; }
-    const buyerId = req.adminId!;
-    const items = Array.isArray(sc.items) ? (sc.items as any[]) : [];
-    const ids = items.map((i) => Number(i.listingId));
-    const listings = await prisma.listing.findMany({
-      where: { id: { in: ids }, OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }] },
-      select: { id: true, title: true, price: true, stock: true, userId: true },
-    });
-    const byId = new Map(listings.map((l) => [l.id, l]));
-    const rows = items.map((i) => { const l = byId.get(Number(i.listingId)); return l ? { ...l, quantity: Math.max(1, Number(i.quantity) || 1) } : null; }).filter(Boolean) as any[];
-    if (rows.length === 0) { res.status(400).json({ success: false, message: 'Bu səbətdə aktiv məhsul yoxdur' }); return; }
-
-    // Çatdırılma ünvanı — rejimə görə.
-    const num = (v: any) => (v != null && v !== '' ? parseFloat(String(v)) : null);
-    const del = sc.deliveryMode === 'SENDER'
-      ? { address: sc.address, city: sc.city, phone: sc.phone }
-      : { address: req.body.address?.trim() || null, city: req.body.city?.trim() || null, phone: req.body.phone?.trim() || null };
-    if (!del.address) { res.status(400).json({ success: false, message: 'Çatdırılma ünvanı tələb olunur' }); return; }
-    void num;
-
-    const bySeller = new Map<number, any[]>();
-    for (const r of rows) { const a = bySeller.get(r.userId) || []; a.push(r); bySeller.set(r.userId, a); }
-
-    const createdIds: number[] = [];
-    await prisma.$transaction(async (tx) => {
-      for (const [sellerId, its] of bySeller.entries()) {
-        for (const it of its) {
-          // Stok burada AZALMIR — satıcı təsdiqləyəndə (commitStockForOrder). Yalnız mövcudluq yoxlanır.
-          const l = await tx.listing.findUnique({ where: { id: it.id }, select: { stock: true } });
-          if (!l || l.stock < it.quantity) throw new Error(`"${it.title}" üçün kifayət qədər stok yoxdur`);
-        }
-        const total = its.reduce((s: number, it: any) => s + it.price * it.quantity, 0);
-        const pickupCode = String(Math.floor(1000 + Math.random() * 9000));
-        const order = await tx.order.create({
-          data: {
-            buyerId, sellerId, total, status: 'PENDING', paymentMethod: 'CASH', paymentStatus: 'PENDING',
-            deliveryType: 'DELIVERY', address: del.address, phone: del.phone, pickupCode,
-            items: { create: its.map((it: any) => ({ listingId: it.id, quantity: it.quantity, price: it.price, title: it.title })) },
-          },
-        });
-        createdIds.push(order.id);
-        await tx.notification.create({ data: { userId: sellerId, type: 'ORDER', title: 'Yeni sifariş', body: `Paylaşılan səbətdən sifariş: ${total} AZN`, link: '/orders' } });
-      }
-    });
-    // Səbəti paylaşan şəxsə bildiriş.
-    if (sc.userId !== buyerId) {
-      await prisma.notification.create({
-        data: { userId: sc.userId, type: 'SYSTEM', title: 'Paylaşdığınız səbət alındı ✅',
-          body: sc.deliveryMode === 'SENDER' ? 'Ödəniş edildi — məhsullar sizin ünvanınıza göndərilir.' : 'Alıcı öz ünvanına sifariş verdi.', link: '/orders' },
-      }).catch(() => {});
-    }
-    res.json({ success: true, orders: createdIds });
-  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+// Köhnə «birbaşa nağd al» marşrutu checkout qaydalarını keçirdi — indi səbətə yönləndirir.
+router.post('/shared-cart/:token/checkout', requireType(BUYER_TYPES), async (_req: AuthRequest, res: Response) => {
+  res.status(410).json({ success: false, message: 'Məhsulları səbətinizə əlavə edib adi qaydada alın', importInstead: true });
 });
 
-// Paylaşılan səbəti öz səbətimə əlavə et (linki alan şəxs öz adından alır).
+// Paylaşılan səbəti / paketi öz səbətimə əlavə et (sonra adi checkout: öz ünvanım, Yango, kart/nağd).
 router.post('/cart/import/:token', requireType(BUYER_TYPES), async (req: AuthRequest, res: Response) => {
   try {
     const sc = await prisma.sharedCart.findUnique({ where: { token: req.params.token } });
     if (!sc) { res.status(404).json({ success: false, message: 'Səbət tapılmadı' }); return; }
+    if (sc.cancelledAt) { res.status(410).json({ success: false, message: 'Paylaşan bu linki dayandırıb' }); return; }
+    if (sc.expiresAt && sc.expiresAt < new Date()) { res.status(410).json({ success: false, message: 'Linkin müddəti bitib' }); return; }
     const items = Array.isArray(sc.items) ? (sc.items as any[]) : [];
+    const pick: number[] | null = Array.isArray(req.body?.listingIds) ? req.body.listingIds.map((x: any) => parseInt(String(x))) : null;
     let cart = await prisma.cart.findUnique({ where: { userId: req.adminId! } });
     if (!cart) cart = await prisma.cart.create({ data: { userId: req.adminId! } });
-    let added = 0;
+    let added = 0; const skipped: string[] = [];
+    const now = new Date();
     for (const it of items) {
       const lid = Number(it.listingId); const qty = Math.max(1, Number(it.quantity) || 1);
-      const listing = await prisma.listing.findUnique({ where: { id: lid }, select: { id: true, expiresAt: true } });
-      if (!listing || (listing.expiresAt && listing.expiresAt <= new Date())) continue;
-      // Paylaşılan səbətdən import — adi (qrupsuz) sətir.
+      if (pick && !pick.includes(lid)) continue;
+      const listing = await prisma.listing.findUnique({ where: { id: lid }, select: { id: true, title: true, userId: true, stock: true, status: true, archivedAt: true, expiresAt: true } });
+      if (!listing) continue;
+      if (listing.userId === req.adminId) { skipped.push(`${listing.title}: öz məhsulunuz`); continue; }
+      if (listing.status !== 'APPROVED' || listing.archivedAt || (listing.expiresAt && listing.expiresAt <= now)) { skipped.push(`${listing.title}: satışda deyil`); continue; }
+      if (listing.stock <= 0) { skipped.push(`${listing.title}: stokda yoxdur`); continue; }
+      // Referal (məs. həkimin tövsiyəsi) — link hələ etibarlıdırsa komissiya ona yazılır.
+      const referralCartId = it.referralCartId && sc.userId !== req.adminId ? Number(it.referralCartId) : null;
       const cur = await prisma.cartItem.findFirst({ where: { cartId: cart.id, listingId: lid, groupBuyId: null } });
-      if (cur) await prisma.cartItem.update({ where: { id: cur.id }, data: { quantity: cur.quantity + qty } });
-      else await prisma.cartItem.create({ data: { cartId: cart.id, listingId: lid, quantity: qty } });
+      const q = Math.min(listing.stock, (cur?.quantity || 0) + qty);
+      if (cur) await prisma.cartItem.update({ where: { id: cur.id }, data: { quantity: q, ...(referralCartId ? { referralCartId } : {}) } });
+      else await prisma.cartItem.create({ data: { cartId: cart.id, listingId: lid, quantity: Math.min(listing.stock, qty), referralCartId } });
       added++;
     }
-    res.json({ success: true, added });
+    if (!added) { res.status(400).json({ success: false, message: skipped.length ? `Heç bir məhsul əlavə olunmadı — ${skipped.join('; ')}` : 'Məhsul seçin' }); return; }
+    if (sc.userId !== req.adminId) {
+      await prisma.notification.create({
+        data: { userId: sc.userId, type: 'SYSTEM', title: sc.kind === 'BUNDLE' ? 'Göndərdiyiniz paket səbətə əlavə olundu' : 'Paylaşdığınız səbət açıldı', body: `${added} məhsul alıcının səbətinə əlavə olundu.`, link: '/shared-links' },
+      }).catch(() => {});
+    }
+    res.json({ success: true, added, skipped });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
 

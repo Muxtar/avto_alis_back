@@ -631,6 +631,13 @@ router.post('/me/listings', listingWriteLimiter, adminAuth, upload.array('images
         selfDeliveryNote: selfDeliveryOn ? (req.body.selfDeliveryNote?.trim() || null) : null,
         pickupOnly: req.body.pickupOnly === true || req.body.pickupOnly === 'true',
         weightKg: wKg,
+        // Referal: DEFAULT (proqramın qaydası) | ON (daxil) | OFF (xaric) + xüsusi faiz.
+        ...(['DEFAULT', 'ON', 'OFF'].includes(String(req.body.referralMode)) && { referralMode: String(req.body.referralMode) }),
+        ...(req.body.referralPercent !== undefined && {
+          referralPercent: req.body.referralPercent === '' || req.body.referralPercent === null || req.body.referralPercent === 'null'
+            ? null : Math.max(0, Math.min(90, parseFloat(String(req.body.referralPercent)) || 0)),
+        }),
+
         bookingType: isBookable ? validBookingType : null,
         maxGuests: isBookable && maxGuests ? parseInt(String(maxGuests)) : null,
         openTime: isBookable && openTime ? String(openTime).slice(0, 10) : null,
@@ -747,6 +754,13 @@ router.put('/me/listings/:id', adminAuth, upload.array('images', 5), processImag
         }),
         ...(req.body.selfDeliveryNote !== undefined && { selfDeliveryNote: req.body.selfDeliveryNote?.trim() || null }),
         ...(req.body.pickupOnly !== undefined && { pickupOnly: req.body.pickupOnly === true || req.body.pickupOnly === 'true' }),
+        // Referal: DEFAULT (proqramın qaydası) | ON (daxil) | OFF (xaric) + xüsusi faiz.
+        ...(['DEFAULT', 'ON', 'OFF'].includes(String(req.body.referralMode)) && { referralMode: String(req.body.referralMode) }),
+        ...(req.body.referralPercent !== undefined && {
+          referralPercent: req.body.referralPercent === '' || req.body.referralPercent === null || req.body.referralPercent === 'null'
+            ? null : Math.max(0, Math.min(90, parseFloat(String(req.body.referralPercent)) || 0)),
+        }),
+
         ...(req.body.weightKg !== undefined && { weightKg: req.body.weightKg !== '' && req.body.weightKg != null ? Math.max(0, parseFloat(String(req.body.weightKg))) : null }),
         ...(bookable !== undefined && (() => {
           const on = bookable === true || bookable === 'true';

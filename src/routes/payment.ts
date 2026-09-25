@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { PrismaClient } from '@prisma/client';
+import { pushLive } from '../services/live';
 import { adminAuth, requirePermission, AuthRequest } from '../middleware/auth';
 import { getOrderStatus, isPaidStatus } from '../services/kapital';
 import { refundOrder } from '../services/paymentGateway';
@@ -41,6 +42,21 @@ export async function settleOrders(where: { gatewayProvider?: string; gatewayRef
     }
 
     // Stok ödənişdə DEYİL, satıcı sifarişi təsdiqləyəndə azalır (commitStockForOrder).
+    // «Başqası ödəsin» linki ödənildi → paylaşana (və məhsulu alacaq dosta) xəbər.
+    if (!wasPaid) {
+      const shared = orders.filter((o: any) => o.sharedCartId);
+      if (shared.length) {
+        const sc = await prisma.sharedCart.findUnique({ where: { id: (shared[0] as any).sharedCartId }, select: { userId: true, recipientUserId: true, token: true } }).catch(() => null);
+        const total = shared.reduce((s2, o) => s2 + o.total, 0);
+        const payer = (shared[0] as any).payerName || 'Qonaq';
+        for (const uid of new Set([sc?.userId, sc?.recipientUserId].filter((x): x is number => !!x))) {
+          await prisma.notification.create({
+            data: { userId: uid, type: 'ORDER', title: 'Paylaşılan səbət ödənildi ✅', body: `${payer} ${total.toFixed(2)} AZN ödədi — sifariş satıcının təsdiqini gözləyir.`, link: '/orders' },
+          }).catch(() => {});
+          pushLive(uid, { kind: 'order', toast: 'Paylaşdığınız səbət ödənildi ✅', tone: 'success' });
+        }
+      }
+    }
     if (!wasPaid) {
       const byBuyer = new Map<number, number>();
       for (const o of orders) if (o.pointsEarned > 0) byBuyer.set(o.buyerId, (byBuyer.get(o.buyerId) || 0) + o.pointsEarned);
