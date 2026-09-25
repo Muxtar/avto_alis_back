@@ -82,11 +82,44 @@ export async function getStatus(order: { gatewayProvider: string | null; gateway
   return { status: status || '', paid: kapital.isPaidStatus(status) };
 }
 
+// Şəbəkə/cavabsız xəta — pulun çıxıb-çıxmadığı bilinmir; alternativ yola keçmək OLMAZ.
+function isTransportError(e: any): boolean {
+  const msg = String(e?.message || '').toLowerCase();
+  return e instanceof TypeError || /fetch failed|timeout|timed out|econn|socket hang up|aborted|enotfound|eai_again|\((5\d\d)\)/.test(msg);
+}
+
 // İadə (provider-ə görə).
+//
+// PULUN QAYTARILMASININ İKİ YOLU VAR və hansının işlədiyi ödənişin bank
+// hesablaşmasından (settlement) keçib-keçmədiyindən asılıdır:
+//   • YIĞIM: /payment/refund — yalnız settlement-dən SONRA; ondan əvvəl
+//     /payment/cancel (blokun qaytarılması). Settlement-dən əvvəl refund
+//     «System error» qaytarır.
+//   • Kapital: Refund — settlement-dən sonra; eyni gün Reversal (reverse).
+// Əvvəl yalnız refund çağırılırdı: satıcı təsdiqləmədiyi / ləğv etdiyi üçün
+// avtomatik qaytarma ödənişdən qısa müddət sonra olanda (settlement hələ
+// olmayıb) hər cəhd uğursuz olurdu və pul alıcıda ilişib qalırdı.
+// İndi refund rədd edilsə eyni məbləğlə ləğv/reversal yoxlanılır. Təhlükəsizdir:
+// ikisindən YALNIZ biri keçə bilər. Şəbəkə xətasında (nəticə bilinmir) ikinci
+// yola keçilmir — ikiqat qaytarma riski olmasın.
 export async function refundOrder(order: { gatewayProvider: string | null; gatewayRef: string | null; gatewayOrderId: number | null; gatewayPassword: string | null }, amount?: number): Promise<void> {
   if (order.gatewayProvider === 'yigim') {
-    await yigim.refund(order.gatewayRef || '', amount);
-    return;
+    const ref = order.gatewayRef || '';
+    try { await yigim.refund(ref, amount); return; }
+    catch (e1: any) {
+      if (isTransportError(e1)) throw e1;
+      let st = '';
+      try { st = (await yigim.getPaymentStatus(ref)).status; } catch { /* status alınmadı */ }
+      try { await yigim.cancel(ref, amount); return; }
+      catch (e2: any) {
+        throw new Error(`YIĞIM refund: ${e1?.message}; cancel: ${e2?.message}${st ? ` (ödəniş statusu: ${st})` : ''}`);
+      }
+    }
   }
-  await kapital.refund(order.gatewayOrderId!, order.gatewayPassword!, amount);
+  try { await kapital.refund(order.gatewayOrderId!, order.gatewayPassword!, amount); }
+  catch (e1: any) {
+    if (isTransportError(e1)) throw e1;
+    try { await kapital.reverse(order.gatewayOrderId!, order.gatewayPassword!, amount); }
+    catch (e2: any) { throw new Error(`Kapital refund: ${e1?.message}; reversal: ${e2?.message}`); }
+  }
 }
