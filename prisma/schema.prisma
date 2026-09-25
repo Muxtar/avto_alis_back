@@ -419,6 +419,10 @@ model Listing {
   // Müddət bitəndə sahibinə bildiriş göndərilib (təkrar göndərilməsin).
   // Elan yenilənəndə null-a qaytarılır — növbəti bitmədə yenə bildiriş gedir.
   expiryNotifiedAt     DateTime?
+  // VIP — ödənişli önə çıxarma. isVip=true olan elanlar siyahıda HƏMİŞƏ əvvəldə.
+  // vipUntil keçəndə iş (services/vip.ts) isVip-i söndürür.
+  isVip                Boolean         @default(false)
+  vipUntil             DateTime?
   // Biznes bağlantısı — elan bir obyektə (filiala) aiddirsə kart ödənişi mümkün olur.
   businessId           Int?
   businessObjectId     Int?
@@ -437,6 +441,7 @@ model Listing {
   priceTiers           PriceTier[] // çox alanda ucuz (könüllü)
   groupBuys            GroupBuy[]
 
+  @@index([isVip])
   @@index([userId, createdAt])
   @@index([category])
   @@index([price])
@@ -1450,7 +1455,7 @@ model BusinessFee {
   userId Int
   amount Float // ödəniş anındakı tarif (sonradan tarif dəyişsə də bu qalır)
 
-  /// BUSINESS = biznes yaratma haqqı · VERIFF = Veriff ilə kimlik doğrulaması
+  /// BUSINESS = biznes yaratma haqqı · VERIFF = Veriff ilə kimlik doğrulaması · VIP = elanı önə çıxarma
   purpose String @default("BUSINESS")
 
   // UNPAID → PAID (ödənildi, hələ istifadə olunmayıb) → USED (biznes yaradıldı)
@@ -1463,6 +1468,8 @@ model BusinessFee {
   gatewayPassword String?
 
   businessId Int? // hansı biznes üçün xərclənib (rədd olunsa geri açılır)
+  listingId  Int? // VIP: hansı elan üçün
+  vipDays    Int? // VIP: neçə günlük paket
   paidAt     DateTime?
   usedAt     DateTime?
   createdAt  DateTime  @default(now())

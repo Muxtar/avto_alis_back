@@ -8,6 +8,7 @@ import { cancelActiveYangoClaim } from '../routes/yango';
 import { closeExpiredGroups, settleDueGroups, syncGroupWindows } from './groupBuy';
 import { notifyExpiredListings } from './listingExpiry';
 import { runDisputeDeadlines } from './disputeDecision';
+import { expireVips } from './vip';
 
 const prisma = new PrismaClient();
 
@@ -276,6 +277,8 @@ export function startOrderExpiryJob() {
     // İadə/mübahisə müddətləri: cavabsız satıcı → avtomatik təsdiq, göndərilməyən
     // iadə → ləğv, qaytarılmayan pul → sistem qaytarır, cavabsız mübahisə → qərar.
     runDisputeDeadlines().catch((e) => console.error('[orderExpiry] runDisputeDeadlines:', e?.message));
+    // Müddəti bitmiş VIP elanları adi elana çevir.
+    expireVips().catch(() => {});
   };
   setTimeout(run, 30 * 1000);              // start-dan 30 san sonra ilk yoxlama
   setInterval(run, 10 * 60 * 1000);        // sonra hər 10 dəqiqə

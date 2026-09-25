@@ -18,6 +18,7 @@
 // Tarif 0 olarsa haqq ümumiyyətlə tələb olunmur (admin pulsuz edə bilər).
 
 import { PrismaClient } from '@prisma/client';
+import { activateVip } from './vip';
 import { getNumber } from './settings';
 
 const prisma = new PrismaClient();
@@ -159,6 +160,13 @@ export async function settleBusinessFee(
     if (f.status === 'USED' || f.status === 'REFUNDED') continue;   // artıq yekunlaşıb
     if (paid) {
       if (f.status === 'PAID') continue;                            // təkrar callback
+      // VIP ödənişi — elan dərhal VIP olur, haqq istifadə olunmuş sayılır.
+      if (f.purpose === 'VIP') {
+        const row = await prisma.businessFee.findUnique({ where: { id: f.id }, select: { listingId: true, vipDays: true } });
+        await prisma.businessFee.update({ where: { id: f.id }, data: { status: 'USED', paidAt: new Date(), usedAt: new Date() } });
+        if (row?.listingId && row.vipDays) await activateVip(row.listingId, row.vipDays).catch((e) => console.error('[vip] aktivləşmədi', f.id, e?.message));
+        continue;
+      }
       await prisma.businessFee.update({ where: { id: f.id }, data: { status: 'PAID', paidAt: new Date() } });
       const isVeriff = f.purpose === 'VERIFF';
       await prisma.notification.create({

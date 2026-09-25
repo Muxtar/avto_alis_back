@@ -110,7 +110,9 @@ router.get('/listings', async (req: Request, res: Response) => {
       year_asc: [{ year: 'asc' }, { id: 'desc' }],
       year_desc: [{ year: 'desc' }, { id: 'desc' }],
     };
-    const orderBy = sortMap[sort as string] || [{ createdAt: 'desc' }, { id: 'desc' }];
+    // VIP elanlar HƏR sıralamada əvvəldə gəlir (VIP bloku), hər blok öz daxilində
+    // seçilmiş sıralama ilə. Satıcının öz elanları / obyekt səhifəsi də eyni qaydada.
+    const orderBy: Prisma.ListingOrderByWithRelationInput[] = [{ isVip: 'desc' }, ...(sortMap[sort as string] || [{ createdAt: 'desc' }, { id: 'desc' }])];
 
     const [listings, total] = await Promise.all([
       prisma.listing.findMany({

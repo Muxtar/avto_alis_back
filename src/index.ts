@@ -11,6 +11,7 @@ import sharp from 'sharp';
 import authRoutes from './routes/auth';
 import verifyRoutes from './routes/verify';
 import listingsRoutes from './routes/listings';
+import vipRoutes from './routes/vip';
 import adminRoutes from './routes/admin';
 import userRoutes from './routes/user';
 import messageRoutes from './routes/messages';
@@ -109,6 +110,7 @@ app.use('/api', legalRoutes);   // hüquqi sənədlər + qəbul qeydi
 app.use('/api', authRoutes);
 app.use('/api', verifyRoutes);
 app.use('/api', listingsRoutes);
+app.use('/api', vipRoutes);
 app.use('/api', adminRoutes);
 app.use('/api', userRoutes);
 app.use('/api', messageRoutes);

@@ -166,6 +166,36 @@ export const NUMBERS: NumberDef[] = [
     unit: 'AZN',
     decimals: 2,
   },
+  {
+    key: 'vip_price_1d',
+    label: 'VIP elan — 1 gün',
+    description: 'Elanı 1 gün VIP etmək qiyməti. VIP elanlar siyahılarda həmişə ən öndə göstərilir və kartda VIP nişanı olur. 0 yazılsa bu paket pulsuzdur (dərhal aktivləşir).',
+    default: 1,
+    min: 0,
+    max: 1000,
+    unit: 'AZN',
+    decimals: 2,
+  },
+  {
+    key: 'vip_price_7d',
+    label: 'VIP elan — 7 gün',
+    description: 'Elanı 7 gün VIP etmək qiyməti. VIP elanlar siyahılarda həmişə ən öndə göstərilir və kartda VIP nişanı olur. 0 yazılsa bu paket pulsuzdur (dərhal aktivləşir).',
+    default: 5,
+    min: 0,
+    max: 1000,
+    unit: 'AZN',
+    decimals: 2,
+  },
+  {
+    key: 'vip_price_30d',
+    label: 'VIP elan — 30 gün',
+    description: 'Elanı 30 gün VIP etmək qiyməti. VIP elanlar siyahılarda həmişə ən öndə göstərilir və kartda VIP nişanı olur. 0 yazılsa bu paket pulsuzdur (dərhal aktivləşir).',
+    default: 15,
+    min: 0,
+    max: 1000,
+    unit: 'AZN',
+    decimals: 2,
+  },
 ];
 
 const NUMBER_MAP = new Map(NUMBERS.map((n) => [n.key, n]));

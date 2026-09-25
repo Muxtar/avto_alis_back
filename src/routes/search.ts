@@ -404,7 +404,7 @@ router.get('/search/by-city/:city', async (req: Request, res: Response) => {
           user: { select: { id: true, name: true, type: true, avgRating: true, ratingCount: true } },
           _count: { select: { comments: true } },
         },
-        orderBy: { createdAt: 'desc' },
+        orderBy: [{ isVip: 'desc' }, { createdAt: 'desc' }],
         take: 60,
       }),
     ]);
@@ -493,7 +493,7 @@ router.get('/objects/:id', async (req: Request, res: Response) => {
         user: { select: { id: true, name: true, type: true, avgRating: true, ratingCount: true } },
         _count: { select: { comments: true } },
       },
-      orderBy: { createdAt: 'desc' },
+      orderBy: [{ isVip: 'desc' }, { createdAt: 'desc' }],
       take: 100,
     });
     // Obyektin 5 ulduz + bəyən/bəyənmə reytinqi (obyekt rəylərindən) — başlıqda göstərilir.
