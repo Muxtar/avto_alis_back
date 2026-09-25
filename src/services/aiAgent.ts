@@ -134,10 +134,10 @@ const TOOLS: Anthropic.Tool[] = [
   { name: 'my_sales_returns', description: 'SATICI kimi mənə gələn iadə sorğuları.', input_schema: { type: 'object', properties: {} } },
   { name: 'complaints_against_me', description: 'Mənə qarşı açılmış şikayətlər/mübahisələr (cavab müddəti ilə).', input_schema: { type: 'object', properties: {} } },
   { name: 'reviews_received', description: 'Elanlarıma/obyektlərimə yazılmış rəylər. filter=negative → yalnız mənfi (1-2★), unanswered → cavabsız.', input_schema: { type: 'object', properties: { filter: { type: 'string' } } } },
-  { name: 'dispute_return', description: 'Satıcı iadəni RƏDD edibsə etiraz et — mübahisə açılır, satıcıya 48 saat cavab müddəti verilir, sonra sistem qərar verir (təsdiqli). description ən azı 10 simvol.', input_schema: { type: 'object', properties: { returnId: { type: 'number' }, description: { type: 'string' } }, required: ['returnId', 'description'] } },
+  { name: 'dispute_return', description: 'Satıcı iadəni RƏDD edibsə və ya cavab vermirsə satıcı haqqında ŞİKAYƏT yaz (reytinqinə təsir edir; məhsul qaytarılmır) (təsdiqli). description ən azı 10 simvol.', input_schema: { type: 'object', properties: { returnId: { type: 'number' }, description: { type: 'string' } }, required: ['returnId', 'description'] } },
   { name: 'cancel_return', description: 'Hələ göndərilməmiş iadəni ləğv et (təsdiqli).', input_schema: { type: 'object', properties: { returnId: { type: 'number' } }, required: ['returnId'] } },
   { name: 'ship_return', description: 'Təsdiqlənmiş iadə məhsulunu göndərdim — üsul COURIER|IN_PERSON|POST|YANGO + istəyə görə izləmə kodu (təsdiqli).', input_schema: { type: 'object', properties: { returnId: { type: 'number' }, returnMethod: { type: 'string' }, trackingCode: { type: 'string' } }, required: ['returnId', 'returnMethod'] } },
-  { name: 'appeal_complaint', description: 'Şikayət üzrə sistem qərarı mənim xeyrimə deyilsə 7 gün ərzində bir dəfə adminə müraciət (təsdiqli).', input_schema: { type: 'object', properties: { complaintId: { type: 'number' }, note: { type: 'string' } }, required: ['complaintId', 'note'] } },
+  { name: 'appeal_complaint', description: 'Şikayətimi bağla — problem həll olundu (təsdiqli).', input_schema: { type: 'object', properties: { complaintId: { type: 'number' }, note: { type: 'string' } }, required: ['complaintId'] } },
   { name: 'reply_review', description: 'Elanıma/obyektimə yazılmış rəyə ictimai cavab yaz (təsdiqli). commentId reviews_received-dən.', input_schema: { type: 'object', properties: { commentId: { type: 'number' }, reply: { type: 'string' } }, required: ['commentId', 'reply'] } },
   { name: 'file_complaint', description: 'Şikayət yarat (təsdiqli).', input_schema: { type: 'object', properties: { targetUserId: { type: 'number' }, category: { type: 'string' }, description: { type: 'string' } }, required: ['category', 'description'] } },
 
@@ -256,17 +256,14 @@ PLATFORMA QAYDALARI (soruşulanda düzgün izah et, uydurma):
   sayına görə son qiymət hesablanır və fərq kartlara qaytarılır. Hər kəs
   əvvəlcə TAM qiyməti ödəyir, yalnız kartla. Pəncərə bitəndən sonra növbəti
   alıcı təzə pəncərə başladır. Vəziyyəti group_buy_of_listing aləti ilə de.
-- Qaytarma: təhvildən 14 gün ərzində, səbəb izahı ilə (qüsurlu, səhv, təsvirə
-  uyğun deyil, bəyənmədim). Satıcı 72 saatda cavab verməsə sistem avtomatik
-  təsdiqləyir. Satıcı yalnız SƏBƏB yazaraq rədd edə bilər; alıcı 7 gün ərzində
-  etiraz edib mübahisə açır. Təsdiqdən sonra alıcı 7 gün ərzində məhsulu
-  göndərir (üsul + izləmə kodu), satıcı qəbul edir və 48 saatda pulu qaytarır —
-  etməsə sistem özü qaytarır. Satıcı qaytarılan məhsulda problem görsə foto
-  ilə mübahisə açır.
-- Mübahisə / şikayət: qarşı tərəfə 48 saat cavab müddəti verilir; cavab
-  verilməsə şikayətçinin xeyrinə. Cavab verilsə SİSTEM sübutlara (foto daxil)
-  baxıb qərar verir, əmin deyilsə adminə ötürür. Uduzan tərəf 7 gün ərzində bir
-  dəfə adminə müraciət edə bilər. İzləmə: return_details, my_complaints.
+- Qaytarma: təhvildən 14 gün ərzində. Alıcı səbəbi MƏTNLƏ yazır (ən azı 10 simvol),
+  satıcı qəbul edir və ya səbəb yazaraq rədd edir — məhsul YALNIZ satıcı qəbul
+  edəndə geri qayıdır. Qəbuldan sonra alıcı 7 gün ərzində göndərir (üsul + izləmə
+  kodu), satıcı qəbul edir və 48 saatda pulu qaytarır — etməsə sistem qaytarır.
+- Şikayət: pul/mal QAYTARMIR — alıcının satıcı haqqında fikridir və satıcının
+  etibarlılıq reytinqinə təsir edir. Yalnız həmin satıcıdan alış edən şikayət
+  edə bilər. Satıcı cavab yazır, alıcı «həll olundu» deyib bağlaya bilər, admin
+  «əsaslı / əsassız» qərarı verə bilər. Pul lazımdırsa — iadə sorğusu.
 - Mənfi rəy (1-2★): satıcıya bildiriş gedir; satıcı rəyə ictimai cavab yaza və
   müştəriyə mesaj yaza bilər.
 - Rəy: məhsulu alan hər kəs yaza bilər; mağazaya hər alışdan sonra bir rəy.`;
@@ -706,8 +703,8 @@ async function buildAction(name: string, input: any, userId: number): Promise<Pe
     }
     case 'appeal_complaint': {
       const id = num(input.complaintId); const note = String(input.note || '').trim();
-      if (Number.isNaN(id) || note.length < 10) return { error: 'complaintId və ən azı 10 simvollu səbəb lazımdır.' };
-      return { type: name, endpoint: `/complaints/${id}/appeal`, method: 'POST', body: { note }, summary: `Şikayət #${id} qərarından adminə müraciət: "${note}"` };
+      if (Number.isNaN(id)) return { error: 'complaintId lazımdır.' };
+      return { type: name, endpoint: `/complaints/${id}/withdraw`, method: 'POST', body: { note }, summary: `Şikayət #${id} bağlansın (problem həll olundu)` };
     }
     case 'reply_review': {
       const id = num(input.commentId); const reply = String(input.reply || '').trim();

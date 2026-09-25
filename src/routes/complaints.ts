@@ -6,16 +6,13 @@ import { refundOrder } from '../services/paymentGateway';
 import { upload } from '../middleware/upload';
 import { processImages } from '../middleware/imageProcess';
 import { pushLive, pushAdmins } from '../services/live';
-import { openDispute, respondToDispute, appealDispute, applyDecision, decideDispute } from '../services/disputeDecision';
+import { createSellerComplaint, SELLER_COMPLAINT_CATEGORIES } from '../services/sellerReputation';
 
 const router = Router();
 const prisma = new PrismaClient();
 
 // Şikayət növləri — şəxs/seans (əvvəlki) + eBay üslubu məhsul qüsuru növləri.
-const CATEGORIES = [
-  'TIME_WASTED', 'FRAUD', 'RUDE', 'FAKE_INFO', 'OTHER',
-  'DEFECTIVE', 'DAMAGED', 'NOT_AS_DESCRIBED', 'WRONG_ITEM',
-];
+const CATEGORIES = Object.keys(SELLER_COMPLAINT_CATEGORIES);
 const COMPLAINT_WINDOW_DAYS = 7;
 const MAX_EVIDENCE = 6;
 
@@ -61,52 +58,25 @@ router.post('/complaints', complaintLimiter, adminAuth, upload.array('images', M
     if (Number.isNaN(targetUserId)) { res.status(400).json({ success: false, message: 'Şikayət ediləcək şəxs/məhsul göstərilməyib' }); return; }
     if (targetUserId === req.adminId) { res.status(400).json({ success: false, message: 'Özünüzdən şikayət edə bilməzsiniz' }); return; }
 
-    // MƏHSUL / SİFARİŞ ŞİKAYƏTİ → MÜBAHİSƏ: satıcıya cavab müddəti verilir,
-    // sonra SİSTEM qərar verir (services/disputeDecision). Əvvəl belə şikayət
-    // yalnız admin siyahısına düşürdü — satıcı xəbər tutmur, qərar gecikirdi.
+    // MƏHSUL / SİFARİŞ ŞİKAYƏTİ — REPUTASİYA (pul/mal qaytarmır; bunun üçün İadə var).
+    // Satıcının reytinqinə yalnız ALIŞ etmiş alıcının şikayəti təsir edir.
     if (!consultationId && (orderId || listingId)) {
       let oid = orderId;
-      // Elandan şikayət edən bu məhsulu ALIBSA — sifarişə bağla (pul qaytarıla bilsin).
       if (!oid && listingId) {
+        // Elandan şikayət edən bu satıcıdan həmin məhsulu alıbsa — sifarişə bağla.
         const bought = await prisma.order.findFirst({
-          where: { buyerId: req.adminId!, status: 'DELIVERED', items: { some: { listingId } } },
+          where: { buyerId: req.adminId!, sellerId: targetUserId, status: { not: 'PENDING' }, items: { some: { listingId } }, OR: [{ paymentMethod: { not: 'CARD' } }, { paymentStatus: { in: ['PAID', 'REFUNDED'] } }] },
           orderBy: { createdAt: 'desc' }, select: { id: true },
         });
         oid = bought?.id ?? null;
       }
-      // Mübahisə yalnız ÇATDIRILMIŞ və yaxın vaxtda (30 gün) alınmış sifariş üçün:
-      // çatdırılmamış sifarişdə «məhsulu geri göndər» mənasızdır (onu sifariş
-      // müddətləri avtomatik ləğv/iadə edir), köhnə sifarişə isə admin baxır.
       if (oid) {
-        const o = await prisma.order.findUnique({ where: { id: oid }, select: { status: true, deliveredAt: true } });
-        const recent = o?.deliveredAt && Date.now() - o.deliveredAt.getTime() <= 30 * 24 * 3600 * 1000;
-        if (!o || o.status !== 'DELIVERED' || !recent) {
-          const complaint = await prisma.complaint.create({
-            data: { complainantId: req.adminId!, targetUserId, orderId: oid, listingId, category, description, images },
-          });
-          pushAdmins('complaint', { id: complaint.id, toast: 'Yeni şikayət' });
-          res.json({ success: true, complaint });
-          return;
-        }
+        const dup = await prisma.complaint.findFirst({ where: { complainantId: req.adminId!, orderId: oid, status: { not: 'REJECTED' }, OR: [{ resolution: null }, { resolution: { not: 'WITHDRAWN' } }] }, select: { id: true } });
+        if (dup) { res.status(400).json({ success: false, message: `Bu sifariş üzrə artıq şikayətiniz var (#${dup.id})` }); return; }
       }
-      if (oid) {
-        const open = await prisma.complaint.findFirst({
-          where: { complainantId: req.adminId!, orderId: oid, status: { in: ['OPEN', 'AWAITING_SELLER', 'REVIEWING', 'EVIDENCE_REQUESTED'] } },
-          select: { id: true },
-        });
-        if (open) { res.status(400).json({ success: false, message: `Bu sifariş üzrə açıq şikayətiniz var (#${open.id})` }); return; }
-        const activeReturn = await prisma.returnRequest.findFirst({
-          where: { orderId: oid, status: { in: ['REQUESTED', 'APPROVED', 'RETURN_SHIPPED', 'RETURN_RECEIVED', 'DISPUTED'] } },
-          select: { id: true },
-        });
-        if (activeReturn) {
-          res.status(400).json({ success: false, message: `Bu sifariş üzrə iadə davam edir (#${activeReturn.id}) — onu «İadələr» səhifəsindən izləyin` }); return;
-        }
-      }
-      const complaint = await openDispute({
-        complainantId: req.adminId!, targetUserId, orderId: oid, listingId, category, description, images, actor: 'BUYER',
-      });
-      res.json({ success: true, complaint });
+      // Alış yoxdursa — elan haqqında bildiriş (admin moderasiyası, reytinqə təsir etmir).
+      const complaint = await createSellerComplaint({ complainantId: req.adminId!, targetUserId, orderId: oid, listingId, category, description, images });
+      res.json({ success: true, complaint, affectsRating: !!oid });
       return;
     }
 
@@ -136,26 +106,45 @@ router.post('/complaints/:id/evidence', complaintLimiter, adminAuth, upload.arra
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
 
-// Qarşı tərəfin (satıcının) cavabı: iddianı qəbul et və ya izah + foto ilə etiraz et.
+// Satıcının cavabı — izah / üzr / həll təklifi. Pul və ya mal hərəkəti YOXDUR.
 router.post('/complaints/:id/respond', complaintLimiter, adminAuth, upload.array('images', MAX_EVIDENCE), processImages, async (req: AuthRequest, res: Response) => {
   try {
     const id = parseInt(String(req.params.id));
-    const accept = String(req.body?.accept) === 'true';
+    const c = await prisma.complaint.findUnique({ where: { id } });
+    if (!c || c.targetUserId !== req.adminId) { res.status(404).json({ success: false, message: 'Şikayət tapılmadı' }); return; }
+    if (c.status === 'RESOLVED' || c.status === 'REJECTED') { res.status(400).json({ success: false, message: 'Şikayət bağlanıb' }); return; }
     const response = String(req.body?.response || '').trim();
-    if (!accept && response.length < 10) { res.status(400).json({ success: false, message: 'Mövqeyinizi ətraflı izah edin (ən azı 10 simvol)' }); return; }
+    if (response.length < 10) { res.status(400).json({ success: false, message: 'Cavabınızı ətraflı yazın (ən azı 10 simvol)' }); return; }
     const images = ((req.files as Express.Multer.File[] | undefined) || []).map((f) => f.filename);
-    const complaint = await respondToDispute(id, req.adminId!, { accept, response: response || 'İddianı qəbul edirəm.', images });
-    res.json({ success: true, complaint });
+    const updated = await prisma.complaint.update({
+      where: { id },
+      data: { sellerResponse: response.slice(0, 3000), sellerImages: [...c.sellerImages, ...images].slice(0, 6), sellerRespondedAt: new Date(), status: 'REVIEWING' },
+    });
+    await prisma.notification.create({
+      data: { userId: c.complainantId, type: 'COMPLAINT', title: 'Satıcı şikayətinizə cavab verdi', body: `${response.slice(0, 160)}${response.length > 160 ? '…' : ''} — problem həll olunubsa şikayəti bağlaya bilərsiniz.`, link: '/complaints' },
+    }).catch(() => {});
+    pushLive(c.complainantId, { kind: 'complaint', id, toast: 'Satıcı şikayətinizə cavab verdi', tone: 'info' });
+    res.json({ success: true, complaint: updated });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
 
-// Uduzan tərəf qərardan bir dəfə adminə müraciət edir.
-router.post('/complaints/:id/appeal', complaintLimiter, adminAuth, async (req: AuthRequest, res: Response) => {
+// Alıcı: «problem həll olundu» — şikayəti geri götürür (reytinqə təsir etmir).
+router.post('/complaints/:id/withdraw', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
-    const note = String(req.body?.note || '').trim();
-    if (note.length < 10) { res.status(400).json({ success: false, message: 'Müraciətin səbəbini yazın (ən azı 10 simvol)' }); return; }
-    const complaint = await appealDispute(parseInt(String(req.params.id)), req.adminId!, note);
-    res.json({ success: true, complaint });
+    const id = parseInt(String(req.params.id));
+    const c = await prisma.complaint.findUnique({ where: { id } });
+    if (!c || c.complainantId !== req.adminId) { res.status(404).json({ success: false, message: 'Şikayət tapılmadı' }); return; }
+    if (c.status === 'RESOLVED' || c.status === 'REJECTED') { res.status(400).json({ success: false, message: 'Şikayət artıq bağlanıb' }); return; }
+    const note = String(req.body?.note || '').trim().slice(0, 500);
+    const updated = await prisma.complaint.update({
+      where: { id },
+      data: { status: 'RESOLVED', resolution: 'WITHDRAWN', resolvedAt: new Date(), adminNote: note ? `Alıcı: ${note}` : c.adminNote },
+    });
+    await prisma.notification.create({
+      data: { userId: c.targetUserId, type: 'COMPLAINT', title: 'Alıcı şikayətini bağladı ✓', body: 'Alıcı problemin həll olunduğunu bildirdi — şikayət reytinqinizə təsir etmir.', link: '/complaints?tab=against' },
+    }).catch(() => {});
+    pushLive(c.targetUserId, { kind: 'complaint', id, toast: 'Alıcı şikayətini bağladı ✓', tone: 'success' });
+    res.json({ success: true, complaint: updated });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
 
@@ -295,20 +284,26 @@ router.post('/admin/complaints/:id/resolve', requirePermission('complaints'), as
     const c = await prisma.complaint.findUnique({ where: { id }, include: { consultation: true } });
     if (!c) { res.status(404).json({ success: false, message: 'Tapılmadı' }); return; }
 
-    // MÜBAHİSƏ (sifariş/məhsul) — admin qərarı sistemin EYNİ tətbiq funksiyası ilə:
-    // iadə təsdiqi / pulun qaytarılması / rədd + hər iki tərəfə izahlı bildiriş.
+    // SİFARİŞ/MƏHSUL ŞİKAYƏTİ — admin yalnız əsaslı olub-olmadığını qərarlaşdırır
+    // (reytinqə təsir). Pul/mal qaytarılması iadə bölməsindədir.
     if (!c.consultationId && (c.orderId || c.listingId)) {
-      const decision = String(req.body.decision || '');
-      if (decision === 'RERUN') { const r = await decideDispute(id); res.json({ success: true, complaint: r }); return; }
-      if (decision !== 'COMPLAINANT' && decision !== 'RESPONDENT') {
-        res.status(400).json({ success: false, message: 'Qərar seçin: şikayətçinin və ya qarşı tərəfin xeyrinə' }); return;
-      }
-      const reason = String(req.body.adminNote || '').trim();
-      if (reason.length < 5) { res.status(400).json({ success: false, message: 'Qərarın səbəbini yazın — hər iki tərəf görəcək' }); return; }
-      const pct = req.body.refundPercent !== undefined ? Math.max(0, Math.min(100, Number(req.body.refundPercent))) : undefined;
-      const r = await applyDecision(id, decision, 'ADMIN', reason, { adminId: req.adminId!, refundPercent: pct });
-      await prisma.complaint.update({ where: { id }, data: { adminNote: reason } });
-      res.json({ success: true, complaint: r });
+      const verdict = String(req.body.verdict || '');
+      if (verdict !== 'UPHELD' && verdict !== 'UNFOUNDED') { res.status(400).json({ success: false, message: 'Qərar seçin: əsaslıdır və ya əsassızdır' }); return; }
+      const note = String(req.body.adminNote || '').trim();
+      if (note.length < 5) { res.status(400).json({ success: false, message: 'Qərarın səbəbini yazın — hər iki tərəf görəcək' }); return; }
+      const upheld = verdict === 'UPHELD';
+      const updated = await prisma.complaint.update({
+        where: { id },
+        data: { status: upheld ? 'RESOLVED' : 'REJECTED', resolution: verdict, adminNote: note, decisionReason: note, decisionBy: 'ADMIN', decidedAt: new Date(), resolvedAt: new Date(), resolvedById: req.adminId },
+      });
+      if (upheld) await prisma.user.update({ where: { id: c.targetUserId }, data: { complaintFlags: { increment: 1 } } }).catch(() => {});
+      const txt = upheld ? `Admin şikayəti əsaslı saydı — satıcının etibarlılıq reytinqinə təsir edir. ${note}` : `Admin şikayəti əsassız saydı — reytinqə təsir etmir. ${note}`;
+      await prisma.notification.createMany({ data: [
+        { userId: c.complainantId, type: 'COMPLAINT', title: `Şikayət #${id} üzrə qərar`, body: txt, link: '/complaints' },
+        { userId: c.targetUserId, type: 'COMPLAINT', title: `Sizin haqqınızda şikayət #${id} üzrə qərar`, body: txt, link: '/complaints?tab=against' },
+      ] }).catch(() => {});
+      pushLive([c.complainantId, c.targetUserId], { kind: 'complaint', id, status: updated.status });
+      res.json({ success: true, complaint: updated });
       return;
     }
 

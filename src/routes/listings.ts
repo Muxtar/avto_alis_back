@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { PrismaClient, Prisma } from '@prisma/client';
 import { alertNegativeReview, NEGATIVE_MAX } from '../services/reviewAlerts';
 import { publicListingWhere, visibilityOf } from '../services/listingVisibility';
+import { sellerReputation } from '../services/sellerReputation';
 import { upload } from '../middleware/upload';
 import { processImages } from '../middleware/imageProcess';
 import { adminAuth, AuthRequest, verifyTokenUserId } from '../middleware/auth';
@@ -281,7 +282,9 @@ router.get('/sellers/:id', async (req: Request, res: Response) => {
       totalServices: servicesCount,
     };
 
-    res.json({ user, listings, stats, page, totalPages: Math.ceil(listingsTotal / limit) });
+    // Etibarlılıq: şikayətlər + iadə davranışı (services/sellerReputation).
+    const reputation = await sellerReputation(user.id).catch(() => null);
+    res.json({ user, listings, stats, reputation, page, totalPages: Math.ceil(listingsTotal / limit) });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }
@@ -425,7 +428,8 @@ router.get('/listings/:id', async (req: Request, res: Response) => {
     const businessObject = listing.businessObject ? { ...listing.businessObject, rating: objectRating } : listing.businessObject;
 
     // Telefon nömrəsi ictimai göstərilmir — əlaqə yalnız sayt daxili chat ilə.
-    res.json({ ...listing, phone: null, businessObject, canReview });
+    const sellerRep = await sellerReputation(listing.userId).catch(() => null);
+    res.json({ ...listing, phone: null, businessObject, canReview, sellerReputation: sellerRep });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }
@@ -441,6 +445,12 @@ router.get('/me/listings/:id/visibility', adminAuth, async (req: AuthRequest, re
     if (!l || l.userId !== req.adminId) { res.status(404).json({ success: false, message: 'Elan tapılmadı' }); return; }
     res.json({ success: true, ...visibilityOf(l) });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
+// Satıcının etibarlılıq göstəriciləri (hamıya açıq).
+router.get('/sellers/:id/reputation', async (req: Request, res: Response) => {
+  try { res.json({ success: true, reputation: await sellerReputation(parseInt(String(req.params.id))) }); }
+  catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
 
 // Add comment to listing (auth required)

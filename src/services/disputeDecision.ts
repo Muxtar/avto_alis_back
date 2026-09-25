@@ -391,9 +391,19 @@ export async function runDisputeDeadlines() {
 async function runDisputeDeadlinesInner() {
   const now = new Date();
 
-  // 1) Satıcı iadə sorğusuna cavab vermədi → sistem təsdiqləyir.
-  const silent = await prisma.returnRequest.findMany({ where: { status: 'REQUESTED', sellerRespondBy: { lt: now } }, take: 50, select: { id: true } });
-  for (const r of silent) await approveReturn(r.id, 'SYSTEM', null).catch((e) => console.error('[dispute] auto-approve', r.id, e?.message));
+  // 1) Satıcı iadə sorğusuna cavab vermədi → AVTOMATİK TƏSDİQ YOXDUR (qaytarma yalnız
+  //    satıcının qəbulu ilə olur). Satıcıya xatırlatma, alıcıya «şikayət edə bilərsiniz»;
+  //    cavabsız iadə satıcının etibarlılıq reytinqinə təsir edir.
+  const silent = await prisma.returnRequest.findMany({ where: { status: 'REQUESTED', sellerRespondBy: { lt: now } }, take: 50 });
+  for (const r of silent) {
+    await prisma.returnRequest.update({ where: { id: r.id }, data: { sellerRespondBy: null } });
+    await logReturnEvent(r.id, 'SYSTEM', null, 'SELLER_NO_RESPONSE', 'Satıcı müddətində cavab vermədi');
+    await prisma.notification.createMany({ data: [
+      { userId: r.sellerId, type: 'ORDER', title: `İadə #${r.id} cavabsız qalıb`, body: 'Alıcının iadə sorğusuna hələ cavab verməmisiniz — qəbul edin və ya səbəb yazaraq rədd edin. Cavabsız iadələr reytinqinizə təsir edir.', link: `/iadeler?tab=selling&id=${r.id}` },
+      { userId: r.buyerId, type: 'ORDER', title: `İadə #${r.id}: satıcı cavab vermədi`, body: 'Satıcı iadə sorğunuza vaxtında cavab vermədi. Gözləyə və ya satıcı haqqında şikayət yaza bilərsiniz.', link: `/iadeler?id=${r.id}` },
+    ] }).catch(() => {});
+    pushLive([r.buyerId, r.sellerId], { kind: 'return', id: r.id });
+  }
 
   // 2) Alıcı təsdiqlənmiş iadəni vaxtında göndərmədi → ləğv.
   const notShipped = await prisma.returnRequest.findMany({ where: { status: 'APPROVED', shipBy: { lt: now } }, take: 50 });
@@ -407,14 +417,13 @@ async function runDisputeDeadlinesInner() {
     pushLive([r.buyerId, r.sellerId], { kind: 'return', id: r.id, status: 'CANCELLED' });
   }
 
-  // 3) Satıcı geri göndərilən məhsulun qəbulunu təsdiqləmədi → mübahisə (alıcı adından).
+  // 3) Satıcı geri göndərilən məhsulun qəbulunu təsdiqləmədi → ADMİNƏ (avtomatik qərar yox).
   const notReceived = await prisma.returnRequest.findMany({ where: { status: 'RETURN_SHIPPED', receiveBy: { lt: now } }, take: 50 });
   for (const r of notReceived) {
-    await openDispute({
-      complainantId: r.buyerId, targetUserId: r.sellerId, orderId: r.orderId, returnId: r.id,
-      category: 'RETURN_NOT_RECEIVED', actor: 'SYSTEM',
-      description: `Alıcı məhsulu geri göndərib${r.trackingCode ? ` (izləmə kodu: ${r.trackingCode})` : ''}, amma satıcı qəbulu müddətində təsdiqləmədi. Sistem avtomatik mübahisə açdı.`,
-    }).catch((e) => console.error('[dispute] auto-dispute', r.id, e?.message));
+    await prisma.returnRequest.update({ where: { id: r.id }, data: { status: 'DISPUTED', receiveBy: null } });
+    await logReturnEvent(r.id, 'SYSTEM', null, 'DISPUTED', `Satıcı qaytarılan məhsulun qəbulunu müddətində təsdiqləmədi${r.trackingCode ? ` (izləmə kodu: ${r.trackingCode})` : ''} — admin baxır`);
+    pushAdmins('return', { id: r.id, toast: `İadə #${r.id}: satıcı qəbulu təsdiqləmədi` });
+    pushLive([r.buyerId, r.sellerId], { kind: 'return', id: r.id, status: 'DISPUTED' });
   }
 
   // 4) Satıcı məhsulu qəbul edib, amma pulu qaytarmadı → sistem qaytarır.
@@ -424,9 +433,7 @@ async function runDisputeDeadlinesInner() {
     if (!res.ok) console.error('[dispute] auto-refund', r.id, res.error);
   }
 
-  // 5) Qarşı tərəf mübahisəyə cavab vermədi → qərar.
-  const overdue = await prisma.complaint.findMany({ where: { status: 'AWAITING_SELLER', respondBy: { lt: now } }, take: 50, select: { id: true } });
-  for (const c of overdue) await decideDispute(c.id).catch((e) => console.error('[dispute] decide', c.id, e?.message));
+  // Şikayətlər avtomatik qərarlaşdırılmır — onlar reputasiyadır (services/sellerReputation).
 }
 
 export { RETURN_DISPUTE_DAYS };
