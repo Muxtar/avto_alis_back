@@ -54,7 +54,7 @@ export async function recordSettlement(orderId: number): Promise<void> {
         paymentStatus: true, paymentMethod: true, refundedAmount: true,
         // Birgə alış: hesablaşmaya qədər ödəniş açılmır (aşağıya bax).
         groupBuyId: true, deliveredAt: true,
-        referralAmount: true, referralVoided: true,
+        referralAmount: true, referralVoided: true, installmentFee: true,
         // Hesablaşma BİZNES üzrə qruplaşdırılır — ödəniş biznesin bank hesabına gedir.
         items: { select: { listing: { select: { businessId: true } } }, take: 1 },
       },
@@ -111,12 +111,15 @@ export async function recordSettlement(orderId: number): Promise<void> {
       const rate = await getCommissionPercent();
       const gross = effectiveGross;
       const commission = Math.round(gross * rate) / 100;
-      const net = Math.round((gross - commission - referralCut) * 100) / 100;
+      // Taksit bank komissiyası: bank onu bizim aldığımız məbləğdən tutur → satıcının qazancından çıxılır
+      // (alıcı ödəyibsə gross-a daxildir, satıcı ödəyirsə onun payından gedir — nəticə eynidir).
+      const instFee = order.installmentFee || 0;
+      const net = Math.round((gross - commission - referralCut - instFee) * 100) / 100;
       await prisma.sellerLedger.create({
         data: {
           sellerId: order.sellerId, orderId: order.id, buyerId: order.buyerId,
           businessId: order.items[0]?.listing?.businessId ?? null,
-          grossAmount: gross, commissionRate: rate, commission, netAmount: net, referralAmount: referralCut,
+          grossAmount: gross, commissionRate: rate, commission, netAmount: net, referralAmount: referralCut, installmentFee: instFee,
           heldByPlatform: order.paymentMethod === 'CARD',
           // Saxlama pəncərəsi bitməyibsə AVAILABLE etmirik — PENDING qalır.
           status: (delivered && holdDays > 0 ? 'PENDING' : targetStatus) as any,
@@ -154,7 +157,7 @@ export async function recordSettlement(orderId: number): Promise<void> {
       patch.grossAmount = effectiveGross;
       patch.commission = commission;
       patch.referralAmount = referralCut;
-      patch.netAmount = Math.round((effectiveGross - commission - referralCut) * 100) / 100;
+      patch.netAmount = Math.round((effectiveGross - commission - referralCut - (existing.installmentFee || 0)) * 100) / 100;
       console.log(`[settlement] sifariş #${order.id}: qismən iadə (${refunded} AZN) → satıcı qazancı ${patch.netAmount} AZN oldu`);
     }
     if (delivered && !existing.availableAt) patch.availableAt = availableAt;

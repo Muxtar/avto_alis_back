@@ -766,6 +766,10 @@ model Order {
   // Bu sahə alıcının seçimini qeyd edir ki, satıcı və admin nə razılaşdığını
   // görsün; pulun bizə gəlişi dəyişmir.
   installmentMonths   Int?
+  // Taksit bank komissiyası (plan faizi × malların ödənilən məbləği). BUYER → cəmə əlavə olunub,
+  // SELLER → satıcının qazancından çıxılır. Hər iki halda satıcının hesablaşmasında nəzərə alınır.
+  installmentFee      Float           @default(0)
+  installmentFeePayer String?
   // Alıcı bu ödənişdə "kartı yadda saxla" seçibmi. Ödəniş uğurlu olanda
   // şlüzün qaytardığı token saxlanılır — ayrıca kart bağlama axını yoxdur,
   // kart REAL ALIŞ zamanı saxlanılır.
@@ -1628,6 +1632,7 @@ model SellerLedger {
   commission     Float // platforma komissiyası
   netAmount      Float // satıcının qazancı (gross - commission - referralAmount)
   referralAmount Float        @default(0) // referal satıcıya gedən komissiya (satıcının qazancından çıxılır)
+  installmentFee Float        @default(0) // taksit bank komissiyası (satıcının qazancından çıxılır)
   heldByPlatform Boolean      @default(true) // KART: platforma pulu saxlayır. NAĞD: satıcı özü alıb (komissiya borcu)
   status         LedgerStatus @default(PENDING)
   // Hansı BİZNESƏ aiddir — ödəniş biznesin bank hesabına (BankAccount.isPrimary)

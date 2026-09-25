@@ -4,7 +4,7 @@ import { PrismaClient, UserType } from '@prisma/client';
 import { adminAuth, requireType, AuthRequest } from '../middleware/auth';
 import { createPayment as createGatewayPayment } from '../services/paymentGateway';
 import { refundOrderSafe, restoreStockForOrder, commitStockForOrder } from '../services/refunds';
-import { installmentAllowed, monthsAllowedFor } from '../services/installment';
+import { monthsAllowedFor, getInstallmentConfig, installmentFee } from '../services/installment';
 import { chargeSavedCard } from '../services/savedCards';
 import { missingRequiredConsents } from '../services/legal';
 import { settleOrders } from './payment';
@@ -675,6 +675,25 @@ router.post('/cart/checkout', requireType(BUYER_TYPES), async (req: AuthRequest,
       }
     }
 
+    // ── HİSSƏLİ ÖDƏNİŞ (taksit) ──
+    // Əvvəl yanlış plan səssizcə atılırdı: alıcı «6 ay» seçib tam məbləği bir
+    // dəfəyə ödəyirdi. İndi hər şərt yoxlanır və səbəb alıcıya deyilir.
+    let instMonths: number | null = null;
+    let instCfg: Awaited<ReturnType<typeof getInstallmentConfig>> | null = null;
+    if (installmentMonths !== undefined && installmentMonths !== null && installmentMonths !== '' && Number(installmentMonths) !== 0) {
+      if (paymentMethod !== 'CARD') { res.status(400).json({ success: false, message: 'Hissəli ödəniş yalnız kartla mümkündür' }); return; }
+      instCfg = await getInstallmentConfig();
+      if (!instCfg.available) { res.status(400).json({ success: false, message: `Hissəli ödəniş mümkün deyil: ${instCfg.reason}` }); return; }
+      if (savedCardId) { res.status(400).json({ success: false, message: 'Hissəli ödənişdə kart bankın ödəniş səhifəsində seçilir — saxlanmış kartla taksit mümkün deyil' }); return; }
+      const n = parseInt(String(installmentMonths), 10);
+      if (!monthsAllowedFor(cart.items.map((i) => i.listing as any), n, instCfg.months)) {
+        res.status(400).json({ success: false, message: `${n} aylıq plan səbətdəki məhsulların hamısı üçün mümkün deyil (satıcı limiti və ya plan bağlıdır)` }); return;
+      }
+      const cartGross = cart.items.reduce((sum, i) => sum + i.listing.price * i.quantity, 0);
+      if (cartGross < instCfg.minAmount) { res.status(400).json({ success: false, message: `Hissəli ödəniş ${instCfg.minAmount} AZN-dən yuxarı alışlarda mümkündür` }); return; }
+      instMonths = n;
+    }
+
     // ── Çatdırılma seçiminin yoxlanması + Yango haqqının hesablanması (satıcı üzrə) ──
     const feeBySeller = new Map<number, number>();
     if (deliveryType === 'DELIVERY') {
@@ -833,7 +852,10 @@ router.post('/cart/checkout', requireType(BUYER_TYPES), async (req: AuthRequest,
         const feeAlready = feeCharged.has(sellerId);
         const sellerDeliveryFee = deliveryType === 'DELIVERY' && dMethod === 'COURIER' && !feeAlready ? (feeBySeller.get(sellerId) || 0) : 0;
         if (sellerDeliveryFee > 0) feeCharged.add(sellerId);
-        const total = Math.max(0, sellerSubtotal - actualDiscount) + sellerDeliveryFee;
+        // Taksit bank komissiyası — malların ödənilən məbləğindən; alıcı ödəyirsə cəmə əlavə olunur.
+        const instFeeAmt = instMonths && instCfg ? installmentFee(Math.max(0, sellerSubtotal - actualDiscount), instCfg.fees[instMonths] || 0) : 0;
+        const instBuyerPays = !!(instMonths && instCfg?.buyerPaysFee);
+        const total = Math.max(0, sellerSubtotal - actualDiscount) + sellerDeliveryFee + (instBuyerPays ? instFeeAmt : 0);
 
         // C8 fix: Never mint loyalty points on portions of an order paid with points.
         // Only the cash-paid portion qualifies for new points.
@@ -889,12 +911,9 @@ router.post('/cart/checkout', requireType(BUYER_TYPES), async (req: AuthRequest,
             // bağlayıbsa və ya limit qoyubsa (məs. ən çox 6 ay) alıcı daha
             // uzun plan seçə bilmir. Əvvəl yoxlama yalnız «biznes elanıdırmı»
             // idi — satıcının sözü keçmirdi.
-            installmentMonths:
-              paymentMethod === 'CARD'
-                && monthsAllowedFor(items.map((i) => i.listing as any), installmentMonths)
-                && installmentAllowed(total, true)
-                ? Number(installmentMonths)
-                : null,
+            installmentMonths: instMonths,
+            installmentFee: instFeeAmt,
+            installmentFeePayer: instMonths ? (instBuyerPays ? 'BUYER' : 'SELLER') : null,
             promoCodeId: promoCodeRecord?.id || null,
             groupBuyId,
             referrerId: ref?.referrerId ?? null,
@@ -1038,7 +1057,8 @@ router.post('/cart/checkout', requireType(BUYER_TYPES), async (req: AuthRequest,
             title: 'tradixai',
             description: `Sifariş #${orders.map((o) => o.id).join(',')}`,
             callbackBase: PUBLIC_BACKEND_URL,
-            saveCard: saveCard === true,
+            saveCard: saveCard === true && !instMonths,
+            installmentMonths: instMonths,
           });
           await prisma.order.updateMany({
             where: { id: { in: orders.map((o) => o.id) } },

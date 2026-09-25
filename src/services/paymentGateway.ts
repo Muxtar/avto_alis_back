@@ -24,6 +24,9 @@ export interface CreateInput {
   // Alıcı "kartı yadda saxla" seçibsə şlüzə save=y gedir və ödəniş
   // təsdiqlənəndə cavabda kart tokeni qayıdır. Yalnız YIĞIM dəstəkləyir.
   saveCard?: boolean;
+  // Hissəli ödəniş — Kapital Bank təsvirdə «TAKSIT=N» görəndə ödənişi aylara bölür.
+  // YIĞIM taksiti dəstəkləmir (getInstallmentConfig onu heç təklif etmir).
+  installmentMonths?: number | null;
 }
 
 export interface CreatedPayment {
@@ -54,10 +57,15 @@ export async function createPayment(input: CreateInput): Promise<CreatedPayment>
     });
     return { provider, redirectUrl: r.url, ref: input.reference, gatewayOrderId: null, password: null, status: null };
   }
+  if (input.installmentMonths && provider !== 'kapital') {
+    throw new Error('Cari ödəniş şlüzü hissəli ödənişi dəstəkləmir');
+  }
   const k = await kapital.createOrder({
     amount: input.amount,
     title: input.title,
-    description: input.description,
+    description: input.installmentMonths
+      ? `${input.description || 'tradixai sifariş'}/TAKSIT=${input.installmentMonths}`
+      : input.description,
     redirectUrl: `${input.callbackBase}/api/payment/callback`,
     language: input.language,
   });
