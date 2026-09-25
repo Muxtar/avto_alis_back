@@ -43,9 +43,7 @@ export async function createPayment(input: CreateInput): Promise<CreatedPayment>
   if (provider === 'yigim') {
     // TAKSİT: YIĞIM-də ay sayı API ilə ötürülmür — alıcı onu YIĞIM-in kart
     // səhifəsində seçir. Biz yalnız taksit bölməsi olan şablonu açırıq.
-    if (input.installmentMonths && !yigim.installmentConfigured()) {
-      throw new Error('YIĞIM taksit şablonu (YIGIM_TEMPLATE_INSTALLMENT) təyin olunmayıb');
-    }
+    // Ayrıca taksit şablonu yoxdursa adi şablon işlədilir (YIĞIM taksiti orada aktivləşdirib).
     // İstifadəçi WebView-da ödənişi bitirdikdən sonra saytına qayıtsın deyə
     // şablona back-url/fail-url ötürürük (callback ayrıca server webhook-udur).
     const fe = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/$/, '');

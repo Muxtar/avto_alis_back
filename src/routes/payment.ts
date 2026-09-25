@@ -5,7 +5,7 @@ import { getOrderStatus, isPaidStatus } from '../services/kapital';
 import { refundOrder } from '../services/paymentGateway';
 import { refundOrderSafe, commitOrCancelForStock } from '../services/refunds';
 import { PUBLIC_CARD_FIELDS, saveCardFromPayment } from '../services/savedCards';
-import { getPaymentStatus as yigimStatus, isPaidStatus as yigimPaid } from '../services/yigimPay';
+import { getPaymentStatus as yigimStatus, isPaidStatus as yigimPaid, isPendingStatus as yigimPending, needsMerchantCancel, installmentMonthsFromStatus, cancel as yigimCancel } from '../services/yigimPay';
 import { settleConsultation } from './consultations';
 import { settleBusinessFee, isBusinessFeeRef } from '../services/businessFee';
 import { recordSettlement, recordSettlementMany } from '../services/settlement';
@@ -168,6 +168,26 @@ router.get('/payment/yigim/callback', async (req: Request, res: Response) => {
       try {
         const { status, raw } = await yigimStatus(reference);
         const paid = yigimPaid(status);
+        // Ödəniş detallarını saxla (issuer, fee, method, extra) — taksitin
+        // faktiki ay sayı və bank məlumatı buradan görünür.
+        if (order) {
+          const months = installmentMonthsFromStatus(raw);
+          await prisma.order.updateMany({
+            where: { gatewayRef: reference },
+            data: {
+              gatewayDetails: { status: raw?.status, method: raw?.method, issuer: raw?.issuer, system: raw?.system, pan: raw?.pan, fee: raw?.fee, offset: raw?.offset, extra: raw?.extra, refund: raw?.refund, datetime: raw?.datetime },
+              ...(months ? { installmentMonths: months } : {}),
+            },
+          }).catch(() => {});
+        }
+        // Aralıq status (S0/S1/S2) — nəticə hələ yoxdur, sifarişə toxunma;
+        // YIĞIM status dəyişəndə yenidən callback göndərir.
+        if (yigimPending(status)) { console.log(`[yigim callback] ${reference} → aralıq status ${status}`); return; }
+        // 09 — issuer cavab vermədi: sənədə görə merchant özü ləğv etməlidir,
+        // əks halda məbləğ alıcının kartında bloklanmış qala bilər.
+        if (needsMerchantCancel(status)) {
+          await yigimCancel(reference).catch((e) => console.error(`[yigim callback] ${reference} 09 ləğvi alınmadı:`, e?.message));
+        }
         if (order) await settleOrders({ gatewayRef: reference }, status, paid);
         // Alıcı "kartı yadda saxla" seçibsə şlüzün qaytardığı tokeni yaz.
         if (paid) await saveCardFromPayment(reference, raw).catch((e) => console.error('[card save]', e?.message));
@@ -204,7 +224,8 @@ router.get('/payment/status/:orderId', adminAuth, async (req: AuthRequest, res: 
     if (order.paymentStatus !== 'PAID' && order.gatewayRef && order.gatewayProvider === 'yigim' && order.gatewayCallbackAt && !callbackSettled) {
       try {
         const { status } = await yigimStatus(order.gatewayRef);
-        await settleOrders({ gatewayRef: order.gatewayRef }, status, yigimPaid(status));
+        // Aralıq statusda (S0/S1/S2) sifarişi FAILED etmə — nəticə hələ yoxdur.
+        if (!yigimPending(status)) await settleOrders({ gatewayRef: order.gatewayRef }, status, yigimPaid(status));
         order = (await prisma.order.findUnique({ where: { id: orderId } })) || order;
       } catch (e: any) { console.error('[payment/status verify]', e?.message); }
     }

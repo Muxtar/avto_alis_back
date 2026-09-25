@@ -128,6 +128,13 @@ export const FLAGS: FlagDef[] = [
     default: true,
   },
   {
+    key: 'installment_yigim_page',
+    section: 'production',
+    label: 'YIĞIM ödəniş səhifəsində taksit aktivdir',
+    description: 'YIĞIM taksiti öz kart səhifəsində təklif edir (API parametri yoxdur, alıcı ayı orada seçir). YIĞIM taksiti merchant hesabınızda aktivləşdirdiyini təsdiqləyəndən SONRA açın. Ayrıca taksit şablonu verilibsə (YIGIM_TEMPLATE_INSTALLMENT) o işlədilir, yoxsa adi şablon.',
+    default: false,
+  },
+  {
     key: 'installment_buyer_pays_fee',
     section: 'production',
     label: 'Taksit komissiyasını alıcı ödəsin',

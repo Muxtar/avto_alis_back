@@ -770,6 +770,9 @@ model Order {
   // SELLER → satıcının qazancından çıxılır. Hər iki halda satıcının hesablaşmasında nəzərə alınır.
   installmentFee      Float           @default(0)
   installmentFeePayer String?
+  // Şlüzün ödəniş detalları (YIĞIM /payment/status: issuer, fee, method, extra…) —
+  // taksitin faktiki ay sayı və bank məlumatı buradan oxunur.
+  gatewayDetails      Json?
   // Alıcı bu ödənişdə "kartı yadda saxla" seçibmi. Ödəniş uğurlu olanda
   // şlüzün qaytardığı token saxlanılır — ayrıca kart bağlama axını yoxdur,
   // kart REAL ALIŞ zamanı saxlanılır.

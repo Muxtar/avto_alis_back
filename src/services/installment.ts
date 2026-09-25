@@ -43,9 +43,10 @@ export interface InstallmentConfig {
 
 export async function getInstallmentConfig(): Promise<InstallmentConfig> {
   const provider = activeProvider();
-  const [enabled, toKapital, buyerPaysFee, minAmount] = await Promise.all([
+  const [enabled, toKapital, buyerPaysFee, minAmount, yigimPage] = await Promise.all([
     resolveFlag('installment_enabled'), resolveFlag('installment_kapital_taksit'),
     resolveFlag('installment_buyer_pays_fee'), getNumber('installment_min_azn'),
+    resolveFlag('installment_yigim_page'),
   ]);
   const months: number[] = [];
   const fees: Record<number, number> = {};
@@ -55,7 +56,7 @@ export async function getInstallmentConfig(): Promise<InstallmentConfig> {
   }
   let reason: string | null = null;
   if (!enabled) reason = 'Hissəli ödəniş hazırda deaktivdir';
-  else if (provider === 'yigim' && !yigimInstallmentConfigured()) reason = 'YIĞIM taksit şablonu hələ qoşulmayıb';
+  else if (provider === 'yigim' && !yigimInstallmentConfigured() && !yigimPage) reason = 'YIĞIM ödəniş səhifəsində taksit hələ aktivləşdirilməyib';
   else if (provider === 'kapital' && !toKapital) reason = 'Taksitin banka ötürülməsi deaktivdir';
   else if (!months.length) reason = 'Aktiv taksit planı yoxdur';
   return { available: !reason, reason, months, fees, minAmount, buyerPaysFee, provider, monthsChosenOnBankPage: provider === 'yigim' };

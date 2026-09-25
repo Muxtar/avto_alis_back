@@ -79,7 +79,7 @@ export async function createPayment(input: YigimCreateInput): Promise<YigimCreat
     amount: coins,
     currency: CURRENCY_AZN,
     biller: BILLER,
-    template: input.installment ? TEMPLATE_INSTALLMENT : TEMPLATE,
+    template: input.installment && TEMPLATE_INSTALLMENT ? TEMPLATE_INSTALLMENT : TEMPLATE,
     language: input.language || 'az',
     description: input.description,
     callback: input.callbackUrl,
@@ -135,4 +135,42 @@ export async function refund(reference: string, amount?: number): Promise<any> {
 // 8.1 status "00" = uğurlu (Approved). S0–S7 ara vəziyyətlərdir.
 export function isPaidStatus(status: string | undefined): boolean {
   return status === '00';
+}
+
+// Hələ nəticəsi bilinməyən statuslar (8.1): S0 — kart məlumatı gözlənilir,
+// S1 — DMS bloku, S2 — icra olunur. Bunlarda sifariş FAILED edilməməlidir.
+export function isPendingStatus(status: string | undefined): boolean {
+  return status === 'S0' || status === 'S1' || status === 'S2';
+}
+
+// «09 — Issuer timeout (merchant should call 'cancel' transaction by themself)».
+// Pul kartda bloklanmış qala bilər — biz özümüz ləğv etməliyik.
+export function needsMerchantCancel(status: string | undefined): boolean {
+  return status === '09';
+}
+
+/**
+ * Status cavabından taksit ay sayını çıxar (əgər YIĞIM/acquirer göndərirsə).
+ * Sənəddə sahə adı yoxdur — «extra» acquirer tərəfindən konfiqurasiya olunur.
+ * Ona görə ehtiyatla axtarılır: adında taksit/install/month/term olan, 2–36
+ * aralığında rəqəm. Tapılmasa null.
+ */
+export function installmentMonthsFromStatus(raw: any): number | null {
+  const scan = (obj: any): number | null => {
+    if (!obj) return null;
+    if (typeof obj === 'string') {
+      const m = obj.match(/(?:taksit|install\w*|months?|term)\s*[=:]\s*(\d{1,2})/i);
+      if (m) { const n = parseInt(m[1], 10); if (n >= 2 && n <= 36) return n; }
+      try { return scan(JSON.parse(obj)); } catch { return null; }
+    }
+    if (Array.isArray(obj)) { for (const x of obj) { const r = scan(x); if (r) return r; } return null; }
+    if (typeof obj === 'object') {
+      for (const [k, v] of Object.entries(obj)) {
+        if (/taksit|install|month|term/i.test(k)) { const n = parseInt(String(v), 10); if (n >= 2 && n <= 36) return n; }
+        const r = scan(v); if (r) return r;
+      }
+    }
+    return null;
+  };
+  return scan(raw?.extra) ?? scan(raw?.installment) ?? null;
 }
