@@ -22,6 +22,7 @@ import {
   RETURN_SELLER_RESPOND_HOURS, RETURN_RECEIVE_DAYS, RETURN_REFUND_HOURS, RETURN_DISPUTE_DAYS, RETURN_METHODS, RETURN_METHOD_AZ,
 } from '../services/returnFlow';
 import { openDispute } from '../services/disputeDecision';
+import { computeOrderReferral } from '../services/referral';
 import { unitPriceFor, priceInfo, type Tier } from '../services/tierPricing';
 import { groupQty, RETURN_WINDOW_DAYS, groupBuyEnabled, activeGroup, ensureActiveGroup } from '../services/groupBuy';
 
@@ -848,6 +849,14 @@ router.post('/cart/checkout', requireType(BUYER_TYPES), async (req: AuthRequest,
           if ((i.listing.stock ?? 0) < i.quantity) throw new Error(`"${i.listing.title}" üçün kifayət qədər stok yoxdur`);
         }
 
+        // REFERAL: səbət sətri referal linkindən gəlibsə komissiya hesablanır.
+        // Link/proqram/şəxs/məhsul burada YENİDƏN yoxlanır — dayandırılmış link
+        // komissiya yaratmır. Baza — sətrin endirimdən sonrakı ödənilən payı.
+        const goodsRatio = sellerSubtotal > 0 ? Math.max(0, sellerSubtotal - actualDiscount) / sellerSubtotal : 0;
+        const ref = await computeOrderReferral(req.adminId!, items.map((i) => ({
+          referralCartId: (i as any).referralCartId ?? null, listingId: i.listingId, lineTotal: unitOf(i) * i.quantity * goodsRatio,
+        })));
+
         const order = await tx.order.create({
           data: {
             buyerId: req.adminId!,
@@ -888,6 +897,10 @@ router.post('/cart/checkout', requireType(BUYER_TYPES), async (req: AuthRequest,
                 : null,
             promoCodeId: promoCodeRecord?.id || null,
             groupBuyId,
+            referrerId: ref?.referrerId ?? null,
+            referralPercent: ref?.percent ?? null,
+            referralAmount: ref?.amount ?? null,
+            referralCartId: ref?.referralCartId ?? null,
             latitude: latitude ? parseFloat(latitude) : null,
             longitude: longitude ? parseFloat(longitude) : null,
             items: {
@@ -896,6 +909,8 @@ router.post('/cart/checkout', requireType(BUYER_TYPES), async (req: AuthRequest,
                 quantity: i.quantity,
                 price: unitOf(i),          // pillə / birgə alış qiyməti
                 title: i.listing.title,
+                referralPercent: ref?.perItem.get(i.listingId)?.percent ?? null,
+                referralAmount: ref?.perItem.get(i.listingId)?.amount ?? null,
               })),
             },
           },
@@ -910,6 +925,9 @@ router.post('/cart/checkout', requireType(BUYER_TYPES), async (req: AuthRequest,
         // gözləyirdi. İndi kart sifarişləri üçün bildiriş ödəniş
         // təsdiqləndikdə göndərilir (services/orderNotify).
         if (paymentMethod !== 'CARD') {
+          if (ref) {
+            await tx.notification.create({ data: { userId: ref.referrerId, type: 'REFERRAL', title: 'Linkinizdən sifariş verildi', body: `Sifariş #${order.id}: komissiya ${ref.amount.toFixed(2)} AZN (çatdırılandan və qaytarma müddəti bitəndən sonra ödənilir).`, link: '/referral-earnings' } });
+          }
           await tx.order.update({ where: { id: order.id }, data: { sellerNotifiedAt: new Date() } });
           await tx.notification.create({
             data: {

@@ -105,7 +105,16 @@ export async function finalizeReturnRefund(
       else stockWarnings.push(`Elan #${l.listingId} silinib, stok bərpa edilə bilmədi`);
     }
     // Qaytarılmış mal üçün referal komissiyası ödənilmir.
-    if (ord.referrerId && !ord.referralVoided) {
+    // QİSMƏN iadə (bir sətir): komissiya yalnız həmin sətrin payı qədər azalır.
+    // Kartda bu, refundedAmount nisbəti ilə avtomatik olur (effectiveReferral);
+    // nağdda pul platformadan keçmədiyi üçün sətrin komissiyası birbaşa çıxılır.
+    if (ord.referrerId && !ord.referralVoided && ret.orderItem && ord.items.length > 1) {
+      if (!isCardPaid && ord.referralAmount) {
+        const it = ord.items.find((i) => i.id === ret.orderItem!.id);
+        const cut = it?.referralAmount ? Math.round(it.referralAmount * Math.min(1, ret.quantity / it.quantity) * 100) / 100 : 0;
+        if (cut > 0) await tx.order.update({ where: { id: ord.id }, data: { referralAmount: Math.max(0, Math.round((ord.referralAmount - cut) * 100) / 100) } });
+      }
+    } else if (ord.referrerId && !ord.referralVoided) {
       await tx.order.update({ where: { id: ord.id }, data: { referralVoided: true } });
       await tx.notification.create({
         data: { userId: ord.referrerId, type: 'REFERRAL', title: 'Referal komissiyası ləğv edildi', body: `Sifariş #${ord.id} qaytarıldığı üçün komissiya ləğv olundu.`, link: '/referral-earnings' },

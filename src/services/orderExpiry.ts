@@ -9,6 +9,7 @@ import { closeExpiredGroups, settleDueGroups, syncGroupWindows } from './groupBu
 import { notifyExpiredListings } from './listingExpiry';
 import { runDisputeDeadlines } from './disputeDecision';
 import { expireVips } from './vip';
+import { releaseReferralLedgers } from './referral';
 
 const prisma = new PrismaClient();
 
@@ -279,6 +280,8 @@ export function startOrderExpiryJob() {
     runDisputeDeadlines().catch((e) => console.error('[orderExpiry] runDisputeDeadlines:', e?.message));
     // Satışı başlamış, amma stoku götürülməmiş sifarişlər (təhlükəsizlik şəbəkəsi).
     syncCommittedStock().catch((e) => console.error('[orderExpiry] syncCommittedStock:', e?.message));
+    // Qaytarma müddəti bitmiş referal komissiyaları ödənilə bilən et.
+    releaseReferralLedgers().catch(() => {});
     // Müddəti bitmiş VIP elanları adi elana çevir.
     expireVips().catch(() => {});
   };

@@ -9,6 +9,7 @@
 //   Sifariş CANCELLED/REFUNDED → ledger REVERSED (balansdan çıxır).
 //   Admin payout → AVAILABLE + heldByPlatform ledger-lər PAID_OUT olur.
 import { PrismaClient } from '@prisma/client';
+import { syncReferralLedger, effectiveReferral } from './referral';
 
 const prisma = new PrismaClient();
 
@@ -53,11 +54,16 @@ export async function recordSettlement(orderId: number): Promise<void> {
         paymentStatus: true, paymentMethod: true, refundedAmount: true,
         // Birgə alış: hesablaşmaya qədər ödəniş açılmır (aşağıya bax).
         groupBuyId: true, deliveredAt: true,
+        referralAmount: true, referralVoided: true,
         // Hesablaşma BİZNES üzrə qruplaşdırılır — ödəniş biznesin bank hesabına gedir.
         items: { select: { listing: { select: { businessId: true } } }, take: 1 },
       },
     });
     if (!order) return;
+    // Referal satıcının hesablaşması — ödəniş üsulundan asılı deyil (nağdda da).
+    await syncReferralLedger(orderId).catch((e) => console.error('[settlement] referal:', e?.message));
+    // Satıcının qazancından çıxılan referal komissiyası (qaytarılmamış hissəyə düşən).
+    const referralCut = effectiveReferral({ referralAmount: order.referralAmount, referralVoided: order.referralVoided, total: order.total, refundedAmount: order.refundedAmount });
     const existing = await prisma.sellerLedger.findUnique({ where: { orderId } });
 
     // Hələ ödənilməyibsə ledger yaratmırıq (yalnız PAID sifarişlər hesablaşır).
@@ -105,12 +111,12 @@ export async function recordSettlement(orderId: number): Promise<void> {
       const rate = await getCommissionPercent();
       const gross = effectiveGross;
       const commission = Math.round(gross * rate) / 100;
-      const net = Math.round((gross - commission) * 100) / 100;
+      const net = Math.round((gross - commission - referralCut) * 100) / 100;
       await prisma.sellerLedger.create({
         data: {
           sellerId: order.sellerId, orderId: order.id, buyerId: order.buyerId,
           businessId: order.items[0]?.listing?.businessId ?? null,
-          grossAmount: gross, commissionRate: rate, commission, netAmount: net,
+          grossAmount: gross, commissionRate: rate, commission, netAmount: net, referralAmount: referralCut,
           heldByPlatform: order.paymentMethod === 'CARD',
           // Saxlama pəncərəsi bitməyibsə AVAILABLE etmirik — PENDING qalır.
           status: (delivered && holdDays > 0 ? 'PENDING' : targetStatus) as any,
@@ -143,11 +149,12 @@ export async function recordSettlement(orderId: number): Promise<void> {
     if (existing.status !== nextStatus) patch.status = nextStatus;
     // Qismən iadədən sonra məbləğlər yenidən hesablanır — satıcıya yalnız
     // qaytarılmayan hissənin qazancı ödənilir.
-    if (!reversed && Math.abs(existing.grossAmount - effectiveGross) > 0.009) {
+    if (!reversed && (Math.abs(existing.grossAmount - effectiveGross) > 0.009 || Math.abs(existing.referralAmount - referralCut) > 0.009)) {
       const commission = Math.round(effectiveGross * existing.commissionRate) / 100;
       patch.grossAmount = effectiveGross;
       patch.commission = commission;
-      patch.netAmount = Math.round((effectiveGross - commission) * 100) / 100;
+      patch.referralAmount = referralCut;
+      patch.netAmount = Math.round((effectiveGross - commission - referralCut) * 100) / 100;
       console.log(`[settlement] sifariş #${order.id}: qismən iadə (${refunded} AZN) → satıcı qazancı ${patch.netAmount} AZN oldu`);
     }
     if (delivered && !existing.availableAt) patch.availableAt = availableAt;
@@ -166,7 +173,10 @@ export async function recordSettlementMany(orderIds: number[]): Promise<void> {
 // Satıcının balans xülasəsi.
 export async function sellerBalance(sellerId: number) {
   const rows = await prisma.sellerLedger.findMany({ where: { sellerId }, select: { status: true, netAmount: true, commission: true, heldByPlatform: true } });
+  // NAĞD referal satışında pul satıcıdadır — referal komissiyasını platformaya borcludur.
+  const refCash = await prisma.referralLedger.aggregate({ where: { sellerId, heldByPlatform: false, status: { not: 'REVERSED' } }, _sum: { amount: true } });
   let available = 0, pending = 0, paidOut = 0, commissionDueCash = 0;
+  const referralDueCash = refCash._sum.amount || 0;
   for (const r of rows) {
     if (!r.heldByPlatform) { if (r.status !== 'REVERSED') commissionDueCash += r.commission; continue; }
     if (r.status === 'AVAILABLE') available += r.netAmount;
@@ -174,7 +184,7 @@ export async function sellerBalance(sellerId: number) {
     else if (r.status === 'PAID_OUT') paidOut += r.netAmount;
   }
   const r2 = (n: number) => Math.round(n * 100) / 100;
-  return { available: r2(available), pending: r2(pending), paidOut: r2(paidOut), commissionDueCash: r2(commissionDueCash) };
+  return { available: r2(available), pending: r2(pending), paidOut: r2(paidOut), commissionDueCash: r2(commissionDueCash), referralDueCash: r2(referralDueCash) };
 }
 
 // Payout yarat — satıcının AVAILABLE + heldByPlatform ledger-lərini PAID_OUT et.

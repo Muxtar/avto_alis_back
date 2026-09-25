@@ -28,7 +28,7 @@ export async function notifySellersNewOrder(orderIds: number[]): Promise<void> {
     // Yalnız hələ xəbər verilməmiş və LƏĞV OLUNMAMIŞ sifarişlər.
     const targets = await prisma.order.findMany({
       where: { id: { in: ids }, sellerNotifiedAt: null, status: { not: 'CANCELLED' } },
-      select: { id: true, sellerId: true, total: true },
+      select: { id: true, sellerId: true, total: true, referrerId: true, referralAmount: true },
     });
     if (!targets.length) return;
 
@@ -53,6 +53,18 @@ export async function notifySellersNewOrder(orderIds: number[]): Promise<void> {
         link: '/orders?tab=selling',
       })),
     }).catch(() => {});
+
+    // Kartla ödənilmiş referal sifarişi — referal satıcıya da indi xəbər ver.
+    const refs = claimed.filter((o) => o.referrerId && o.referralAmount);
+    if (refs.length) {
+      await prisma.notification.createMany({
+        data: refs.map((o) => ({
+          userId: o.referrerId!, type: 'REFERRAL', title: 'Linkinizdən sifariş verildi',
+          body: `Sifariş #${o.id}: komissiya ${(o.referralAmount || 0).toFixed(2)} AZN (çatdırılandan və qaytarma müddəti bitəndən sonra ödənilir).`,
+          link: '/referral-earnings',
+        })),
+      }).catch(() => {});
+    }
 
     for (const o of claimed) {
       emitToUser(o.sellerId, 'order:new', { orderId: o.id, total: o.total });

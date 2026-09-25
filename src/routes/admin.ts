@@ -2245,7 +2245,8 @@ router.get('/admin/finance', requirePermission('finance'), async (req: AuthReque
       // Bütün ödənilmiş (kart+nağd)
       prisma.order.aggregate({ _sum: { total: true }, _count: true, where: { ...baseWhere, paymentStatus: 'PAID' } }),
       // Referala ödəniləcək komissiya (voided olmayan)
-      prisma.order.aggregate({ _sum: { referralAmount: true }, where: { ...baseWhere, paymentStatus: 'PAID', referralVoided: false } }),
+      // Referal satıcılara borcumuz — hesablaşma cədvəlindən (nağd və kart), ödənilməmiş hissə.
+      prisma.referralLedger.aggregate({ _sum: { amount: true }, where: { status: { in: ['PENDING', 'AVAILABLE'] } } }),
     ]);
 
     res.json({
@@ -2259,7 +2260,7 @@ router.get('/admin/finance', requirePermission('finance'), async (req: AuthReque
         refundedCount: refunded._count || 0,
         allPaidTotal: allPaid._sum.total || 0,      // ümumi dövriyyə
         allPaidCount: allPaid._count || 0,
-        referralPayable: referralAgg._sum.referralAmount || 0, // referrerlara ödəniləcək
+        referralPayable: referralAgg._sum.amount || 0, // referal satıcılara ödəniləcək (gözləyən + ödənilə bilən)
       },
       transactions: rows,
       total, page, totalPages: Math.ceil(total / take) || 1,

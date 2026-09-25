@@ -12,6 +12,7 @@ import authRoutes from './routes/auth';
 import verifyRoutes from './routes/verify';
 import listingsRoutes from './routes/listings';
 import vipRoutes from './routes/vip';
+import { migrateReferralPrograms } from './services/referral';
 import adminRoutes from './routes/admin';
 import userRoutes from './routes/user';
 import messageRoutes from './routes/messages';
@@ -325,7 +326,9 @@ server.listen(PORT, () => {
   backfillListingExpiresAt();
   backfillOptimizeImages();
   // Keçid iş başlamazdan ƏVVƏL bitməlidir (iş stoku sinxronlaşdırır).
-  migrateStockModelV2().finally(() => startOrderExpiryJob());   // satıcı təsdiqi timeout → avtomatik refund
+  migrateStockModelV2()
+    .then(() => migrateReferralPrograms().catch((e) => console.error('[startup] referal keçidi:', e?.message)))
+    .finally(() => startOrderExpiryJob());   // satıcı təsdiqi timeout → avtomatik refund
   startYangoWatcher();     // Yango statusu + kuryer kodları (səhifə açıq olmasa da)
   seedLegalDocuments();    // hüquqi sənədlər bazada yoxdursa yazılsın
 });

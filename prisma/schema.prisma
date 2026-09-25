@@ -207,6 +207,9 @@ model User {
   courierOrders         Order[]               @relation("CourierOrders")
   referralOrders        Order[]               @relation("ReferralOrders")
   referralCarts         ReferralCart[]        @relation("ReferralCarts")
+  // Referal komissiyasının köçürüləcəyi hesab (referal satıcı üçün).
+  referralIban          String?
+  referralPayeeName     String?
   emailVerifications    EmailVerification[]
   socialLinks           SocialLink[]
   outreachRequests      SocialOutreach[]      @relation("OutreachRequests")
@@ -419,6 +422,9 @@ model Listing {
   // Müddət bitəndə sahibinə bildiriş göndərilib (təkrar göndərilməsin).
   // Elan yenilənəndə null-a qaytarılır — növbəti bitmədə yenə bildiriş gedir.
   expiryNotifiedAt     DateTime?
+  // Referal: DEFAULT (proqramın məhsul qaydasına tabe) | ON (daxil) | OFF (xaric) + xüsusi faiz.
+  referralMode         String          @default("DEFAULT")
+  referralPercent      Float?
   // VIP — ödənişli önə çıxarma. isVip=true olan elanlar siyahıda HƏMİŞƏ əvvəldə.
   // vipUntil keçəndə iş (services/vip.ts) isVip-i söndürür.
   isVip                Boolean         @default(false)
@@ -622,6 +628,8 @@ model CartItem {
   // Birgə alış sətri — adi sətirdən AYRI saxlanılır (qiyməti qrupun ümumi
   // sayına görə hesablanır). Ona görə unikal açara da daxildir.
   groupBuyId Int?
+  // Referal linkindən gəlibsə — sifarişdə komissiya bu linkin sahibinə yazılır.
+  referralCartId Int?
   cart       Cart      @relation(fields: [cartId], references: [id], onDelete: Cascade)
   listing    Listing   @relation(fields: [listingId], references: [id], onDelete: Cascade)
   groupBuy   GroupBuy? @relation(fields: [groupBuyId], references: [id], onDelete: SetNull)
@@ -733,6 +741,7 @@ model Order {
   referralPercent     Float? // tətbiq olunan komissiya faizi
   referralAmount      Float? // hesablanmış komissiya məbləği
   referralVoided      Boolean         @default(false) // qaytarma/refund-da komissiya ləğv edilib
+  referralCartId      Int? // hansı referal linkindən
   stockRestored       Boolean         @default(false) // ödəniş uğursuz olduqda stok yalnız bir dəfə geri qaytarılır (idempotentlik)
   hiddenForBuyer      Boolean         @default(false) // alıcı öz siyahısından gizlədib (sil)
   hiddenForSeller     Boolean         @default(false) // satıcı öz siyahısından gizlədib (sil)
@@ -852,6 +861,9 @@ model OrderItem {
   quantity       Int
   price          Float
   title          String
+  // Referal komissiyası bu sətir üçün (məhsula görə faiz fərqli ola bilər).
+  referralPercent Float?
+  referralAmount  Float?
   order          Order           @relation(fields: [orderId], references: [id], onDelete: Cascade)
   listing        Listing         @relation(fields: [listingId], references: [id], onDelete: Cascade)
   returnRequests ReturnRequest[]
@@ -1176,28 +1188,114 @@ model BusinessObject {
   @@index([businessId])
 }
 
-// Referal qaydası: mağaza (obyekt) hansı ixtisasa hansı faizlə komissiya verir + sənəd tələbi.
+// ── REFERAL PROQRAMI ──
+// Satıcının «kimlər mənim yerimə satsın» ayarı. Bir mağazaya (objectId) və ya
+// fərdi satıcıya (objectId = null) aiddir. Bax: services/referral.ts.
+model ReferralProgram {
+  id             Int               @id @default(autoincrement())
+  sellerId       Int // proqramın sahibi (mağazanın biznes sahibi və ya fərdi satıcı)
+  objectId       Int?              @unique
+  enabled        Boolean           @default(false)
+  // Kim sata bilər: ALL (hamı) | PROFESSION (ixtisas qaydalarına görə) | INVITED (yalnız dəvət/təsdiq etdiklərim).
+  // Hər rejimdə ACTIVE partnyor həmişə sata bilir, REVOKED heç vaxt.
+  audience       String            @default("PROFESSION")
+  // Hansı məhsullar: ALL (hamısı, OFF olanlardan başqa) | SELECTED (yalnız ON işarələnənlər).
+  productScope   String            @default("ALL")
+  defaultPercent Float             @default(5)
+  linkDays       Int               @default(30) // referal linkinin etibarlılıq müddəti
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+  rules          ReferralRule[]
+  partners       ReferralPartner[]
+
+  @@index([sellerId])
+}
+
+// İxtisas qaydası: hansı ixtisasa hansı faizlə komissiya + sənəd tələbi.
 model ReferralRule {
-  id                Int            @id @default(autoincrement())
-  objectId          Int
+  id                Int              @id @default(autoincrement())
+  objectId          Int? // köhnə (proqramdan əvvəlki) bağlantı
+  programId         Int?
   profession        String // İxtisas adı (məs. "Həkim")
   commissionPercent Float // komissiya faizi (0..100)
-  requiredDoc       String         @default("NONE") // NONE | DIPLOMA | CV | ANY
-  object            BusinessObject @relation(fields: [objectId], references: [id], onDelete: Cascade)
+  requiredDoc       String           @default("NONE") // NONE | DIPLOMA | CV | ANY
+  object            BusinessObject?  @relation(fields: [objectId], references: [id], onDelete: Cascade)
+  program           ReferralProgram? @relation(fields: [programId], references: [id], onDelete: Cascade)
 
   @@index([objectId])
+  @@index([programId])
+}
+
+// Referal partnyoru — satıcının konkret şəxslə əlaqəsi.
+// INVITED (satıcı dəvət etdi) → ACTIVE (qəbul etdi) · REQUESTED (şəxs müraciət etdi) → ACTIVE (satıcı təsdiqlədi)
+// REJECTED · REVOKED (satıcı dayandırdı — heç bir rejimdə sata bilməz).
+model ReferralPartner {
+  id        Int             @id @default(autoincrement())
+  programId Int
+  userId    Int
+  status    String // INVITED | REQUESTED | ACTIVE | REJECTED | REVOKED
+  percent   Float? // bu şəxsə xüsusi faiz (boşdursa ümumi qayda)
+  note      String?
+  createdAt DateTime        @default(now())
+  updatedAt DateTime        @updatedAt
+  program   ReferralProgram @relation(fields: [programId], references: [id], onDelete: Cascade)
+
+  @@unique([programId, userId])
+  @@index([userId])
+}
+
+// Referal komissiyasının hesablaşması — referal satıcıya borcumuz.
+// Çatdırılandan sonra PENDING, qaytarma müddəti bitəndə AVAILABLE, admin
+// ödəyəndə PAID_OUT. Ləğv/tam iadə → REVERSED (ödənilibsə clawbackNeeded).
+model ReferralLedger {
+  id             Int       @id @default(autoincrement())
+  orderId        Int       @unique
+  referrerId     Int
+  sellerId       Int
+  amount         Float
+  heldByPlatform Boolean   @default(true) // KART: pul bizdədir. NAĞD: satıcı komissiyanı platformaya borcludur
+  status         String    @default("PENDING") // PENDING | AVAILABLE | PAID_OUT | REVERSED
+  availableAt    DateTime?
+  payoutId       Int?
+  clawbackNeeded Boolean   @default(false)
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@index([referrerId, status])
+  @@index([sellerId])
+}
+
+model ReferralPayout {
+  id          Int      @id @default(autoincrement())
+  referrerId  Int
+  amount      Float
+  iban        String?
+  payeeName   String?
+  method      String?
+  reference   String?
+  createdById Int
+  createdName String
+  createdAt   DateTime @default(now())
+
+  @@index([referrerId, createdAt])
 }
 
 // Peşəkarın yaratdığı referal səbət (link) — alıcıya göndərilir.
 model ReferralCart {
-  id         Int      @id @default(autoincrement())
-  token      String   @unique
+  id         Int       @id @default(autoincrement())
+  token      String    @unique
   referrerId Int
-  objectId   Int
-  businessId Int
-  percent    Float // bu referala tətbiq olunan komissiya faizi
+  programId  Int?
+  sellerId   Int?
+  objectId   Int?
+  businessId Int?
+  percent    Float // link yaradılanda göstərilən faiz (sifarişdə yenidən hesablanır)
   items      Json // [{listingId, quantity}]
-  createdAt  DateTime @default(now())
+  title      String?
+  active     Boolean   @default(true) // referal satıcı və ya mağaza linki dayandıra bilər
+  expiresAt  DateTime?
+  clicks     Int       @default(0)
+  createdAt  DateTime  @default(now())
   referrer   User     @relation("ReferralCarts", fields: [referrerId], references: [id], onDelete: Cascade)
 
   @@index([referrerId])
@@ -1528,7 +1626,8 @@ model SellerLedger {
   grossAmount    Float // sifarişin ümumi məbləği
   commissionRate Float // tətbiq olunan komissiya faizi (surət)
   commission     Float // platforma komissiyası
-  netAmount      Float // satıcının qazancı (gross - commission)
+  netAmount      Float // satıcının qazancı (gross - commission - referralAmount)
+  referralAmount Float        @default(0) // referal satıcıya gedən komissiya (satıcının qazancından çıxılır)
   heldByPlatform Boolean      @default(true) // KART: platforma pulu saxlayır. NAĞD: satıcı özü alıb (komissiya borcu)
   status         LedgerStatus @default(PENDING)
   // Hansı BİZNESƏ aiddir — ödəniş biznesin bank hesabına (BankAccount.isPrimary)
