@@ -18,6 +18,7 @@ const SUFFIXES = [
   'ından', 'indən', 'undan', 'ündən', 'ında', 'ində', 'unda', 'ündə',
   'dan', 'dən', 'nın', 'nin', 'nun', 'nün', 'da', 'də',
   'ın', 'in', 'un', 'ün', 'nı', 'ni', 'nu', 'nü',
+  'sı', 'si', 'su', 'sü', // mənsubiyyət: ayaqqabısı → ayaqqabı, maşın qapısı → qapı
   'ı', 'i', 'u', 'ü', 'a', 'ə',
 ];
 

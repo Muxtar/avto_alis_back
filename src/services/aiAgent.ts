@@ -15,6 +15,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { PrismaClient, Prisma } from '@prisma/client';
 import { resolveFlag } from './settings';
+import { searchWords } from './searchTerms';
 
 const prisma = new PrismaClient();
 
@@ -86,8 +87,8 @@ async function getJson(path: string, token: string): Promise<any> {
 // ── Alət sxemləri ──
 const TOOLS: Anthropic.Tool[] = [
   // OXUMA
-  { name: 'search_listings', description: 'Təsdiqlənmiş elanları axtarır (ən ucuz/bahalı üçün sort). query-yə yalnız məhsul/marka/model açar sözlərini ver (məs. "Toyota Corolla Cross"), "bul/axtar/maşın" kimi sözləri yox. Başlıq, təsvir, marka, model üzrə axtarır. Qiymət AZN.',
-    input_schema: { type: 'object', properties: { query: { type: 'string' }, category: { type: 'string' },
+  { name: 'search_listings', description: 'Saytdakı elanları axtarır — saytın öz axtarışı ilə EYNİ məntiq (şəkilçilər atılır: "telefonlar"→"telefon"; başlıq, təsvir, kateqoriya, marka, model, şəhər, satıcı/mağaza adı üzrə). query-yə yalnız məhsul/marka/model açar sözlərini ver (məs. "Toyota Corolla Cross"), "bul/axtar/var?" kimi sözləri yox. category-ni YALNIZ istifadəçi açıq kateqoriya deyəndə ver. Nəticə 0-dırsa başqa sözlə (sinonim, tək söz, ingiliscə/azərbaycanca) YENİDƏN axtar — "yoxdur" deməzdən əvvəl ən azı 2 fərqli sorğu yoxla. Qiymət AZN.',
+    input_schema: { type: 'object', properties: { query: { type: 'string' }, category: { type: 'string' }, city: { type: 'string' },
       sort: { type: 'string', enum: ['relevance', 'price_asc', 'price_desc', 'newest'] }, minPrice: { type: 'number' }, maxPrice: { type: 'number' }, limit: { type: 'number' }, includeOutOfStock: { type: 'boolean' } } } },
   { name: 'listing_details', description: 'Bir elanın ətraflı məlumatı (qiymət, vəziyyət, stok, satıcı/obyekt, obyekt reytinqi).',
     input_schema: { type: 'object', properties: { listingId: { type: 'number' } }, required: ['listingId'] } },
@@ -130,6 +131,45 @@ const TOOLS: Anthropic.Tool[] = [
   { name: 'clear_cart', description: 'Səbəti tamamilə boşalt (dərhal icra olunur).', input_schema: { type: 'object', properties: {} } },
   { name: 'request_return', description: 'Məhsulu geri qaytarmaq üçün iadə sorğusu (təsdiqli). Təhvildən 14 gün ərzində.', input_schema: { type: 'object', properties: { orderId: { type: 'number' }, orderItemId: { type: 'number' }, reason: { type: 'string' }, reasonText: { type: 'string' }, quantity: { type: 'number' } }, required: ['orderId', 'reason'] } },
   { name: 'file_complaint', description: 'Şikayət yarat (təsdiqli).', input_schema: { type: 'object', properties: { targetUserId: { type: 'number' }, category: { type: 'string' }, description: { type: 'string' } }, required: ['category', 'description'] } },
+
+  // ── Əlavə OXUMA alətləri (saytın digər bölmələri) ──
+  { name: 'search_professionals', description: 'Peşəkar/usta axtarışı (ixtisas və ya ad üzrə, istəyə görə şəhər).', input_schema: { type: 'object', properties: { query: { type: 'string' }, city: { type: 'string' } } } },
+  { name: 'professional_reviews', description: 'Peşəkarın rəyləri və reytinqi.', input_schema: { type: 'object', properties: { userId: { type: 'number' } }, required: ['userId'] } },
+  { name: 'search_businesses', description: 'Təsdiqlənmiş biznes/mağaza axtarışı (ad və ya VÖEN üzrə).', input_schema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] } },
+  { name: 'object_details', description: 'Obyektin (mağaza/filial) səhifəsi: ünvan, iş saatları, elanları.', input_schema: { type: 'object', properties: { objectId: { type: 'number' } }, required: ['objectId'] } },
+  { name: 'seller_profile', description: 'Satıcının profili, elanları və reytinqi.', input_schema: { type: 'object', properties: { userId: { type: 'number' } }, required: ['userId'] } },
+  { name: 'listings_by_city', description: 'Şəhərlər üzrə elan sayı (city verilməsə) və ya konkret şəhərin elanları.', input_schema: { type: 'object', properties: { city: { type: 'string' } } } },
+  { name: 'booking_availability', description: 'Bron edilə bilən elanın məşğul günləri/saatları.', input_schema: { type: 'object', properties: { listingId: { type: 'number' } }, required: ['listingId'] } },
+  { name: 'my_conversations', description: 'Mesaj söhbətlərim (kimlə, son mesaj, oxunmamış).', input_schema: { type: 'object', properties: {} } },
+  { name: 'read_conversation', description: 'Bir istifadəçi ilə yazışmanın son mesajları.', input_schema: { type: 'object', properties: { partnerId: { type: 'number' }, limit: { type: 'number' } }, required: ['partnerId'] } },
+  { name: 'my_contacts', description: 'Kontaktlarım.', input_schema: { type: 'object', properties: {} } },
+  { name: 'my_blocked_users', description: 'Blokladığım istifadəçilər.', input_schema: { type: 'object', properties: {} } },
+  { name: 'my_complaints', description: 'Şikayətlərim və vəziyyəti.', input_schema: { type: 'object', properties: {} } },
+  { name: 'my_support_tickets', description: 'Dəstək müraciətlərim.', input_schema: { type: 'object', properties: {} } },
+  { name: 'support_ticket', description: 'Bir dəstək müraciətinin yazışması.', input_schema: { type: 'object', properties: { ticketId: { type: 'number' } }, required: ['ticketId'] } },
+  { name: 'my_inquiries', description: 'Göndərdiyim sorğular (satıcılardan məhsul/xidmət axtarışı) və gələn təkliflər.', input_schema: { type: 'object', properties: {} } },
+  { name: 'my_groups', description: 'Qrup söhbətlərim.', input_schema: { type: 'object', properties: {} } },
+  { name: 'seller_ratings', description: 'Satıcının sifariş reytinqləri.', input_schema: { type: 'object', properties: { userId: { type: 'number' } }, required: ['userId'] } },
+
+  // ── Əlavə ƏMƏLLƏR ──
+  { name: 'add_address', description: 'Çatdırılma ünvanı əlavə et (dərhal icra olunur).', input_schema: { type: 'object', properties: { label: { type: 'string', description: 'məs. Ev, İş' }, address: { type: 'string' }, phone: { type: 'string' }, isDefault: { type: 'boolean' } }, required: ['label', 'address'] } },
+  { name: 'update_address', description: 'Saxlanmış ünvanı dəyiş (dərhal icra olunur). addressId my_addresses-dən.', input_schema: { type: 'object', properties: { addressId: { type: 'number' }, label: { type: 'string' }, address: { type: 'string' }, phone: { type: 'string' }, isDefault: { type: 'boolean' } }, required: ['addressId'] } },
+  { name: 'delete_address', description: 'Saxlanmış ünvanı sil (təsdiqli).', input_schema: { type: 'object', properties: { addressId: { type: 'number' } }, required: ['addressId'] } },
+  { name: 'mark_notification_read', description: 'Bir bildirişi oxundu et (dərhal icra olunur).', input_schema: { type: 'object', properties: { notificationId: { type: 'number' } }, required: ['notificationId'] } },
+  { name: 'add_contact', description: 'Kontakt əlavə et (dərhal icra olunur).', input_schema: { type: 'object', properties: { name: { type: 'string' }, phone: { type: 'string' } }, required: ['name', 'phone'] } },
+  { name: 'delete_contact', description: 'Kontaktı sil (təsdiqli). contactId my_contacts-dan.', input_schema: { type: 'object', properties: { contactId: { type: 'number' } }, required: ['contactId'] } },
+  { name: 'create_booking', description: 'Bron sorğusu göndər (təsdiqli). RESERVATION elanında date (YYYY-MM-DD) + time ("19:00"); STAY elanında checkIn + checkOut. contactPhone məcburidir — bilinmirsə my_profile-dan götür.', input_schema: { type: 'object', properties: { listingId: { type: 'number' }, date: { type: 'string' }, time: { type: 'string' }, checkIn: { type: 'string' }, checkOut: { type: 'string' }, guests: { type: 'number' }, rooms: { type: 'number' }, contactPhone: { type: 'string' }, contactName: { type: 'string' }, note: { type: 'string' } }, required: ['listingId', 'contactPhone'] } },
+  { name: 'cancel_booking', description: 'Öz bronumu ləğv et (təsdiqli).', input_schema: { type: 'object', properties: { bookingId: { type: 'number' } }, required: ['bookingId'] } },
+  { name: 'create_support_ticket', description: 'Dəstəyə müraciət yaz (təsdiqli). category: ORDER|PAYMENT|ACCOUNT|LISTING|OTHER.', input_schema: { type: 'object', properties: { subject: { type: 'string' }, body: { type: 'string' }, category: { type: 'string' } }, required: ['subject', 'body'] } },
+  { name: 'reply_support_ticket', description: 'Dəstək müraciətinə cavab yaz (təsdiqli).', input_schema: { type: 'object', properties: { ticketId: { type: 'number' }, body: { type: 'string' } }, required: ['ticketId', 'body'] } },
+  { name: 'block_user', description: 'İstifadəçini blokla (təsdiqli).', input_schema: { type: 'object', properties: { userId: { type: 'number' } }, required: ['userId'] } },
+  { name: 'unblock_user', description: 'Bloku aç (təsdiqli).', input_schema: { type: 'object', properties: { userId: { type: 'number' } }, required: ['userId'] } },
+  { name: 'rate_order', description: 'Tamamlanmış sifarişə reytinq ver (təsdiqli, 1-5).', input_schema: { type: 'object', properties: { orderId: { type: 'number' }, rating: { type: 'number' }, comment: { type: 'string' } }, required: ['orderId', 'rating'] } },
+  { name: 'review_professional', description: 'Peşəkara rəy yaz (təsdiqli, 1-5 ulduz).', input_schema: { type: 'object', properties: { userId: { type: 'number' }, rating: { type: 'number' }, content: { type: 'string' } }, required: ['userId', 'content'] } },
+  { name: 'rate_consultation', description: 'Bitmiş konsultasiyanı qiymətləndir (təsdiqli, 1-5).', input_schema: { type: 'object', properties: { consultationId: { type: 'number' }, stars: { type: 'number' }, comment: { type: 'string' } }, required: ['consultationId', 'stars'] } },
+  { name: 'create_inquiry', description: 'Satıcılara sorğu göndər — "mənə X lazımdır" (təsdiqli). Uyğun satıcılar təklif göndərir. cities istəyə görə.', input_schema: { type: 'object', properties: { text: { type: 'string' }, cities: { type: 'array', items: { type: 'string' } } }, required: ['text'] } },
+  { name: 'close_inquiry', description: 'Öz sorğumu bağla (təsdiqli).', input_schema: { type: 'object', properties: { inquiryId: { type: 'number' } }, required: ['inquiryId'] } },
+  { name: 'update_profile', description: 'Profil məlumatını dəyiş (təsdiqli): ad, şəhər, ünvan, bio.', input_schema: { type: 'object', properties: { name: { type: 'string' }, city: { type: 'string' }, address: { type: 'string' }, bio: { type: 'string' } } } },
 ];
 
 // ── ƏMƏLLƏR İKİ QRUPA BÖLÜNÜR ──
@@ -144,16 +184,25 @@ const TOOLS: Anthropic.Tool[] = [
 const AUTO_ACTIONS = new Set([
   'add_to_cart', 'update_cart_item', 'remove_from_cart', 'clear_cart',
   'add_to_favorites', 'remove_favorite', 'mark_all_notifications_read', 'reactivate_listing',
+  'add_address', 'update_address', 'mark_notification_read', 'add_contact',
 ]);
 const CONFIRM_ACTIONS = new Set([
   'send_message', 'review_listing', 'review_object', 'delete_listing',
   'update_order_status', 'file_complaint', 'request_consultation', 'request_return',
+  'delete_address', 'delete_contact', 'create_booking', 'cancel_booking',
+  'create_support_ticket', 'reply_support_ticket', 'block_user', 'unblock_user',
+  'rate_order', 'review_professional', 'rate_consultation', 'create_inquiry', 'close_inquiry',
+  'update_profile',
 ]);
 const ACTION_NAMES = new Set([...AUTO_ACTIONS, ...CONFIRM_ACTIONS]);
 
 const SYSTEM = `Sən "tradixai" alış-satış saytının AI köməkçisisən. Cavabları HƏMİŞƏ Azərbaycan dilində, qısa və aydın ver.
 
-Sən DAXİL OLMUŞ istifadəçi adından işləyirsən — alətlər avtomatik onun kimliyi ilə məhdudlaşır. Saytdakı demək olar bütün funksiyaları alətlərlə edə bilərsən: axtarış, sifarişlər, çatdırılma izləmə, elanlar, səbət, seçilmişlər, ünvanlar, bildirişlər, bron, konsultasiya, biznes/obyekt, referal, rəy/reytinq, mesaj.
+Sən DAXİL OLMUŞ istifadəçi adından işləyirsən — alətlər avtomatik onun kimliyi ilə məhdudlaşır. Saytdakı demək olar bütün funksiyaları alətlərlə edə bilərsən: axtarış (elan, peşəkar, biznes, şəhər üzrə), sifarişlər, çatdırılma izləmə, elanlar, səbət, seçilmişlər, ünvanlar, bildirişlər, bron (yarat/ləğv et), konsultasiya, biznes/obyekt, referal, rəy/reytinq, mesaj və yazışmalar, kontaktlar, bloklama, şikayət, dəstək müraciəti, sorğular, profil.
+
+EDƏ BİLMƏDİYİN İKİ ŞEY: (1) ALIŞI TAMAMLAMAQ — ödəniş/checkout-u sən etmirsən: məhsulu səbətə atırsan, istifadəçi ödənişi /cart səhifəsində özü edir. (2) SATIŞ — elan yaratmaq/redaktə etmək, sorğulara təklif vermək satıcının özünə aiddir: bunun üçün /account səhifəsinə yönləndir.
+
+AXTARIŞ: istifadəçi məhsul soruşanda "yoxdur" deməzdən əvvəl ən azı 2 fərqli sorğu yoxla (tək əsas söz, sinonim, marka adı, ingiliscə/azərbaycanca variant). Tapılan elanda available:false varsa "saytda var, amma stokda bitib" de — "yoxdur" demə.
 
 Qaydalar:
 - Yalnız alətlərlə işlə; məlumat uydurma. Nəticə yoxsa açıq de.
@@ -209,49 +258,89 @@ async function runReadTool(name: string, input: any, userId: number, token: stri
   const now = new Date();
   switch (name) {
     case 'search_listings': {
-      const take = clamp(input.limit, 5, 20);
-      const base: any = { status: 'APPROVED', OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] };
+      const take = clamp(input.limit, 8, 20);
+      const base: any = {
+        status: 'APPROVED',
+        AND: [
+          { OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] },
+          // Saytdakı kimi: deaktiv biznes/obyektin elanları görünmür.
+          { OR: [{ businessId: null }, { business: { isActive: true } }] },
+          { OR: [{ businessObjectId: null }, { businessObject: { isActive: true } }] },
+        ],
+      };
       const filters: any[] = [];
-      if (input.category) filters.push({ category: { contains: String(input.category), mode: 'insensitive' } });
       if (typeof input.minPrice === 'number') filters.push({ price: { gte: input.minPrice } });
       if (typeof input.maxPrice === 'number') filters.push({ price: { lte: input.maxPrice } });
+      if (input.city) filters.push({ city: { contains: String(input.city), mode: 'insensitive' } });
+      // Kateqoriya YUMŞAQ filtrdir: model «Telefonlar» yazıb elan «Elektronika ›
+      // Telefon» kateqoriyasındadırsa nəticə 0 olmasın — kökə salınıb yoxlanır,
+      // yenə tapılmasa kateqoriyasız təkrar axtarılır.
+      const catWords = input.category ? searchWords(String(input.category)) : [];
+      const catFilter = catWords.length ? { AND: catWords.map((w) => ({ category: { contains: w, mode: 'insensitive' } })) } : null;
 
-      // Sözlərə görə axtarış: hər söz başlıq/təsvir/MARKA/MODEL/forVehicle/kateqoriyada axtarılır.
-      // (Əvvəl yalnız başlıq+təsvir idi → Toyota Corolla Cross kimi marka/model sahələrdə olanlar tapılmırdı.)
-      const FIELDS = ['title', 'description', 'brand', 'model', 'forVehicle', 'category'];
-      const STOP = new Set(['bul', 'tap', 'axtar', 'lazım', 'lazim', 'araç', 'araci', 'aracı', 'araba', 'avtomobil', 'maşın', 'masin', 'nəqliyyat', 'satılır', 'satilir', 'və', 'ile', 'ilə', 'the', 'and', 'car']);
-      const tokens = String(input.query || '').toLowerCase().split(/\s+/).map((s) => s.trim()).filter((w) => w.length >= 2 && !STOP.has(w)).slice(0, 6);
-      const tokenCond = (tok: string) => ({ OR: FIELDS.map((f) => ({ [f]: { contains: tok, mode: 'insensitive' } })) });
+      // SAYTIN ÖZ AXTARIŞI İLƏ EYNİ MƏNTİQ (routes/listings.ts → searchWords):
+      // şəkilçilər atılır, sahələr eynidir (satıcı/mağaza adı, şəhər daxil).
+      // Əvvəl AI yalnız xam sözlə axtarırdı: «telefonlar» «Telefon» elanını,
+      // mağaza adı ilə sorğu isə heç nəyi tapmırdı → saytda olan məhsula
+      // «yoxdur» deyirdi.
+      const STOP = new Set(['bul', 'tap', 'axtar', 'lazım', 'lazim', 'var', 'varmı', 'satılır', 'satilir', 'satış', 'almaq', 'istəyirəm', 'və', 'ile', 'ilə', 'the', 'and', 'for']);
+      const words = searchWords(String(input.query || '')).filter((w) => !STOP.has(w)).slice(0, 6);
+      const wordCond = (w: string) => ({ OR: [
+        { title: { contains: w, mode: 'insensitive' } },
+        { description: { contains: w, mode: 'insensitive' } },
+        { category: { contains: w, mode: 'insensitive' } },
+        { brand: { contains: w, mode: 'insensitive' } },
+        { model: { contains: w, mode: 'insensitive' } },
+        { forVehicle: { contains: w, mode: 'insensitive' } },
+        { city: { contains: w, mode: 'insensitive' } },
+        { user: { name: { contains: w, mode: 'insensitive' } } },
+        { business: { name: { contains: w, mode: 'insensitive' } } },
+        { businessObject: { name: { contains: w, mode: 'insensitive' } } },
+      ] });
 
-      const orderBy: any = input.sort === 'price_asc' ? { price: 'asc' } : input.sort === 'price_desc' ? { price: 'desc' } : { createdAt: 'desc' };
-      // STOKDA OLMAYANLAR gizlədilir (istifadəçi xüsusi istəməsə).
-      // Əvvəl tükənmiş elan da nəticəyə düşürdü: eyni adlı iki elandan biri
-      // stoksuz olanda AI onu seçib «stokda yoxdur» deyirdi, halbuki saytda
-      // həmin məhsulu almaq mümkün idi.
-      if (input.includeOutOfStock !== true) filters.push({ OR: [{ type: { not: 'PRODUCT' } }, { stock: { gt: 0 } }] });
-      const sel = { id: true, title: true, price: true, city: true, condition: true, stock: true, type: true, brand: true, model: true, year: true, priceTiers: { select: { minQty: true, price: true } }, user: { select: { name: true } }, businessObject: { select: { name: true } } };
+      const orderBy: any = input.sort === 'price_asc' ? [{ price: 'asc' }, { id: 'desc' }] : input.sort === 'price_desc' ? [{ price: 'desc' }, { id: 'desc' }] : [{ createdAt: 'desc' }, { id: 'desc' }];
+      const sel = { id: true, title: true, price: true, city: true, condition: true, stock: true, type: true, category: true, brand: true, model: true, year: true, priceTiers: { select: { minQty: true, price: true } }, user: { select: { name: true } }, businessObject: { select: { id: true, name: true } } };
 
-      let rows: any[] = [];
-      if (tokens.length) {
-        // Dəqiq: bütün sözlər uyğun gəlməlidir (AND).
-        rows = await prisma.listing.findMany({ where: { AND: [base, ...filters, ...tokens.map(tokenCond)] }, orderBy, take, select: sel });
-        // Tapılmadısa: hər hansı söz uyğun gəlsin (OR) — yumşaq axtarış.
-        if (rows.length === 0) rows = await prisma.listing.findMany({ where: { AND: [base, ...filters], OR: tokens.map(tokenCond) }, orderBy, take, select: sel });
+      // Addım-addım yumşaldılır: bütün sözlər+kateqoriya → bütün sözlər →
+      // hər hansı söz+kateqoriya → hər hansı söz. İlk nəticə verən qəbul edilir.
+      const attempts: { where: any; match: string }[] = [];
+      const withCat = (conds: any[]) => (catFilter ? [...conds, catFilter] : conds);
+      if (words.length) {
+        attempts.push({ where: { AND: [base, ...filters, ...withCat(words.map(wordCond))] }, match: 'exact' });
+        if (catFilter) attempts.push({ where: { AND: [base, ...filters, ...words.map(wordCond)] }, match: 'exact_no_category' });
+        if (words.length > 1) {
+          attempts.push({ where: { AND: [base, ...filters, ...withCat([{ OR: words.map(wordCond) }])] }, match: 'partial' });
+          if (catFilter) attempts.push({ where: { AND: [base, ...filters, { OR: words.map(wordCond) }] }, match: 'partial_no_category' });
+        }
       } else {
-        rows = await prisma.listing.findMany({ where: { AND: [base, ...filters] }, orderBy, take, select: sel });
+        attempts.push({ where: { AND: [base, ...filters, ...withCat([])] }, match: 'all' });
       }
+
+      let rows: any[] = []; let match = 'none';
+      for (const at of attempts) {
+        // Stokda olanlar əvvəl gəlsin deyə bir az artıq çəkilir.
+        rows = await prisma.listing.findMany({ where: at.where, orderBy, take: take * 2, select: sel });
+        if (rows.length) { match = at.match; break; }
+      }
+      // Tükənmiş elanlar GİZLƏDİLMİR, sona salınır və available:false ilə
+      // işarələnir — AI «saytda var, stokda bitib» desin, «yoxdur» yox.
+      const isAvail = (r: any) => r.type !== 'PRODUCT' || r.stock > 0;
+      rows = [...rows.filter(isAvail), ...(input.includeOutOfStock === false ? [] : rows.filter((r) => !isAvail(r)))].slice(0, take);
       return {
         count: rows.length,
+        match, // exact | partial | *_no_category — partial olanda nəticə sorğuya tam uyğun olmaya bilər
+        searchedWords: words,
         listings: rows.map((r) => ({
           id: r.id, link: `/marketplace/${r.id}`, title: r.title, price: r.price, currency: 'AZN',
-          city: r.city, condition: r.condition, stock: r.stock,
+          city: r.city, condition: r.condition, stock: r.stock, category: r.category,
           // Nəticə ANLIQ vəziyyətdir — model köhnə rəqəmi təkrarlamasın.
           asOf: new Date().toISOString(),
-          available: r.type !== 'PRODUCT' || r.stock > 0,
+          available: isAvail(r),
           // «Çox alanda ucuz» pillələri — AI endirimi izah edə bilsin.
           bulkTiers: (r.priceTiers || []).map((t: any) => ({ minQty: t.minQty, price: t.price })),
           brand: r.brand, model: r.model, year: r.year,
           seller: r.businessObject?.name || r.user?.name || null,
+          objectId: r.businessObject?.id || null,
         })),
       };
     }
@@ -331,6 +420,31 @@ async function runReadTool(name: string, input: any, userId: number, token: stri
       return d && !d.error ? { ...d, asOf: new Date().toISOString() } : d;
     }
     case 'object_reviews': return getJson(`/objects/${clamp(input.objectId, 0, 9e8)}/reviews`, token);
+    case 'search_professionals': {
+      const qs = new URLSearchParams();
+      if (input.query) qs.set('q', String(input.query));
+      if (input.city) qs.set('city', String(input.city));
+      return getJson(`/professionals?${qs.toString()}`, token);
+    }
+    case 'professional_reviews': return getJson(`/professionals/${clamp(input.userId, 0, 9e8)}/reviews`, token);
+    case 'search_businesses': return getJson(`/businesses/search?q=${encodeURIComponent(String(input.query || ''))}`, token);
+    case 'object_details': return getJson(`/objects/${clamp(input.objectId, 0, 9e8)}`, token);
+    case 'seller_profile': return getJson(`/sellers/${clamp(input.userId, 0, 9e8)}`, token);
+    case 'seller_ratings': return getJson(`/sellers/${clamp(input.userId, 0, 9e8)}/ratings`, token);
+    case 'listings_by_city':
+      return input.city
+        ? getJson(`/search/by-city/${encodeURIComponent(String(input.city))}`, token)
+        : getJson('/search/cities-summary', token);
+    case 'booking_availability': return getJson(`/listings/${clamp(input.listingId, 0, 9e8)}/booking-availability`, token);
+    case 'my_conversations': return getJson('/messages/conversations', token);
+    case 'read_conversation': return getJson(`/messages/${clamp(input.partnerId, 0, 9e8)}?limit=${clamp(input.limit, 20, 50)}`, token);
+    case 'my_contacts': return getJson('/me/contacts', token);
+    case 'my_blocked_users': return getJson('/me/blocked', token);
+    case 'my_complaints': return getJson('/me/complaints', token);
+    case 'my_support_tickets': return getJson('/support/tickets', token);
+    case 'support_ticket': return getJson(`/support/tickets/${clamp(input.ticketId, 0, 9e8)}`, token);
+    case 'my_inquiries': return getJson('/inquiries/my', token);
+    case 'my_groups': return getJson('/groups', token);
     default: return { error: `Naməlum alət: ${name}` };
   }
 }
@@ -437,6 +551,125 @@ async function buildAction(name: string, input: any, userId: number): Promise<Pe
       const body: any = { category, description };
       if (Number.isFinite(num(input.targetUserId))) body.targetUserId = num(input.targetUserId);
       return { type: name, endpoint: '/complaints', method: 'POST', body, summary: `Şikayət (${category}): "${description}"` };
+    }
+    case 'add_address': {
+      const label = String(input.label || '').trim(); const address = String(input.address || '').trim();
+      if (!label || !address) return { error: 'label və address lazımdır.' };
+      const body: any = { label, address, isDefault: input.isDefault === true };
+      if (input.phone) body.phone = String(input.phone);
+      return { type: name, endpoint: '/addresses', method: 'POST', body, summary: `Ünvan əlavə et: ${label} — ${address}` };
+    }
+    case 'update_address': {
+      const id = num(input.addressId); if (Number.isNaN(id)) return { error: 'addressId lazımdır (my_addresses).' };
+      const cur = await prisma.savedAddress.findUnique({ where: { id } });
+      if (!cur || cur.userId !== userId) return { error: 'Ünvan tapılmadı.' };
+      // PUT bütün sahələri yazır — verilməyənlər köhnə dəyərdə saxlanılır.
+      const body = {
+        label: input.label ? String(input.label) : cur.label,
+        address: input.address ? String(input.address) : cur.address,
+        phone: input.phone !== undefined ? String(input.phone) : cur.phone,
+        latitude: cur.latitude, longitude: cur.longitude,
+        isDefault: typeof input.isDefault === 'boolean' ? input.isDefault : cur.isDefault,
+      };
+      return { type: name, endpoint: `/addresses/${id}`, method: 'PUT', body, summary: `Ünvanı dəyiş: ${body.label} — ${body.address}` };
+    }
+    case 'delete_address': {
+      const id = num(input.addressId); if (Number.isNaN(id)) return { error: 'addressId lazımdır (my_addresses).' };
+      const cur = await prisma.savedAddress.findUnique({ where: { id }, select: { userId: true, label: true, address: true } });
+      if (!cur || cur.userId !== userId) return { error: 'Ünvan tapılmadı.' };
+      return { type: name, endpoint: `/addresses/${id}`, method: 'DELETE', body: {}, summary: `Ünvanı sil: ${cur.label} — ${cur.address}` };
+    }
+    case 'mark_notification_read': {
+      const id = num(input.notificationId); if (Number.isNaN(id)) return { error: 'notificationId lazımdır.' };
+      return { type: name, endpoint: `/notifications/${id}/read`, method: 'PUT', body: {}, summary: `Bildiriş #${id} oxundu` };
+    }
+    case 'add_contact': {
+      const cname = String(input.name || '').trim(); const phone = String(input.phone || '').trim();
+      if (!cname || !phone) return { error: 'Ad və nömrə lazımdır.' };
+      return { type: name, endpoint: '/me/contacts', method: 'POST', body: { name: cname, phone }, summary: `Kontakt əlavə et: ${cname} (${phone})` };
+    }
+    case 'delete_contact': {
+      const id = num(input.contactId); if (Number.isNaN(id)) return { error: 'contactId lazımdır (my_contacts).' };
+      const c = await prisma.contact.findUnique({ where: { id }, select: { ownerId: true, name: true } });
+      if (!c || c.ownerId !== userId) return { error: 'Kontakt tapılmadı.' };
+      return { type: name, endpoint: `/me/contacts/${id}`, method: 'DELETE', body: {}, summary: `Kontaktı sil: ${c.name}` };
+    }
+    case 'create_booking': {
+      const id = num(input.listingId); const contactPhone = String(input.contactPhone || '').trim();
+      if (Number.isNaN(id) || !contactPhone) return { error: 'listingId və contactPhone lazımdır.' };
+      const l = await prisma.listing.findUnique({ where: { id }, select: { title: true, bookable: true, bookingType: true } });
+      if (!l) return { error: `Elan #${id} tapılmadı.` };
+      if (!l.bookable || !l.bookingType) return { error: `«${l.title}» bron üçün açıq deyil.` };
+      const body: any = { listingId: id, contactPhone, guests: clamp(input.guests, 1, 100) };
+      if (input.contactName) body.contactName = String(input.contactName);
+      if (input.note) body.note = String(input.note);
+      let when: string;
+      if (l.bookingType === 'RESERVATION') {
+        if (!input.date) return { error: 'Bu elan üçün tarix (date, YYYY-MM-DD) lazımdır.' };
+        body.date = String(input.date); if (input.time) body.time = String(input.time);
+        when = `${body.date}${body.time ? ' ' + body.time : ''}`;
+      } else {
+        if (!input.checkIn || !input.checkOut) return { error: 'Bu elan üçün checkIn və checkOut (YYYY-MM-DD) lazımdır.' };
+        body.checkIn = String(input.checkIn); body.checkOut = String(input.checkOut);
+        if (Number.isFinite(num(input.rooms))) body.rooms = num(input.rooms);
+        when = `${body.checkIn} → ${body.checkOut}`;
+      }
+      return { type: name, endpoint: '/bookings', method: 'POST', body, summary: `Bron sorğusu: «${l.title}», ${when}, ${body.guests} nəfər` };
+    }
+    case 'cancel_booking': {
+      const id = num(input.bookingId); if (Number.isNaN(id)) return { error: 'bookingId lazımdır (my_bookings).' };
+      return { type: name, endpoint: `/bookings/${id}/status`, method: 'PUT', body: { status: 'CANCELLED' }, summary: `Bron #${id} ləğv et` };
+    }
+    case 'create_support_ticket': {
+      const subject = String(input.subject || '').trim(); const body = String(input.body || '').trim();
+      if (!subject || body.length < 5) return { error: 'Mövzu və ən azı 5 simvollu mesaj lazımdır.' };
+      const category = ['ORDER', 'PAYMENT', 'ACCOUNT', 'LISTING', 'OTHER'].includes(String(input.category).toUpperCase()) ? String(input.category).toUpperCase() : 'OTHER';
+      return { type: name, endpoint: '/support/tickets', method: 'POST', body: { subject, body, category }, summary: `Dəstək müraciəti (${category}): «${subject}»` };
+    }
+    case 'reply_support_ticket': {
+      const id = num(input.ticketId); const body = String(input.body || '').trim();
+      if (Number.isNaN(id) || !body) return { error: 'ticketId və mətn lazımdır.' };
+      return { type: name, endpoint: `/support/tickets/${id}/reply`, method: 'POST', body: { body }, summary: `Müraciət #${id} cavabı: "${body}"` };
+    }
+    case 'block_user':
+    case 'unblock_user': {
+      const id = num(input.userId); if (Number.isNaN(id) || id === userId) return { error: 'Düzgün userId lazımdır.' };
+      const u = await prisma.user.findUnique({ where: { id }, select: { name: true } });
+      if (!u) return { error: 'İstifadəçi tapılmadı.' };
+      const block = name === 'block_user';
+      return { type: name, endpoint: `/me/block/${id}`, method: block ? 'POST' : 'DELETE', body: {}, summary: `${block ? 'Blokla' : 'Bloku aç'}: ${u.name}` };
+    }
+    case 'rate_order': {
+      const id = num(input.orderId); const r = rating(input.rating);
+      if (Number.isNaN(id) || !r) return { error: 'orderId və 1-5 reytinq lazımdır.' };
+      const comment = input.comment ? String(input.comment).slice(0, 1000) : undefined;
+      return { type: name, endpoint: `/orders/${id}/rating`, method: 'POST', body: { rating: r, comment }, summary: `Sifariş #${id}: ${r}★${comment ? ` — "${comment}"` : ''}` };
+    }
+    case 'review_professional': {
+      const id = num(input.userId); const content = String(input.content || '').trim();
+      if (Number.isNaN(id) || !content) return { error: 'userId və mətn lazımdır.' };
+      return { type: name, endpoint: `/professionals/${id}/comments`, method: 'POST', body: { content, rating: rating(input.rating) }, summary: `Peşəkar #${id} üçün rəy${rating(input.rating) ? ` (${rating(input.rating)}★)` : ''}: "${content}"` };
+    }
+    case 'rate_consultation': {
+      const id = num(input.consultationId); const stars = rating(input.stars);
+      if (Number.isNaN(id) || !stars) return { error: 'consultationId və 1-5 ulduz lazımdır.' };
+      const comment = input.comment ? String(input.comment).slice(0, 1000) : undefined;
+      return { type: name, endpoint: `/consultations/${id}/rate`, method: 'POST', body: { stars, comment }, summary: `Konsultasiya #${id}: ${stars}★` };
+    }
+    case 'create_inquiry': {
+      const text = String(input.text || '').trim(); if (!text) return { error: 'Sorğu mətni lazımdır.' };
+      const cities = Array.isArray(input.cities) ? input.cities.map(String).slice(0, 20) : [];
+      return { type: name, endpoint: '/inquiries', method: 'POST', body: { text, cities }, summary: `Satıcılara sorğu: "${text}"${cities.length ? ` (${cities.join(', ')})` : ''}` };
+    }
+    case 'close_inquiry': {
+      const id = num(input.inquiryId); if (Number.isNaN(id)) return { error: 'inquiryId lazımdır (my_inquiries).' };
+      return { type: name, endpoint: `/inquiries/${id}/close`, method: 'PUT', body: {}, summary: `Sorğu #${id} bağla` };
+    }
+    case 'update_profile': {
+      const body: any = {};
+      for (const k of ['name', 'city', 'address', 'bio']) if (typeof input[k] === 'string' && input[k].trim()) body[k] = input[k].trim();
+      if (!Object.keys(body).length) return { error: 'Dəyişdiriləcək sahə yoxdur.' };
+      return { type: name, endpoint: '/me', method: 'PUT', body, summary: `Profili yenilə: ${Object.entries(body).map(([k, v]) => `${k}=${v}`).join(', ')}` };
     }
     default: return { error: `Naməlum əməl: ${name}` };
   }
