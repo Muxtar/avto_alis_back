@@ -12,7 +12,7 @@ import { runWebSearchTest } from '../services/webSearchAI';
 import { runAgent } from '../services/aiAgent';
 import { getCommissionPercent, setCommissionPercent, createPayout, sellerBalance, getPayoutHoldDays, setPayoutHoldDays } from '../services/settlement';
 import { recordSettlement } from '../services/settlement';
-import { refundOrderSafe } from '../services/refunds';
+import { refundOrderSafe, restoreStockForOrder, commitStockForOrder } from '../services/refunds';
 import { checkPrice, isYangoConfigured, YANGO_TAXI_CLASS } from '../services/yangoDelivery';
 import { cancelActiveYangoClaim } from './yango';
 import { infobipStatus, testWhatsApp } from '../services/infobipWhatsApp';
@@ -2401,11 +2401,8 @@ router.put('/admin/orders/:id/status', requirePermission('orders'), async (req: 
     // Ləğv olunduqda və əvvəl ləğv olunmayıbsa — stoku geri qaytar.
     let refundFailed: string | null = null;
     if (status === 'CANCELLED' && order.status !== 'CANCELLED') {
-      for (const item of order.items) {
-        try {
-          await prisma.listing.update({ where: { id: item.listingId }, data: { stock: { increment: item.quantity } } });
-        } catch { /* listing silinmiş ola bilər */ }
-      }
+      // Stok yalnız götürülübsə qaytarılır (stockCommitted) — ikiqat artım olmasın.
+      await restoreStockForOrder(orderId).catch(() => {});
       // ALICIYA PULU QAYTAR. Əvvəl bu yox idi: admin paneldən ləğv edilən
       // kart sifarişində pul bizdə qalırdı və heç bir qeyd yaranmırdı
       // (istifadəçi özü ləğv edəndə isə qaytarılırdı).
@@ -2414,6 +2411,11 @@ router.put('/admin/orders/:id/status', requirePermission('orders'), async (req: 
         refundFailed = r.error || 'Qaytarma alınmadı';
         console.error(`[admin] sifariş #${orderId} ləğv edildi, LAKİN pul qaytarılmadı: ${refundFailed}`);
       }
+    }
+    // Satış başlayan statusa keçid → stok götürülür (bir dəfə). Çatmırsa xəbər ver.
+    if (['CONFIRMED', 'SHIPPED', 'DELIVERED'].includes(status) && !order.stockCommitted) {
+      const sc = await commitStockForOrder(orderId);
+      if (!sc.ok) { res.status(409).json({ success: false, message: `«${sc.missing}» üçün stok çatmır (qalıb: ${sc.available ?? 0}) — əvvəlcə elanın stokunu artırın.` }); return; }
     }
     const updated = await prisma.order.update({
       where: { id: orderId },

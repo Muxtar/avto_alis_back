@@ -293,6 +293,30 @@ async function ensureAdminPhones() {
   }
 }
 
+// STOK MODELİ v2 — bir dəfəlik keçid. Yeni modeldə stok SATICI TƏSDİQLƏYƏNDƏ
+// götürülür (Order.stockCommitted). Köhnə sifarişlərdə bayraq etibarlı deyil:
+// nağd sifarişin stoku checkout-da götürülüb, bayraq isə qoyulmayıb. Onları
+// «götürülüb» sayırıq ki, təhlükəsizlik şəbəkəsi (syncCommittedStock) və ya
+// satıcı təsdiqi stoku İKİNCİ dəfə azaltmasın. İstisna: hələ gözləyən KART
+// sifarişi — onun stoku heç vaxt götürülməyib, təsdiqdə götürüləcək.
+async function migrateStockModelV2() {
+  const prisma = new PrismaClient();
+  try {
+    const done = await prisma.setting.findUnique({ where: { key: 'stock_model_v2' } });
+    if (done) return;
+    const r = await prisma.order.updateMany({
+      where: { stockCommitted: false, status: { not: 'CANCELLED' }, NOT: { paymentMethod: 'CARD', status: 'PENDING' } },
+      data: { stockCommitted: true },
+    });
+    await prisma.setting.create({ data: { key: 'stock_model_v2', value: new Date().toISOString() } });
+    console.log(`[startup] stok modeli v2: ${r.count} köhnə sifariş «stoku götürülüb» işarələndi`);
+  } catch (err: any) {
+    console.error('[startup] stok modeli v2 keçidi alınmadı:', err.message);
+  } finally {
+    await prisma.$disconnect();
+  }
+}
+
 server.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
   console.log(`CORS origins: ${allowedOrigins.join(', ')}`);
@@ -300,7 +324,8 @@ server.listen(PORT, () => {
   ensureAdminPhones();
   backfillListingExpiresAt();
   backfillOptimizeImages();
-  startOrderExpiryJob();   // satıcı təsdiqi timeout → avtomatik refund
+  // Keçid iş başlamazdan ƏVVƏL bitməlidir (iş stoku sinxronlaşdırır).
+  migrateStockModelV2().finally(() => startOrderExpiryJob());   // satıcı təsdiqi timeout → avtomatik refund
   startYangoWatcher();     // Yango statusu + kuryer kodları (səhifə açıq olmasa da)
   seedLegalDocuments();    // hüquqi sənədlər bazada yoxdursa yazılsın
 });

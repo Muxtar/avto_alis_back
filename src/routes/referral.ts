@@ -203,10 +203,10 @@ router.post('/referral/:token/checkout', referralLimiter, adminAuth, async (req:
     const { address, phone, note } = req.body;
 
     const order = await prisma.$transaction(async (tx) => {
-      // Atomik stok azaltma.
+      // Stok burada AZALMIR — satıcı təsdiqləyəndə (commitStockForOrder). Yalnız mövcudluq.
       for (const i of orderItems) {
-        const r = await tx.listing.updateMany({ where: { id: i.listingId, stock: { gte: i.quantity } }, data: { stock: { decrement: i.quantity } } });
-        if (r.count === 0) throw new Error(`"${i.title}" üçün kifayət qədər stok yoxdur`);
+        const l = await tx.listing.findUnique({ where: { id: i.listingId }, select: { stock: true } });
+        if (!l || l.stock < i.quantity) throw new Error(`"${i.title}" üçün kifayət qədər stok yoxdur`);
       }
       const o = await tx.order.create({
         data: {

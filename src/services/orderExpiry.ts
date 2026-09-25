@@ -1,7 +1,7 @@
 // Satıcı təsdiqi axını — kartla ödənilmiş sifariş satıcı təsdiqini gözləyir.
 // Satıcı müəyyən müddət ərzində təsdiqləməzsə pul AVTOMATİK alıcıya qaytarılır.
 import { PrismaClient } from '@prisma/client';
-import { refundOrderSafe, retryFailedRefunds, unstickPendingRefunds, restoreStockForOrder } from './refunds';
+import { refundOrderSafe, retryFailedRefunds, unstickPendingRefunds, restoreStockForOrder, syncCommittedStock } from './refunds';
 import { recordSettlement, releaseHeldLedgers } from './settlement';
 import { endExpiredConsultations } from '../routes/consultations';
 import { cancelActiveYangoClaim } from '../routes/yango';
@@ -277,6 +277,8 @@ export function startOrderExpiryJob() {
     // İadə/mübahisə müddətləri: cavabsız satıcı → avtomatik təsdiq, göndərilməyən
     // iadə → ləğv, qaytarılmayan pul → sistem qaytarır, cavabsız mübahisə → qərar.
     runDisputeDeadlines().catch((e) => console.error('[orderExpiry] runDisputeDeadlines:', e?.message));
+    // Satışı başlamış, amma stoku götürülməmiş sifarişlər (təhlükəsizlik şəbəkəsi).
+    syncCommittedStock().catch((e) => console.error('[orderExpiry] syncCommittedStock:', e?.message));
     // Müddəti bitmiş VIP elanları adi elana çevir.
     expireVips().catch(() => {});
   };

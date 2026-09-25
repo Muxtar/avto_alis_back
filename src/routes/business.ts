@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { recordSettlement } from '../services/settlement';
 import { validateIban } from '../services/iban';
 import { Prisma, PrismaClient } from '@prisma/client';
+import { commitStockForOrder, restoreStockForOrder } from '../services/refunds';
 import { adminAuth, requirePermission, AuthRequest } from '../middleware/auth';
 import { upload, docUpload, UPLOADS_DIR } from '../middleware/upload';
 import { processImages } from '../middleware/imageProcess';
@@ -1048,11 +1049,17 @@ router.put('/me/business-orders/:orderId/status', adminAuth, async (req: AuthReq
     }
     if (!allowed) { res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return; }
 
-    // CANCELLED → stoku geri qaytar
-    if (status === 'CANCELLED' && order.status !== 'CANCELLED') {
-      for (const it of order.items) {
-        try { await prisma.listing.update({ where: { id: it.listingId }, data: { stock: { increment: it.quantity } } }); } catch { /* silinmiş ola bilər */ }
+    // Satış başlayır → stok indi götürülür; çatmırsa təsdiq edilmir.
+    if (['CONFIRMED', 'SHIPPED', 'DELIVERED'].includes(status) && !order.stockCommitted) {
+      const sc = await commitStockForOrder(order.id);
+      if (!sc.ok) {
+        res.status(409).json({ success: false, code: 'NO_STOCK', message: `«${sc.missing}» üçün stokda kifayət qədər məhsul yoxdur (qalıb: ${sc.available ?? 0}). Sifarişi ləğv edin — alıcının pulu qaytarılacaq.` });
+        return;
       }
+    }
+    // CANCELLED → stoku geri qaytar (yalnız götürülübsə — stockCommitted).
+    if (status === 'CANCELLED' && order.status !== 'CANCELLED') {
+      await restoreStockForOrder(order.id).catch(() => {});
     }
     const updated = await prisma.order.update({ where: { id: orderId }, data: { status: status as any } });
 

@@ -3,7 +3,7 @@ import { rateLimit } from '../middleware/rateLimiter';
 import { PrismaClient, UserType } from '@prisma/client';
 import { adminAuth, requireType, AuthRequest } from '../middleware/auth';
 import { createPayment as createGatewayPayment } from '../services/paymentGateway';
-import { refundOrderSafe, restoreStockForOrder } from '../services/refunds';
+import { refundOrderSafe, restoreStockForOrder, commitStockForOrder } from '../services/refunds';
 import { installmentAllowed, monthsAllowedFor } from '../services/installment';
 import { chargeSavedCard } from '../services/savedCards';
 import { missingRequiredConsents } from '../services/legal';
@@ -383,8 +383,9 @@ router.post('/shared-cart/:token/checkout', requireType(BUYER_TYPES), async (req
     await prisma.$transaction(async (tx) => {
       for (const [sellerId, its] of bySeller.entries()) {
         for (const it of its) {
-          const upd = await tx.listing.updateMany({ where: { id: it.id, stock: { gte: it.quantity } }, data: { stock: { decrement: it.quantity } } });
-          if (upd.count === 0) throw new Error(`"${it.title}" üçün kifayət qədər stok yoxdur`);
+          // Stok burada AZALMIR — satıcı təsdiqləyəndə (commitStockForOrder). Yalnız mövcudluq yoxlanır.
+          const l = await tx.listing.findUnique({ where: { id: it.id }, select: { stock: true } });
+          if (!l || l.stock < it.quantity) throw new Error(`"${it.title}" üçün kifayət qədər stok yoxdur`);
         }
         const total = its.reduce((s: number, it: any) => s + it.price * it.quantity, 0);
         const pickupCode = String(Math.floor(1000 + Math.random() * 9000));
@@ -841,21 +842,10 @@ router.post('/cart/checkout', requireType(BUYER_TYPES), async (req: AuthRequest,
         // C6 fix: atomic stock decrement + check via updateMany with stock>=qty guard.
         // If any update fails the predicate, we throw to roll back the whole transaction.
         for (const i of items) {
-          // KART: stok ödəniş təsdiqlənəndə (payment callback → PAID) azalır — burada
-          // yalnız mövcudluğu yoxlayırıq ki, tükənmiş məhsul satışa getməsin. Beləliklə
-          // ödənilməmiş/tərk edilmiş kart sifarişi stoku bloklamır.
-          if (paymentMethod === 'CARD') {
-            if ((i.listing.stock ?? 0) < i.quantity) throw new Error(`"${i.listing.title}" üçün kifayət qədər stok yoxdur`);
-            continue;
-          }
-          // NAĞD / CÜZDAN: elə indi azalt (öhdəlik/ödənilmiş satış).
-          const result = await tx.listing.updateMany({
-            where: { id: i.listingId, stock: { gte: i.quantity } },
-            data: { stock: { decrement: i.quantity } },
-          });
-          if (result.count === 0) {
-            throw new Error(`"${i.listing.title}" üçün kifayət qədər stok yoxdur`);
-          }
+          // Stok burada AZALMIR (nə nağdda, nə kartda) — satıcı sifarişi təsdiqləyəndə
+          // azalır (commitStockForOrder). Burada yalnız mövcudluq yoxlanır ki, tükənmiş
+          // məhsula sifariş verilməsin. Satıcı ləğv etsə stoka toxunulmayıb.
+          if ((i.listing.stock ?? 0) < i.quantity) throw new Error(`"${i.listing.title}" üçün kifayət qədər stok yoxdur`);
         }
 
         const order = await tx.order.create({
@@ -1300,6 +1290,19 @@ router.put('/orders/:id/status', adminAuth, async (req: AuthRequest, res: Respon
     if (next === 'CANCELLED' && order.yangoClaimId) {
       const yc = await cancelActiveYangoClaim(order.id);
       if (!yc.ok) { res.status(409).json({ success: false, message: yc.message }); return; }
+    }
+
+    // SATIŞ BAŞLAYIR → stok indi azalır. Stok çatmırsa (başqa alıcıya artıq
+    // satılıb) təsdiq edilmir — satıcı sifarişi ləğv etməlidir (pul qaytarılır).
+    if (['CONFIRMED', 'SHIPPED', 'DELIVERED'].includes(next) && !order.stockCommitted) {
+      const sc = await commitStockForOrder(order.id);
+      if (!sc.ok) {
+        res.status(409).json({
+          success: false, code: 'NO_STOCK',
+          message: `«${sc.missing}» üçün stokda kifayət qədər məhsul yoxdur (qalıb: ${sc.available ?? 0}). Sifarişi ləğv edin — alıcının pulu qaytarılacaq.`,
+        });
+        return;
+      }
     }
 
     const updated = await prisma.order.update({

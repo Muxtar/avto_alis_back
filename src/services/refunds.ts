@@ -197,6 +197,88 @@ export async function unstickPendingRefunds(): Promise<void> {
   }
 }
 
+// ── STOK MODELİ ──
+// Stok SİFARİŞ YARADILANDA YOX, SATICI SİFARİŞİ TƏSDİQLƏYƏNDƏ (satış başlayanda)
+// azalır — commitStockForOrder. Ləğv/iadədə geri qaytarılır — restoreStockForOrder
+// (və iadə üçün returnFlow.finalizeReturnRefund). Order.stockCommitted bayrağı
+// «bu sifarişin stoku götürülüb» deməkdir: ikiqat azaltma/artırmanın qarşısını alır.
+//
+// Əvvəl nağd sifarişdə stok checkout-da azalırdı, bayraq isə qoyulmurdu —
+// satıcı ləğv edəndə bərpa funksiyası «götürülməyib» sayıb heç nə qaytarmırdı
+// və məhsul stokdan birdəfəlik itirdi.
+
+/**
+ * Sifarişin stokunu götür (atomik, idempotent). Hər hansı məhsulda stok çatmırsa
+ * heç nə dəyişmir və həmin məhsulun adı qaytarılır.
+ */
+export async function commitStockForOrder(orderId: number): Promise<{ ok: boolean; missing?: string; available?: number }> {
+  try {
+    return await prisma.$transaction(async (tx) => {
+      // Bayrağı ƏVVƏL atomik tut — paralel iki təsdiq stoku iki dəfə azaltmasın.
+      const claimed = await tx.order.updateMany({ where: { id: orderId, stockCommitted: false }, data: { stockCommitted: true } });
+      if (claimed.count === 0) return { ok: true };
+      const items = await tx.orderItem.findMany({ where: { orderId }, select: { listingId: true, quantity: true, title: true } });
+      for (const it of items) {
+        const r = await tx.listing.updateMany({ where: { id: it.listingId, stock: { gte: it.quantity } }, data: { stock: { decrement: it.quantity } } });
+        if (r.count === 0) {
+          const l = await tx.listing.findUnique({ where: { id: it.listingId }, select: { stock: true } });
+          // Elan silinibsə satışa mane olmasın — yalnız mövcud elanda stok yoxlanır.
+          if (!l) continue;
+          throw Object.assign(new Error('NO_STOCK'), { missing: it.title, available: l.stock });
+        }
+      }
+      return { ok: true };
+    });
+  } catch (e: any) {
+    if (e?.message === 'NO_STOCK') return { ok: false, missing: e.missing, available: e.available };
+    throw e;
+  }
+}
+
+/**
+ * Avtomatik təsdiqlənən sifariş üçün (bank ödənişi, təhlükəsizlik şəbəkəsi):
+ * stoku götür, çatmırsa sifarişi ləğv et və pulu qaytar — alıcı olmayan malın
+ * pulunu ödəmiş qalmasın.
+ */
+export async function commitOrCancelForStock(orderId: number): Promise<boolean> {
+  const sc = await commitStockForOrder(orderId);
+  if (sc.ok) return true;
+  const o = await prisma.order.update({
+    where: { id: orderId },
+    data: { status: 'CANCELLED', confirmDeadline: null, deliveryDeadline: null },
+    select: { buyerId: true, sellerId: true },
+  });
+  const r = await refundOrderSafe(orderId, 'CANCELLED');
+  const why = `«${sc.missing}» stokda qalmadığı üçün sifariş #${orderId} ləğv edildi`;
+  await prisma.notification.createMany({ data: [
+    { userId: o.buyerId, type: 'ORDER', title: `Sifariş #${orderId} ləğv edildi`, body: `${why}.${r.ok ? ' Pulunuz geri qaytarılır.' : ''}`, link: '/orders' },
+    { userId: o.sellerId, type: 'ORDER', title: `Sifariş #${orderId} ləğv edildi`, body: `${why} — stokunuzu yeniləyin.`, link: '/orders' },
+  ] }).catch(() => {});
+  console.warn(`[stock] ${why}`);
+  return false;
+}
+
+/**
+ * TƏHLÜKƏSİZLİK ŞƏBƏKƏSİ (hər 10 dəq): satışı başlamış (təsdiqlənmiş / yolda /
+ * çatdırılmış), amma stoku götürülməmiş sifarişlər — hər hansı yol (Yango,
+ * köhnə kod, admin) commit-i ötürübsə — burada tutulur.
+ */
+export async function syncCommittedStock(): Promise<number> {
+  const rows = await prisma.order.findMany({
+    where: { stockCommitted: false, status: { in: ['CONFIRMED', 'SHIPPED', 'DELIVERED'] } },
+    select: { id: true, status: true }, take: 100,
+  });
+  for (const o of rows) {
+    if (o.status === 'CONFIRMED') await commitOrCancelForStock(o.id).catch(() => {});
+    else {
+      // Mal artıq yoldadır/çatıb — ləğv edilmir, stok çatmasa da götürülür (0-a qədər).
+      const sc = await commitStockForOrder(o.id).catch(() => null);
+      if (sc && !sc.ok) console.error(`[stock] sifariş #${o.id} (${o.status}) üçün stok çatmır: «${sc.missing}»`);
+    }
+  }
+  return rows.length;
+}
+
 // Ləğv olunmuş sifarişin stokunu geri qaytar. Ödənişdən ASILI DEYİL —
 // əvvəl stok bərpası qaytarma try-blokunun içində idi: şlüz xəta versə
 // məhsul anbara qayıtmırdı və nağd sifarişlərdə heç vaxt qayıtmırdı.

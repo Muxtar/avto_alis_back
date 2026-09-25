@@ -3,7 +3,7 @@ import { PrismaClient } from '@prisma/client';
 import { adminAuth, requirePermission, AuthRequest } from '../middleware/auth';
 import { getOrderStatus, isPaidStatus } from '../services/kapital';
 import { refundOrder } from '../services/paymentGateway';
-import { refundOrderSafe } from '../services/refunds';
+import { refundOrderSafe, commitOrCancelForStock } from '../services/refunds';
 import { PUBLIC_CARD_FIELDS, saveCardFromPayment } from '../services/savedCards';
 import { getPaymentStatus as yigimStatus, isPaidStatus as yigimPaid } from '../services/yigimPay';
 import { settleConsultation } from './consultations';
@@ -40,17 +40,7 @@ export async function settleOrders(where: { gatewayProvider?: string; gatewayRef
       await refundOrderSafe(o.id, 'CANCELLED', o.total).catch((e) => console.error('[settleOrders] gec ödəniş qaytarması:', e?.message));
     }
 
-    for (const o of orders) {
-      if (o.stockCommitted || o.status === 'CANCELLED') continue;
-      for (const it of o.items) {
-        const r = await prisma.listing.updateMany({
-          where: { id: it.listingId, stock: { gte: it.quantity } },
-          data: { stock: { decrement: it.quantity } },
-        }).catch(() => null);
-        if (!r || r.count === 0) console.error(`[settleOrders] stok azaldıla bilmədi (order ${o.id}, listing ${it.listingId}) — stok tükənib ola bilər`);
-      }
-      await prisma.order.update({ where: { id: o.id }, data: { stockCommitted: true } }).catch(() => {});
-    }
+    // Stok ödənişdə DEYİL, satıcı sifarişi təsdiqləyəndə azalır (commitStockForOrder).
     if (!wasPaid) {
       const byBuyer = new Map<number, number>();
       for (const o of orders) if (o.pointsEarned > 0) byBuyer.set(o.buyerId, (byBuyer.get(o.buyerId) || 0) + o.pointsEarned);
@@ -118,16 +108,13 @@ router.get('/payment/callback', async (req: Request, res: Response) => {
       }
       // Yalnız hələ PENDING olanları təsdiqlə — satıcı/biznes artıq CANCELLED edibsə dirçəltmə.
       await prisma.order.updateMany({ where: { gatewayOrderId, status: 'PENDING' }, data: { status: 'CONFIRMED' } });
+      // Satış başladı → stok indi götürülür. Stok çatmırsa (arada başqasına
+      // satılıb) sifariş ləğv olunur və pul dərhal qaytarılır.
+      for (const o of orders.filter((x) => x.status === 'PENDING')) {
+        await commitOrCancelForStock(o.id).catch((e) => console.error('[payment/callback] stok:', e?.message));
+      }
       // Satıcıya bildiriş — ödəniş təsdiqləndikdən SONRA (bir dəfə).
       await notifySellersNewOrder(orders.filter((o) => o.status !== 'CANCELLED').map((o) => o.id)).catch(() => {});
-      // FAILED→PAID keçidində əvvəl geri qaytarılmış stoku yenidən tut (over-increment-in qarşısını alır).
-      for (const o of orders) {
-        if (!o.stockRestored) continue;
-        for (const it of o.items) {
-          try { await prisma.listing.update({ where: { id: it.listingId }, data: { stock: { decrement: it.quantity } } }); } catch { /* listing silinmiş ola bilər */ }
-        }
-        await prisma.order.update({ where: { id: o.id }, data: { stockRestored: false } });
-      }
       // Loyalty xalını yalnız indi (ödəniş təsdiqində) və bir dəfə hesabla (idempotent).
       if (!wasPaid) {
         const byBuyer = new Map<number, number>();
@@ -136,16 +123,10 @@ router.get('/payment/callback', async (req: Request, res: Response) => {
           try { await prisma.user.update({ where: { id: buyerId }, data: { loyaltyPoints: { increment: pts } } }); } catch { /* istifadəçi silinmiş ola bilər */ }
         }
       }
-    } else {
-      // Ödəniş uğursuz — stoku geri qaytar (yalnız bir dəfə: əvvəl FAILED deyilsə və ya stockRestored qoyulmayıbsa).
-      for (const o of orders) {
-        if (o.paymentStatus === 'FAILED' || o.stockRestored) continue;
-        for (const it of o.items) {
-          try { await prisma.listing.update({ where: { id: it.listingId }, data: { stock: { increment: it.quantity } } }); } catch { /* listing silinmiş ola bilər */ }
-        }
-        await prisma.order.update({ where: { id: o.id }, data: { stockRestored: true } });
-      }
     }
+    // Ödəniş uğursuz olsa stoka toxunulmur: kart sifarişində stok ödənişdə
+    // götürülmür, yalnız satıcı təsdiqləyəndə (commitStockForOrder). Əvvəl
+    // burada stok ARTIRILIRDI — heç vaxt azalmamış stok şişirdi.
 
     return res.redirect(`${FRONTEND_URL}/payment/return?status=${paid ? 'success' : 'failed'}`);
   } catch (err: any) {
