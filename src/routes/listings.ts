@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { PrismaClient, Prisma } from '@prisma/client';
 import { alertNegativeReview, NEGATIVE_MAX } from '../services/reviewAlerts';
+import { publicListingWhere, visibilityOf } from '../services/listingVisibility';
 import { upload } from '../middleware/upload';
 import { processImages } from '../middleware/imageProcess';
 import { adminAuth, AuthRequest, verifyTokenUserId } from '../middleware/auth';
@@ -255,11 +256,9 @@ router.get('/sellers/:id', async (req: Request, res: Response) => {
     const page = parseInt((req.query.page as string) || '1');
     const limit = Math.min(parseInt((req.query.limit as string) || '24'), 100);
     const skip = (page - 1) * limit;
-    const sellerListingsWhere = {
-      userId: user.id,
-      status: 'APPROVED' as const, // gözləmədə/rədd edilmiş elanlar profildə görünmür
-      OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
-    };
+    // Ana səhifə ilə EYNİ qayda (services/listingVisibility): əvvəl burada biznes/obyekt
+    // aktivliyi yoxlanmırdı — deaktiv obyektin elanı profildə görünür, ana səhifədə yox idi.
+    const sellerListingsWhere: Prisma.ListingWhereInput = { userId: user.id, ...publicListingWhere() };
     const [listings, listingsTotal] = await Promise.all([
       prisma.listing.findMany({
         where: sellerListingsWhere,
@@ -430,6 +429,18 @@ router.get('/listings/:id', async (req: Request, res: Response) => {
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }
+});
+
+// Sahib üçün: elanım saytda görünürmü, görünmürsə niyə (VIP almazdan əvvəl də).
+router.get('/me/listings/:id/visibility', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const l = await prisma.listing.findUnique({
+      where: { id: parseInt(String(req.params.id)) },
+      select: { userId: true, status: true, type: true, archivedAt: true, expiresAt: true, business: { select: { isActive: true, name: true } }, businessObject: { select: { isActive: true, name: true } } },
+    });
+    if (!l || l.userId !== req.adminId) { res.status(404).json({ success: false, message: 'Elan tapılmadı' }); return; }
+    res.json({ success: true, ...visibilityOf(l) });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
 
 // Add comment to listing (auth required)

@@ -1,6 +1,7 @@
 import { Router, Response } from 'express';
 import { PrismaClient, Prisma, UserType } from '@prisma/client';
 import { approveReturn, finalizeReturnRefund, rejectReturn } from '../services/returnFlow';
+import { visibilityOf } from '../services/listingVisibility';
 import bcrypt from 'bcryptjs';
 import { adminAuth, requireAdmin, requirePermission, requireSuperAdmin, AuthRequest, generateToken, isAdminPhone, ADMIN_MODULES, SENSITIVE_MODULES, canAdminLogin, nationalPhone } from '../middleware/auth';
 import { authLimiter } from '../middleware/rateLimiter';
@@ -1620,21 +1621,7 @@ router.get('/admin/listings', requirePermission('listings'), async (req: AuthReq
     // dörd şərti ödəməlidir. Admin bunu bilmədən "təsdiqlədim, amma görünmür"
     // vəziyyətində qalırdı. İndi səbəb sətrin yanında yazılır.
     const now = new Date();
-    const withVisibility = listings.map((l: any) => {
-      const reasons: string[] = [];
-      if (l.status !== 'APPROVED') reasons.push(l.status === 'PENDING' ? 'Təsdiqlənməyib (gözləmədə)' : 'Rədd edilib');
-      if (l.expiresAt && l.expiresAt <= now) reasons.push(`Müddəti bitib (${l.expiresAt.toLocaleDateString('az-AZ')})`);
-      // Səbəbi göstərməklə kifayətlənmirik — nə etməli olduğunu da yazırıq.
-      if (l.business && l.business.isActive === false) reasons.push(`Biznes deaktivdir: ${l.business.name} — Biznes bölməsindən yenidən təsdiqləyin`);
-      if (l.businessObject && l.businessObject.isActive === false) reasons.push(`Obyekt deaktivdir: ${l.businessObject.name} — sahibi obyekti aktiv etməlidir`);
-      // Görünür, amma BAŞQA sekmede: ana səhifə default olaraq "Məhsullar"
-      // göstərir. Xidmət elanı orada heç vaxt çıxmır — "Xidmətlər"dədir.
-      // Bu, nasazlıq deyil, ona görə ayrıca qeyd kimi verilir.
-      const note = reasons.length === 0 && l.type === 'SERVICE'
-        ? 'Ana səhifədə "Xidmətlər" sekmesindədir — "Məhsullar"da görünmür'
-        : null;
-      return { ...l, visibility: { visible: reasons.length === 0, reasons, note } };
-    });
+    const withVisibility = listings.map((l: any) => ({ ...l, visibility: visibilityOf(l, now) }));
 
     res.json({ listings: withVisibility, total, pendingCount, page: parseInt(page as string), totalPages: Math.ceil(total / take) });
   } catch (error: any) {

@@ -4,6 +4,7 @@ import { adminAuth, AuthRequest } from '../middleware/auth';
 import { consultationLimiter } from '../middleware/rateLimiter';
 import { createPayment as createGatewayPayment } from '../services/paymentGateway';
 import { vipPackages, activateVip, VIP_DAYS } from '../services/vip';
+import { visibilityOf } from '../services/listingVisibility';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -21,10 +22,16 @@ router.post('/me/listings/:id/vip', consultationLimiter, adminAuth, async (req: 
     const id = parseInt(String(req.params.id));
     const days = parseInt(String(req.body?.days));
     if (!VIP_DAYS.includes(days as any)) { res.status(400).json({ success: false, message: 'Paket seçin' }); return; }
-    const l = await prisma.listing.findUnique({ where: { id }, select: { id: true, userId: true, title: true, status: true, archivedAt: true } });
+    const l = await prisma.listing.findUnique({
+      where: { id },
+      select: { id: true, userId: true, title: true, status: true, type: true, archivedAt: true, expiresAt: true, business: { select: { isActive: true, name: true } }, businessObject: { select: { isActive: true, name: true } } },
+    });
     if (!l || l.userId !== req.adminId) { res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return; }
-    if (l.status !== 'APPROVED' || l.archivedAt) {
-      res.status(400).json({ success: false, message: 'Yalnız təsdiqlənmiş (saytda görünən) elanı VIP etmək olar' }); return;
+    // Saytda GÖRÜNMƏYƏN elana VIP satılmır — əvvəl yalnız status yoxlanırdı:
+    // deaktiv obyektin elanına pul ödənilir, amma elan ana səhifədə çıxmırdı.
+    const vis = visibilityOf(l);
+    if (!vis.visible) {
+      res.status(400).json({ success: false, message: `Elan hazırda saytda görünmür, VIP mənasızdır: ${vis.reasons.join('; ')}` }); return;
     }
     const price = (await vipPackages()).find((p) => p.days === days)!.price;
     if (price <= 0) {

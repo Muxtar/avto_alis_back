@@ -14,6 +14,7 @@ import { pushAdmins } from '../services/live';
 import { validateTiers } from '../services/tierPricing';
 import { MIN_WINDOW_DAYS, MAX_WINDOW_DAYS, RETURN_WINDOW_DAYS } from '../services/groupBuy';
 import { isValidMonths } from '../services/installment';
+import { visibilityOf } from '../services/listingVisibility';
 import fs from 'fs';
 import path from 'path';
 
@@ -525,9 +526,13 @@ router.get('/me/listings', adminAuth, async (req: AuthRequest, res: Response) =>
         // (və onunla birlikdə birgə alış) silinirdi.
         priceTiers: { orderBy: { minQty: 'asc' } },
         _count: { select: { comments: true } },
+        business: { select: { isActive: true, name: true } },
+        businessObject: { select: { isActive: true, name: true } },
       },
     });
-    res.json({ listings });
+    // Hər elan üçün: saytda görünürmü, görünmürsə niyə (satıcı «niyə ana səhifədə yoxdur» soruşmasın).
+    const now = new Date();
+    res.json({ listings: listings.map((l) => ({ ...l, visibility: visibilityOf(l as any, now) })) });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }
