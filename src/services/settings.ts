@@ -106,6 +106,13 @@ export const FLAGS: FlagDef[] = [
     description: 'VÖEN/etibarnamə/bank sənədlərini avtomatik yoxlayıb məlumat çıxarır (Claude). Deaktiv edilsə admin əl ilə yoxlayır. İstifadə: biznes təsdiqi.',
     default: true,
   },
+  {
+    key: 'ai_disputes',
+    section: 'ai',
+    label: 'Mübahisə qərarı (Claude)',
+    description: 'Alıcı-satıcı mübahisələrində (iadə rəddi, qüsurlu məhsul) sübutları və foto-ları qiymətləndirib qərar verir. Əmin olmadıqda adminə ötürür. Deaktiv edilsə cavablanmış bütün mübahisələrə admin baxır.',
+    default: true,
+  },
 ];
 
 const FLAG_MAP = new Map(FLAGS.map((f) => [f.key, f]));

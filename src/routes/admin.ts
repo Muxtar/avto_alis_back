@@ -1,5 +1,6 @@
 import { Router, Response } from 'express';
 import { PrismaClient, Prisma, UserType } from '@prisma/client';
+import { approveReturn, finalizeReturnRefund, rejectReturn } from '../services/returnFlow';
 import bcrypt from 'bcryptjs';
 import { adminAuth, requireAdmin, requirePermission, requireSuperAdmin, AuthRequest, generateToken, isAdminPhone, ADMIN_MODULES, SENSITIVE_MODULES, canAdminLogin, nationalPhone } from '../middleware/auth';
 import { authLimiter } from '../middleware/rateLimiter';
@@ -2319,6 +2320,7 @@ router.get('/admin/returns', requirePermission('returns'), async (req: AuthReque
         include: {
           order: { include: { items: true } },
           orderItem: true,
+          events: { orderBy: { createdAt: 'asc' } },
           buyer: { select: { id: true, name: true, phone: true } },
           seller: { select: { id: true, name: true, phone: true } },
         },
@@ -2335,111 +2337,37 @@ router.get('/admin/returns', requirePermission('returns'), async (req: AuthReque
   }
 });
 
-// Admin override return status
+// Admin override return status — ortaq iadə servisindən keçir (services/returnFlow):
+// pul (qıfıl, qismən iadə uçotu, təkrar cəhd), stok, referal, hesablaşma və
+// tarixçə (ReturnEvent) bir yerdədir.
 router.put('/admin/returns/:id/override', requirePermission('returns'), async (req: AuthRequest, res: Response) => {
   try {
     const { status, adminNote, refundAmount } = req.body;
     if (!['APPROVED', 'REJECTED', 'REFUNDED'].includes(status)) {
       res.status(400).json({ success: false, message: 'Yalnız APPROVED, REJECTED və ya REFUNDED statusu təyin edə bilərsiniz' }); return;
     }
-
-    const ret = await prisma.returnRequest.findUnique({
-      where: { id: parseInt(req.params.id) },
-      include: { orderItem: true, order: { include: { items: true } } },
-    });
+    const ret = await prisma.returnRequest.findUnique({ where: { id: parseInt(req.params.id) } });
     if (!ret) { res.status(404).json({ success: false, message: 'İadə sorğusu tapılmadı' }); return; }
-
-    // ── ADMİNİN «GERİ ÖDƏNİLDİ» QƏRARI ──
-    // Əvvəl burada birbaşa Kapital çağırılırdı: (1) YIĞIM sifarişlərində şərt
-    // heç vaxt ödənmirdi — pul QAYTARILMADAN status REFUNDED yazılırdı;
-    // (2) hesablaşma yenilənmirdi — satıcıya da tam məbləğ ödənilirdi;
-    // (3) təkrar çağırışda stok iki dəfə artırdı. İndi hər şey ortaq
-    // servisdən keçir: qıfıl, qismən iadə uçotu, təkrar cəhd, bildiriş.
-    if (status === 'REFUNDED') {
-      if (ret.status === 'REFUNDED') {
-        res.status(400).json({ success: false, message: 'Bu iadə artıq tamamlanıb' }); return;
-      }
-      const order = ret.order;
-      const requested = refundAmount !== undefined ? parseFloat(String(refundAmount)) : (ret.refundAmount ?? order.total);
-      if (!Number.isFinite(requested) || requested < 0) {
-        res.status(400).json({ success: false, message: 'Geri ödəmə məbləği düzgün deyil' }); return;
-      }
-      const remaining = Math.round((order.total - (order.refundedAmount || 0)) * 100) / 100;
-      const amt = Math.min(requested, remaining);
-
-      // 1) Pul — kartla ödənilibsə şlüzdən qaytarılır.
-      const isCardPaid = !!((order.gatewayRef || order.gatewayOrderId) && order.paymentStatus === 'PAID');
-      let cashRefund = false;
-      if (isCardPaid && amt > 0.009) {
-        const r = await refundOrderSafe(order.id, 'ADMIN', amt);
-        if (!r.ok) {
-          res.status(502).json({ success: false, message: 'Bank iadəsi alınmadı: ' + (r.error || ''), retrying: true }); return;
-        }
-      } else {
-        // Nağd (və ya ödənilməmiş) sifariş: pul platformadan keçməyib —
-        // alıcıya NAĞD satıcı qaytarır. Alıcıya düzgün mətn göstərilsin deyə
-        // işarələnir; «bankdan qayıdacaq» kimi yanlış vəd verilmir.
-        cashRefund = true;
-      }
-
-      // 2) Stok + referal — bir tranzaksiyada, təkrar icradan qorunmuş.
-      await prisma.$transaction(async (tx) => {
-        if (ret.orderItem) {
-          await tx.listing.update({
-            where: { id: ret.orderItem.listingId },
-            data: { stock: { increment: ret.quantity } },
-          }).catch(() => { /* elan silinib */ });
-        } else {
-          for (const item of order.items) {
-            await tx.listing.update({
-              where: { id: item.listingId },
-              data: { stock: { increment: item.quantity } },
-            }).catch(() => { /* elan silinib */ });
-          }
-        }
-        if (order.referrerId && !order.referralVoided) {
-          await tx.order.update({ where: { id: order.id }, data: { referralVoided: true } });
-          await tx.notification.create({
-            data: {
-              userId: order.referrerId, type: 'REFERRAL', title: 'Referal komissiyası ləğv edildi',
-              body: `Sifariş #${order.id} qaytarıldığı üçün komissiya ləğv olundu.`, link: '/referral-earnings',
-            },
-          }).catch(() => {});
-        }
-      });
-
-      // 3) Hesablaşma — bu olmasa satıcıya da tam məbləğ ödənilə bilər.
-      await recordSettlement(order.id).catch(() => {});
-
-      // 4) Alıcıya qalıcı bildiriş (socket toast-dan əlavə).
-      await prisma.notification.create({
-        data: {
-          userId: ret.buyerId, type: 'ORDER', title: `Sifariş #${order.id}`,
-          body: cashRefund
-            ? `İadəniz təsdiqləndi. Məbləğ (${amt.toFixed(2)} AZN) nağd ödəniş olduğu üçün satıcı tərəfindən nağd qaytarılır.`
-            : `İadəniz təsdiqləndi — ${amt.toFixed(2)} AZN kartınıza qaytarıldı. Banka düşməsi bir neçə iş günü çəkə bilər.`,
-          link: '/orders',
-        },
-      }).catch(() => {});
-
-      await prisma.returnRequest.update({ where: { id: ret.id }, data: { cashRefund } }).catch(() => {});
+    if (ret.status === 'REFUNDED') { res.status(400).json({ success: false, message: 'Bu iadə artıq tamamlanıb' }); return; }
+    const amount = refundAmount !== undefined && refundAmount !== '' ? parseFloat(String(refundAmount)) : undefined;
+    if (amount !== undefined && (!Number.isFinite(amount) || amount < 0)) {
+      res.status(400).json({ success: false, message: 'Geri ödəmə məbləği düzgün deyil' }); return;
     }
+    const note = adminNote ? `Admin: ${String(adminNote).slice(0, 500)}` : undefined;
 
-    const updated = await prisma.returnRequest.update({
-      where: { id: ret.id },
-      data: {
-        status,
-        adminNote: adminNote || null,
-        ...(refundAmount !== undefined && { refundAmount: parseFloat(refundAmount) }),
-      },
-    });
-    // Alıcının və satıcının Sifarişlər səhifəsində iadə statusu dərhal dəyişsin.
-    pushLive(ret.buyerId, {
-      kind: 'return', id: ret.id, status,
-      toast: status === 'REJECTED' ? `İadə sorğunuz rədd edildi (sifariş #${ret.orderId})` : `İadə sorğunuz yeniləndi: sifariş #${ret.orderId}`,
-      tone: status === 'REJECTED' ? 'error' : 'success',
-    });
-    pushLive(ret.sellerId, { kind: 'return', id: ret.id, status });
+    if (status === 'REFUNDED') {
+      const r = await finalizeReturnRefund(ret.id, 'ADMIN', req.adminId!, { amount, note });
+      if (!r.ok) { res.status(r.retrying ? 502 : 400).json({ success: false, message: r.error, retrying: r.retrying }); return; }
+    } else if (status === 'APPROVED') {
+      await approveReturn(ret.id, 'ADMIN', req.adminId!, { refundAmount: amount, note });
+    } else {
+      await rejectReturn(ret.id, 'ADMIN', req.adminId!, note || 'Admin iadəni rədd etdi');
+      await prisma.notification.create({
+        data: { userId: ret.buyerId, type: 'ORDER', title: `İadə rədd edildi — sifariş #${ret.orderId}`, body: note || 'Admin iadəni rədd etdi.', link: '/iadeler' },
+      }).catch(() => {});
+    }
+    if (adminNote) await prisma.returnRequest.update({ where: { id: ret.id }, data: { adminNote: String(adminNote) } });
+    const updated = await prisma.returnRequest.findUnique({ where: { id: ret.id } });
     res.json({ success: true, returnRequest: updated });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });

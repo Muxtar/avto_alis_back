@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { PrismaClient, Prisma } from '@prisma/client';
+import { alertNegativeReview, NEGATIVE_MAX } from '../services/reviewAlerts';
 import { upload } from '../middleware/upload';
 import { processImages } from '../middleware/imageProcess';
 import { adminAuth, AuthRequest, verifyTokenUserId } from '../middleware/auth';
@@ -489,6 +490,7 @@ router.post('/listings/:id/comments', adminAuth, async (req: AuthRequest, res: R
       },
       include: { user: { select: { id: true, name: true, type: true } } },
     });
+    alertNegativeReview(comment.id);
     res.status(201).json({ success: true, comment });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
@@ -516,6 +518,8 @@ router.put('/comments/:id', adminAuth, async (req: AuthRequest, res: Response) =
       data: { content: trimmed, ...ratingData },
       include: { user: { select: { id: true, name: true, type: true } } },
     });
+    // Rəy mənfiyə endirildisə sahibinə xəbər ver (əvvəl də mənfi idisə təkrar yox).
+    if (ratingData.rating != null && ratingData.rating <= NEGATIVE_MAX && !(comment.rating != null && comment.rating <= NEGATIVE_MAX)) alertNegativeReview(comment.id);
     res.json({ success: true, comment: updated });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });

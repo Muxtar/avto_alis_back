@@ -7,6 +7,7 @@ import { endExpiredConsultations } from '../routes/consultations';
 import { cancelActiveYangoClaim } from '../routes/yango';
 import { closeExpiredGroups, settleDueGroups, syncGroupWindows } from './groupBuy';
 import { notifyExpiredListings } from './listingExpiry';
+import { runDisputeDeadlines } from './disputeDecision';
 
 const prisma = new PrismaClient();
 
@@ -272,6 +273,9 @@ export function startOrderExpiryJob() {
     endExpiredConsultations().catch(() => {});
     // Müddəti bitmiş elanların sahiblərinə bildiriş (yeniləmək üçün).
     notifyExpiredListings().catch(() => {});
+    // İadə/mübahisə müddətləri: cavabsız satıcı → avtomatik təsdiq, göndərilməyən
+    // iadə → ləğv, qaytarılmayan pul → sistem qaytarır, cavabsız mübahisə → qərar.
+    runDisputeDeadlines().catch((e) => console.error('[orderExpiry] runDisputeDeadlines:', e?.message));
   };
   setTimeout(run, 30 * 1000);              // start-dan 30 san sonra ilk yoxlama
   setInterval(run, 10 * 60 * 1000);        // sonra hər 10 dəqiqə

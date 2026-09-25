@@ -129,7 +129,16 @@ const TOOLS: Anthropic.Tool[] = [
   { name: 'update_cart_item', description: 'Səbətdəki məhsulun sayını dəyiş (dərhal icra olunur). cartItemId get_cart-dan gəlir.', input_schema: { type: 'object', properties: { cartItemId: { type: 'number' }, quantity: { type: 'number' } }, required: ['cartItemId', 'quantity'] } },
   { name: 'remove_from_cart', description: 'Səbətdən məhsulu sil (dərhal icra olunur).', input_schema: { type: 'object', properties: { cartItemId: { type: 'number' } }, required: ['cartItemId'] } },
   { name: 'clear_cart', description: 'Səbəti tamamilə boşalt (dərhal icra olunur).', input_schema: { type: 'object', properties: {} } },
-  { name: 'request_return', description: 'Məhsulu geri qaytarmaq üçün iadə sorğusu (təsdiqli). Təhvildən 14 gün ərzində.', input_schema: { type: 'object', properties: { orderId: { type: 'number' }, orderItemId: { type: 'number' }, reason: { type: 'string' }, reasonText: { type: 'string' }, quantity: { type: 'number' } }, required: ['orderId', 'reason'] } },
+  { name: 'request_return', description: 'Məhsulu geri qaytarmaq üçün iadə sorğusu (təsdiqli). Təhvildən 14 gün ərzində. reason: DEFECTIVE|WRONG_ITEM|NOT_AS_DESCRIBED|CHANGED_MIND(bəyənmədim)|OTHER. reasonText (problemin izahı) MƏCBURİDİR — istifadəçidən soruş. Foto sübutu yalnız /returns səhifəsindən əlavə olunur — qüsur/səhv məhsul üçün bunu tövsiyə et.', input_schema: { type: 'object', properties: { orderId: { type: 'number' }, orderItemId: { type: 'number' }, reason: { type: 'string' }, reasonText: { type: 'string' }, quantity: { type: 'number' } }, required: ['orderId', 'reason', 'reasonText'] } },
+  { name: 'return_details', description: 'İadənin izlənməsi: status, müddətlər, tarixçə (kim nə vaxt nə etdi), mübahisə və sistem qərarı.', input_schema: { type: 'object', properties: { returnId: { type: 'number' } }, required: ['returnId'] } },
+  { name: 'my_sales_returns', description: 'SATICI kimi mənə gələn iadə sorğuları.', input_schema: { type: 'object', properties: {} } },
+  { name: 'complaints_against_me', description: 'Mənə qarşı açılmış şikayətlər/mübahisələr (cavab müddəti ilə).', input_schema: { type: 'object', properties: {} } },
+  { name: 'reviews_received', description: 'Elanlarıma/obyektlərimə yazılmış rəylər. filter=negative → yalnız mənfi (1-2★), unanswered → cavabsız.', input_schema: { type: 'object', properties: { filter: { type: 'string' } } } },
+  { name: 'dispute_return', description: 'Satıcı iadəni RƏDD edibsə etiraz et — mübahisə açılır, satıcıya 48 saat cavab müddəti verilir, sonra sistem qərar verir (təsdiqli). description ən azı 10 simvol.', input_schema: { type: 'object', properties: { returnId: { type: 'number' }, description: { type: 'string' } }, required: ['returnId', 'description'] } },
+  { name: 'cancel_return', description: 'Hələ göndərilməmiş iadəni ləğv et (təsdiqli).', input_schema: { type: 'object', properties: { returnId: { type: 'number' } }, required: ['returnId'] } },
+  { name: 'ship_return', description: 'Təsdiqlənmiş iadə məhsulunu göndərdim — üsul COURIER|IN_PERSON|POST|YANGO + istəyə görə izləmə kodu (təsdiqli).', input_schema: { type: 'object', properties: { returnId: { type: 'number' }, returnMethod: { type: 'string' }, trackingCode: { type: 'string' } }, required: ['returnId', 'returnMethod'] } },
+  { name: 'appeal_complaint', description: 'Şikayət üzrə sistem qərarı mənim xeyrimə deyilsə 7 gün ərzində bir dəfə adminə müraciət (təsdiqli).', input_schema: { type: 'object', properties: { complaintId: { type: 'number' }, note: { type: 'string' } }, required: ['complaintId', 'note'] } },
+  { name: 'reply_review', description: 'Elanıma/obyektimə yazılmış rəyə ictimai cavab yaz (təsdiqli). commentId reviews_received-dən.', input_schema: { type: 'object', properties: { commentId: { type: 'number' }, reply: { type: 'string' } }, required: ['commentId', 'reply'] } },
   { name: 'file_complaint', description: 'Şikayət yarat (təsdiqli).', input_schema: { type: 'object', properties: { targetUserId: { type: 'number' }, category: { type: 'string' }, description: { type: 'string' } }, required: ['category', 'description'] } },
 
   // ── Əlavə OXUMA alətləri (saytın digər bölmələri) ──
@@ -192,7 +201,7 @@ const CONFIRM_ACTIONS = new Set([
   'delete_address', 'delete_contact', 'create_booking', 'cancel_booking',
   'create_support_ticket', 'reply_support_ticket', 'block_user', 'unblock_user',
   'rate_order', 'review_professional', 'rate_consultation', 'create_inquiry', 'close_inquiry',
-  'update_profile',
+  'update_profile', 'dispute_return', 'cancel_return', 'ship_return', 'appeal_complaint', 'reply_review',
 ]);
 const ACTION_NAMES = new Set([...AUTO_ACTIONS, ...CONFIRM_ACTIONS]);
 
@@ -247,8 +256,19 @@ PLATFORMA QAYDALARI (soruşulanda düzgün izah et, uydurma):
   sayına görə son qiymət hesablanır və fərq kartlara qaytarılır. Hər kəs
   əvvəlcə TAM qiyməti ödəyir, yalnız kartla. Pəncərə bitəndən sonra növbəti
   alıcı təzə pəncərə başladır. Vəziyyəti group_buy_of_listing aləti ilə de.
-- Qaytarma: təhvildən 14 gün ərzində. Alıcı iadə sorğusu göndərir, məhsulu
-  satıcıya təhvil verir, satıcı təsdiqləyəndən sonra pul qaytarılır.
+- Qaytarma: təhvildən 14 gün ərzində, səbəb izahı ilə (qüsurlu, səhv, təsvirə
+  uyğun deyil, bəyənmədim). Satıcı 72 saatda cavab verməsə sistem avtomatik
+  təsdiqləyir. Satıcı yalnız SƏBƏB yazaraq rədd edə bilər; alıcı 7 gün ərzində
+  etiraz edib mübahisə açır. Təsdiqdən sonra alıcı 7 gün ərzində məhsulu
+  göndərir (üsul + izləmə kodu), satıcı qəbul edir və 48 saatda pulu qaytarır —
+  etməsə sistem özü qaytarır. Satıcı qaytarılan məhsulda problem görsə foto
+  ilə mübahisə açır.
+- Mübahisə / şikayət: qarşı tərəfə 48 saat cavab müddəti verilir; cavab
+  verilməsə şikayətçinin xeyrinə. Cavab verilsə SİSTEM sübutlara (foto daxil)
+  baxıb qərar verir, əmin deyilsə adminə ötürür. Uduzan tərəf 7 gün ərzində bir
+  dəfə adminə müraciət edə bilər. İzləmə: return_details, my_complaints.
+- Mənfi rəy (1-2★): satıcıya bildiriş gedir; satıcı rəyə ictimai cavab yaza və
+  müştəriyə mesaj yaza bilər.
 - Rəy: məhsulu alan hər kəs yaza bilər; mağazaya hər alışdan sonra bir rəy.`;
 
 const clamp = (n: any, def: number, max: number) => Math.min(Math.max(parseInt(String(n ?? def)) || def, 1), max);
@@ -445,6 +465,10 @@ async function runReadTool(name: string, input: any, userId: number, token: stri
     case 'support_ticket': return getJson(`/support/tickets/${clamp(input.ticketId, 0, 9e8)}`, token);
     case 'my_inquiries': return getJson('/inquiries/my', token);
     case 'my_groups': return getJson('/groups', token);
+    case 'return_details': return getJson(`/returns/${clamp(input.returnId, 0, 9e8)}`, token);
+    case 'my_sales_returns': return getJson('/returns/selling', token);
+    case 'complaints_against_me': return getJson('/me/complaints/against', token);
+    case 'reviews_received': return getJson(`/me/reviews-received${input.filter ? `?filter=${encodeURIComponent(String(input.filter))}` : ''}`, token);
     default: return { error: `Naməlum alət: ${name}` };
   }
 }
@@ -664,6 +688,31 @@ async function buildAction(name: string, input: any, userId: number): Promise<Pe
     case 'close_inquiry': {
       const id = num(input.inquiryId); if (Number.isNaN(id)) return { error: 'inquiryId lazımdır (my_inquiries).' };
       return { type: name, endpoint: `/inquiries/${id}/close`, method: 'PUT', body: {}, summary: `Sorğu #${id} bağla` };
+    }
+    case 'dispute_return': {
+      const id = num(input.returnId); const description = String(input.description || '').trim();
+      if (Number.isNaN(id) || description.length < 10) return { error: 'returnId və ən azı 10 simvollu izah lazımdır.' };
+      return { type: name, endpoint: `/returns/${id}/dispute`, method: 'POST', body: { description }, summary: `İadə #${id} rəddinə etiraz (mübahisə): "${description}"` };
+    }
+    case 'cancel_return': {
+      const id = num(input.returnId); if (Number.isNaN(id)) return { error: 'returnId lazımdır.' };
+      return { type: name, endpoint: `/returns/${id}/cancel`, method: 'PUT', body: {}, summary: `İadə #${id} ləğv et` };
+    }
+    case 'ship_return': {
+      const id = num(input.returnId); const m = String(input.returnMethod || '').toUpperCase();
+      if (Number.isNaN(id) || !['COURIER', 'IN_PERSON', 'POST', 'YANGO'].includes(m)) return { error: 'returnId və üsul (COURIER|IN_PERSON|POST|YANGO) lazımdır.' };
+      const body: any = { returnMethod: m }; if (input.trackingCode) body.trackingCode = String(input.trackingCode);
+      return { type: name, endpoint: `/returns/${id}/ship`, method: 'PUT', body, summary: `İadə #${id}: göndərildi (${m}${body.trackingCode ? `, ${body.trackingCode}` : ''})` };
+    }
+    case 'appeal_complaint': {
+      const id = num(input.complaintId); const note = String(input.note || '').trim();
+      if (Number.isNaN(id) || note.length < 10) return { error: 'complaintId və ən azı 10 simvollu səbəb lazımdır.' };
+      return { type: name, endpoint: `/complaints/${id}/appeal`, method: 'POST', body: { note }, summary: `Şikayət #${id} qərarından adminə müraciət: "${note}"` };
+    }
+    case 'reply_review': {
+      const id = num(input.commentId); const reply = String(input.reply || '').trim();
+      if (Number.isNaN(id) || !reply) return { error: 'commentId və cavab lazımdır.' };
+      return { type: name, endpoint: `/comments/${id}/reply`, method: 'POST', body: { reply }, summary: `Rəy #${id}-ə cavab: "${reply}"` };
     }
     case 'update_profile': {
       const body: any = {};

@@ -120,6 +120,7 @@ enum ReturnStatus {
   RETURN_RECEIVED
   REFUNDED
   CANCELLED
+  DISPUTED // satıcı rədd etdi / problem var → mübahisə (şikayət) açıldı, sistem qərar verir
 }
 
 enum ReturnReason {
@@ -560,6 +561,9 @@ model Comment {
   professionalUserId Int? // ixtisas/rəy profili rəyi (hədəf istifadəçi id)
   content            String
   rating             Int?
+  // Satıcının/obyekt sahibinin ictimai cavabı (mənfi rəyə izah və s.).
+  sellerReply        String?
+  sellerReplyAt      DateTime?
   createdAt          DateTime        @default(now())
   user               User            @relation(fields: [userId], references: [id], onDelete: Cascade)
   listing            Listing?        @relation(fields: [listingId], references: [id], onDelete: Cascade)
@@ -864,12 +868,43 @@ model ReturnRequest {
   cashRefund   Boolean      @default(false)
   sellerNote   String?
   adminNote    String?
+  // Alıcının sübut şəkilləri (qüsur, səhv məhsul və s.).
+  images       String[]     @default([])
+  // Satıcının məhsulu geri alanda çəkdiyi şəkillər (zədə/fərqli məhsul iddiası).
+  sellerImages String[]     @default([])
+  // Geri göndərmə üsulu və izləmə — COURIER | IN_PERSON | POST | YANGO.
+  returnMethod String?
+  trackingCode String?
+  // MÜDDƏTLƏR — keçəndə sistem özü addım atır (services/returnFlow.ts):
+  sellerRespondBy DateTime? // satıcı cavab verməzsə → avtomatik təsdiq
+  shipBy          DateTime? // alıcı göndərməzsə → avtomatik ləğv
+  receiveBy       DateTime? // satıcı qəbulu təsdiqləməzsə → mübahisə
+  refundBy        DateTime? // satıcı pulu qaytarmazsa → sistem qaytarır
+  shippedAt       DateTime?
+  receivedAt      DateTime?
+  refundedAt      DateTime?
+  disputeId       Int? // açılmış mübahisə (Complaint.id)
   createdAt    DateTime     @default(now())
   updatedAt    DateTime     @updatedAt
+  events       ReturnEvent[]
   order        Order        @relation(fields: [orderId], references: [id], onDelete: Cascade)
   orderItem    OrderItem?   @relation(fields: [orderItemId], references: [id], onDelete: SetNull)
   buyer        User         @relation("BuyerReturns", fields: [buyerId], references: [id], onDelete: Cascade)
   seller       User         @relation("SellerReturns", fields: [sellerId], references: [id], onDelete: Cascade)
+}
+
+// İadənin izlənmə tarixçəsi — hər addım kim tərəfindən, nə vaxt, hansı qeydlə.
+model ReturnEvent {
+  id        Int           @id @default(autoincrement())
+  returnId  Int
+  actor     String // BUYER | SELLER | SYSTEM | ADMIN
+  actorId   Int?
+  status    String // addımdan sonrakı status və ya hadisə kodu
+  note      String?
+  createdAt DateTime      @default(now())
+  ret       ReturnRequest @relation(fields: [returnId], references: [id], onDelete: Cascade)
+
+  @@index([returnId])
 }
 
 enum InquiryStatus {
@@ -1259,6 +1294,7 @@ model ConsultationSession {
 // ── Şikayət (profil / Rəy konsultasiyası) ─────────────────────────────────────
 enum ComplaintStatus {
   OPEN
+  AWAITING_SELLER // satıcının cavabı gözlənilir (müddətli)
   REVIEWING
   EVIDENCE_REQUESTED
   RESOLVED
@@ -1279,6 +1315,20 @@ model Complaint {
   resolution     String? // REFUNDED / WARNED / SUSPENDED / NO_ACTION / REJECTED
   adminNote      String?
   resolvedById   Int?
+  // Mübahisə (sifariş/məhsul şikayəti) — qarşı tərəfin cavabı və sistem qərarı.
+  returnId          Int? // iadədən yaranıbsa
+  respondBy         DateTime? // qarşı tərəf bu vaxta qədər cavab verməlidir
+  sellerResponse    String?
+  sellerImages      String[]  @default([])
+  sellerRespondedAt DateTime?
+  sellerAccepted    Boolean? // qarşı tərəf iddianı qəbul etdi
+  decision          String? // COMPLAINANT (şikayətçinin xeyrinə) | RESPONDENT (qarşı tərəfin) | ESCALATED (admin)
+  decisionBy        String? // SYSTEM | AI | ADMIN | SELLER
+  decisionReason    String?
+  aiConfidence      Float?
+  aiRecommendation  String? // AI-ın admin üçün tövsiyəsi (qərar avtomatik tətbiq olunmayanda)
+  decidedAt         DateTime?
+  appealed          Boolean   @default(false) // alıcı qərardan bir dəfə adminə müraciət edə bilər
   createdAt      DateTime             @default(now())
   resolvedAt     DateTime?
   complainant    User                 @relation("ComplaintsMade", fields: [complainantId], references: [id], onDelete: Cascade)

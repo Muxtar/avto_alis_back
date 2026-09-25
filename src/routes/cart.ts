@@ -14,6 +14,14 @@ import { checkPrice as yangoCheckPrice, isYangoConfigured, YANGO_MAX_WEIGHT_KG, 
 import { notifySellersNewOrder } from '../services/orderNotify';
 import { dispatchOrderToYango, cancelActiveYangoClaim } from './yango';
 import { pushLive, pushAdmins } from '../services/live';
+import { upload } from '../middleware/upload';
+import { processImages } from '../middleware/imageProcess';
+import { complaintLimiter } from '../middleware/rateLimiter';
+import {
+  approveReturn, finalizeReturnRefund, rejectReturn, logReturnEvent, hoursFromNow,
+  RETURN_SELLER_RESPOND_HOURS, RETURN_RECEIVE_DAYS, RETURN_REFUND_HOURS, RETURN_DISPUTE_DAYS, RETURN_METHODS, RETURN_METHOD_AZ,
+} from '../services/returnFlow';
+import { openDispute } from '../services/disputeDecision';
 import { unitPriceFor, priceInfo, type Tier } from '../services/tierPricing';
 import { groupQty, RETURN_WINDOW_DAYS, groupBuyEnabled, activeGroup, ensureActiveGroup } from '../services/groupBuy';
 
@@ -1434,11 +1442,30 @@ router.put('/orders/:id/courier-location', adminAuth, async (req: AuthRequest, r
 });
 
 // ===================== RETURN / REFUND SYSTEM =====================
+// Addımların ortaq məntiqi services/returnFlow.ts-dədir (satıcı, admin və
+// sistem eyni funksiyaları işlədir), mübahisə və sistem qərarı isə
+// services/disputeDecision.ts-dədir. Hər addım ReturnEvent-ə yazılır.
 
-// Create return request (buyer)
-router.post('/returns', adminAuth, async (req: AuthRequest, res: Response) => {
+const RETURN_REASONS = ['DEFECTIVE', 'WRONG_ITEM', 'NOT_AS_DESCRIBED', 'CHANGED_MIND', 'OTHER'];
+const RETURN_REASON_AZ: Record<string, string> = {
+  DEFECTIVE: 'Qüsurlu', WRONG_ITEM: 'Səhv məhsul', NOT_AS_DESCRIBED: 'Təsvirə uyğun deyil', CHANGED_MIND: 'Bəyənmədim', OTHER: 'Digər',
+};
+const uploadedNames = (req: AuthRequest) => ((req.files as Express.Multer.File[] | undefined) || []).map((f) => f.filename);
+const returnInclude = {
+  order: { include: { items: true } },
+  orderItem: true,
+  events: { orderBy: { createdAt: 'asc' as const } },
+};
+
+// Create return request (buyer) — multipart: səbəb + izah + sübut şəkilləri.
+router.post('/returns', adminAuth, upload.array('images', 6), processImages, async (req: AuthRequest, res: Response) => {
   try {
-    const { orderId, orderItemId, reason, reasonText, quantity } = req.body;
+    const { orderId, orderItemId, reason, quantity } = req.body;
+    const reasonText = String(req.body.reasonText || '').trim();
+    if (!RETURN_REASONS.includes(reason)) { res.status(400).json({ success: false, message: 'Qaytarma səbəbini seçin' }); return; }
+    // Satıcı qərar verə bilsin deyə SƏBƏB İZAHI məcburidir.
+    if (reasonText.length < 5) { res.status(400).json({ success: false, message: 'Problemi qısaca izah edin (ən azı 5 simvol)' }); return; }
+    const images = uploadedNames(req);
     const order = await prisma.order.findUnique({
       where: { id: parseInt(orderId) },
       include: { items: true },
@@ -1522,8 +1549,6 @@ router.post('/returns', adminAuth, async (req: AuthRequest, res: Response) => {
     // Heç vaxt qalıqdan çox qaytarılmasın.
     refundAmount = Math.min(refundAmount, remaining);
 
-    // H14 fix: when orderItemId is null (full-order return), force quantity
-    // to be the sum of all items — ignore any user-provided value.
     const returnQuantity = orderItemId
       ? (parseInt(quantity) || order.items.find((i) => i.id === parseInt(orderItemId))!.quantity)
       : order.items.reduce((s, i) => s + i.quantity, 0);
@@ -1535,16 +1560,21 @@ router.post('/returns', adminAuth, async (req: AuthRequest, res: Response) => {
         buyerId: req.adminId!,
         sellerId: order.sellerId,
         reason,
-        reasonText: reasonText || null,
+        reasonText: reasonText.slice(0, 1000),
         quantity: returnQuantity,
         refundAmount,
+        images,
+        // Satıcı bu müddətdə cavab verməsə sistem avtomatik təsdiqləyir.
+        sellerRespondBy: hoursFromNow(RETURN_SELLER_RESPOND_HOURS),
       },
     });
+    await logReturnEvent(returnReq.id, 'BUYER', req.adminId!, 'REQUESTED',
+      `${RETURN_REASON_AZ[reason]}: ${reasonText.slice(0, 300)}${images.length ? ` (${images.length} şəkil)` : ''}`);
     await prisma.notification.create({
       data: {
         userId: order.sellerId, type: 'ORDER', title: `İadə sorğusu — sifariş #${order.id}`,
-        body: `Alıcı ${returnQuantity} ədəd üçün iadə istəyir (${refundAmount.toFixed(2)} AZN). Sorğunu təsdiqləyin və ya rədd edin.`,
-        link: '/orders',
+        body: `Alıcı ${returnQuantity} ədəd üçün iadə istəyir (${refundAmount.toFixed(2)} AZN). Səbəb: ${RETURN_REASON_AZ[reason]}. ${RETURN_SELLER_RESPOND_HOURS} saat ərzində cavab verin — cavab verilməsə iadə avtomatik təsdiqlənir.`,
+        link: '/iadeler?tab=selling',
       },
     }).catch(() => {});
     pushLive(order.sellerId, { kind: 'return', id: returnReq.id, status: returnReq.status, toast: `Sifariş #${order.id} üçün iadə sorğusu gəldi`, tone: 'info' });
@@ -1560,7 +1590,7 @@ router.get('/returns/buying', adminAuth, async (req: AuthRequest, res: Response)
   try {
     const returns = await prisma.returnRequest.findMany({
       where: { buyerId: req.adminId! },
-      include: { order: { include: { items: true } }, orderItem: true, seller: { select: { id: true, name: true, phone: true } } },
+      include: { ...returnInclude, seller: { select: { id: true, name: true, phone: true } } },
       orderBy: { createdAt: 'desc' },
     });
     res.json({ returns });
@@ -1574,10 +1604,32 @@ router.get('/returns/selling', adminAuth, async (req: AuthRequest, res: Response
   try {
     const returns = await prisma.returnRequest.findMany({
       where: { sellerId: req.adminId! },
-      include: { order: { include: { items: true } }, orderItem: true, buyer: { select: { id: true, name: true, phone: true } } },
+      include: { ...returnInclude, buyer: { select: { id: true, name: true, phone: true } } },
       orderBy: { createdAt: 'desc' },
     });
     res.json({ returns });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+// Bir iadənin detalı + izlənmə tarixçəsi + mübahisə (yalnız tərəflər).
+router.get('/returns/:id', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const ret = await prisma.returnRequest.findUnique({
+      where: { id: parseInt(String(req.params.id)) },
+      include: {
+        ...returnInclude,
+        buyer: { select: { id: true, name: true } },
+        seller: { select: { id: true, name: true } },
+      },
+    });
+    if (!ret || (ret.buyerId !== req.adminId && ret.sellerId !== req.adminId)) { res.status(404).json({ success: false, message: 'İadə tapılmadı' }); return; }
+    const dispute = ret.disputeId ? await prisma.complaint.findUnique({
+      where: { id: ret.disputeId },
+      select: { id: true, status: true, category: true, description: true, images: true, sellerResponse: true, sellerImages: true, respondBy: true, decision: true, decisionBy: true, decisionReason: true, decidedAt: true, appealed: true, complainantId: true, targetUserId: true },
+    }) : null;
+    res.json({ success: true, returnRequest: ret, dispute });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }
@@ -1588,9 +1640,9 @@ router.put('/returns/:id/cancel', adminAuth, async (req: AuthRequest, res: Respo
   try {
     const ret = await prisma.returnRequest.findUnique({ where: { id: parseInt(req.params.id) } });
     if (!ret || ret.buyerId !== req.adminId) { res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return; }
-    if (ret.status !== 'REQUESTED') { res.status(400).json({ success: false, message: 'Yalnız gözləyən sorğuları ləğv edə bilərsiniz' }); return; }
-    const updated = await prisma.returnRequest.update({ where: { id: ret.id }, data: { status: 'CANCELLED' } });
-    // Qarşı tərəfin Sifarişlər səhifəsində iadə statusu dərhal dəyişsin.
+    if (ret.status !== 'REQUESTED' && ret.status !== 'APPROVED') { res.status(400).json({ success: false, message: 'Yalnız göndərilməmiş iadəni ləğv edə bilərsiniz' }); return; }
+    const updated = await prisma.returnRequest.update({ where: { id: ret.id }, data: { status: 'CANCELLED', sellerRespondBy: null, shipBy: null } });
+    await logReturnEvent(ret.id, 'BUYER', req.adminId!, 'CANCELLED', 'Alıcı iadəni ləğv etdi');
     pushLive([ret.buyerId, ret.sellerId], { kind: 'return', id: ret.id, status: updated.status });
     res.json({ success: true, returnRequest: updated });
   } catch (error: any) {
@@ -1598,14 +1650,31 @@ router.put('/returns/:id/cancel', adminAuth, async (req: AuthRequest, res: Respo
   }
 });
 
-// Mark return as shipped (buyer, only APPROVED)
+// Mark return as shipped (buyer, only APPROVED) — üsul + izləmə kodu.
 router.put('/returns/:id/ship', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
     const ret = await prisma.returnRequest.findUnique({ where: { id: parseInt(req.params.id) } });
     if (!ret || ret.buyerId !== req.adminId) { res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return; }
     if (ret.status !== 'APPROVED') { res.status(400).json({ success: false, message: 'Sorğu hələ təsdiqlənməyib' }); return; }
-    const updated = await prisma.returnRequest.update({ where: { id: ret.id }, data: { status: 'RETURN_SHIPPED' } });
-    // Qarşı tərəfin Sifarişlər səhifəsində iadə statusu dərhal dəyişsin.
+    const method = RETURN_METHODS.includes(String(req.body?.returnMethod)) ? String(req.body.returnMethod) : 'IN_PERSON';
+    const trackingCode = req.body?.trackingCode ? String(req.body.trackingCode).trim().slice(0, 80) : null;
+    const updated = await prisma.returnRequest.update({
+      where: { id: ret.id },
+      data: {
+        status: 'RETURN_SHIPPED', returnMethod: method, trackingCode, shippedAt: new Date(), shipBy: null,
+        // Satıcı bu müddətdə qəbulu təsdiqləməsə sistem mübahisə açır.
+        receiveBy: hoursFromNow(RETURN_RECEIVE_DAYS * 24),
+      },
+    });
+    await logReturnEvent(ret.id, 'BUYER', req.adminId!, 'RETURN_SHIPPED',
+      `${RETURN_METHOD_AZ[method]} ilə göndərildi${trackingCode ? ` — izləmə kodu: ${trackingCode}` : ''}`);
+    await prisma.notification.create({
+      data: {
+        userId: ret.sellerId, type: 'ORDER', title: `Qaytarılan məhsul yoldadır — sifariş #${ret.orderId}`,
+        body: `Alıcı məhsulu ${RETURN_METHOD_AZ[method]} ilə göndərdi${trackingCode ? ` (izləmə: ${trackingCode})` : ''}. Məhsulu alanda «Qəbul etdim» və ya problem varsa «Problem var» basın.`,
+        link: '/iadeler?tab=selling',
+      },
+    }).catch(() => {});
     pushLive([ret.buyerId, ret.sellerId], { kind: 'return', id: ret.id, status: updated.status });
     res.json({ success: true, returnRequest: updated });
   } catch (error: any) {
@@ -1619,58 +1688,72 @@ router.put('/returns/:id/approve', adminAuth, async (req: AuthRequest, res: Resp
     const ret = await prisma.returnRequest.findUnique({ where: { id: parseInt(req.params.id) } });
     if (!ret || ret.sellerId !== req.adminId) { res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return; }
     if (ret.status !== 'REQUESTED') { res.status(400).json({ success: false, message: 'Bu sorğu artıq cavablandırılıb' }); return; }
-    // Satıcı məbləği dəyişə bilər, amma SƏRHƏD var: 0-dan böyük və sifarişin
-    // qalıq məbləğindən çox olmamalıdır. Əvvəl yoxlama yox idi — satıcı 0 (və ya
-    // sifarişdən böyük məbləğ) yaza bilirdi.
+    // Satıcı məbləği dəyişə bilər: 0-dan böyük, sifarişin qalığından çox olmamaqla.
     const ord0 = await prisma.order.findUnique({ where: { id: ret.orderId }, select: { total: true, refundedAmount: true } });
     const remain0 = Math.round(((ord0?.total || 0) - (ord0?.refundedAmount || 0)) * 100) / 100;
-    let amt0 = ret.refundAmount ?? remain0;
-    if (req.body?.refundAmount !== undefined) {
+    let amt0: number | undefined;
+    if (req.body?.refundAmount !== undefined && req.body.refundAmount !== '') {
       const v = parseFloat(String(req.body.refundAmount));
       if (!Number.isFinite(v) || v <= 0) { res.status(400).json({ success: false, message: 'Geri ödəmə məbləği 0-dan böyük olmalıdır' }); return; }
       if (v > remain0 + 0.009) { res.status(400).json({ success: false, message: `Məbləğ sifarişin qalığından (${remain0.toFixed(2)} AZN) çox ola bilməz` }); return; }
       amt0 = Math.round(v * 100) / 100;
     }
-    const updated = await prisma.returnRequest.update({
-      where: { id: ret.id },
-      data: { status: 'APPROVED', refundAmount: amt0 },
+    const note = req.body?.sellerNote ? String(req.body.sellerNote).trim().slice(0, 500) : '';
+    if (note) await prisma.returnRequest.update({ where: { id: ret.id }, data: { sellerNote: note } });
+    const updated = await approveReturn(ret.id, 'SELLER', req.adminId!, {
+      refundAmount: amt0,
+      note: note ? `Satıcı təsdiqlədi: ${note}` : undefined,
     });
-    await prisma.notification.create({
-      data: {
-        userId: ret.buyerId, type: 'ORDER', title: `İadə təsdiqləndi — sifariş #${ret.orderId}`,
-        body: `Satıcı iadəni təsdiqlədi (${amt0.toFixed(2)} AZN). Məhsulu satıcıya təhvil verib «Göndərdim» düyməsini basın.`,
-        link: '/orders',
-      },
-    }).catch(() => {});
-    // Qarşı tərəfin Sifarişlər səhifəsində iadə statusu dərhal dəyişsin.
-    pushLive([ret.buyerId, ret.sellerId], { kind: 'return', id: ret.id, status: updated.status });
     res.json({ success: true, returnRequest: updated });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }
 });
 
-// Reject return (seller, only REQUESTED)
-router.put('/returns/:id/reject', adminAuth, async (req: AuthRequest, res: Response) => {
+// Reject return (seller, only REQUESTED) — SƏBƏB MƏCBURİDİR (+ istəyə görə şəkil).
+router.put('/returns/:id/reject', adminAuth, upload.array('images', 4), processImages, async (req: AuthRequest, res: Response) => {
   try {
     const ret = await prisma.returnRequest.findUnique({ where: { id: parseInt(req.params.id) } });
     if (!ret || ret.sellerId !== req.adminId) { res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return; }
     if (ret.status !== 'REQUESTED') { res.status(400).json({ success: false, message: 'Bu sorğu artıq cavablandırılıb' }); return; }
-    const updated = await prisma.returnRequest.update({
-      where: { id: ret.id },
-      data: { status: 'REJECTED', sellerNote: req.body.sellerNote || null },
-    });
+    const note = String(req.body?.sellerNote || '').trim();
+    if (note.length < 10) { res.status(400).json({ success: false, message: 'Rədd səbəbini ətraflı yazın (ən azı 10 simvol) — alıcı və sistem bunu görəcək' }); return; }
+    const imgs = uploadedNames(req);
+    if (imgs.length) await prisma.returnRequest.update({ where: { id: ret.id }, data: { sellerImages: [...ret.sellerImages, ...imgs].slice(0, 6) } });
+    const updated = await rejectReturn(ret.id, 'SELLER', req.adminId!, note.slice(0, 1000));
     await prisma.notification.create({
       data: {
         userId: ret.buyerId, type: 'ORDER', title: `İadə rədd edildi — sifariş #${ret.orderId}`,
-        body: (req.body.sellerNote ? `Səbəb: ${String(req.body.sellerNote).slice(0, 200)}. ` : '')
-          + 'Razı deyilsinizsə dəstəyə yazın və ya şikayət göndərin.',
-        link: '/orders',
+        body: `Satıcının səbəbi: ${note.slice(0, 200)}. Razı deyilsinizsə ${RETURN_DISPUTE_DAYS} gün ərzində şikayət açın — sistem sübutlara baxıb qərar verəcək.`,
+        link: '/iadeler',
       },
     }).catch(() => {});
-    // Qarşı tərəfin Sifarişlər səhifəsində iadə statusu dərhal dəyişsin.
-    pushLive([ret.buyerId, ret.sellerId], { kind: 'return', id: ret.id, status: updated.status });
     res.json({ success: true, returnRequest: updated });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+// Alıcı rədd edilmiş iadəyə etiraz edir → mübahisə, sistem qərar verir.
+router.post('/returns/:id/dispute', complaintLimiter, adminAuth, upload.array('images', 6), processImages, async (req: AuthRequest, res: Response) => {
+  try {
+    const ret = await prisma.returnRequest.findUnique({ where: { id: parseInt(String(req.params.id)) } });
+    if (!ret || ret.buyerId !== req.adminId) { res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return; }
+    if (ret.status !== 'REJECTED') { res.status(400).json({ success: false, message: 'Yalnız rədd edilmiş iadəyə etiraz etmək olar' }); return; }
+    if (ret.disputeId) { res.status(400).json({ success: false, message: 'Bu iadə üzrə artıq şikayət açılıb' }); return; }
+    if (Date.now() - ret.updatedAt.getTime() > RETURN_DISPUTE_DAYS * 24 * 3600 * 1000) {
+      res.status(400).json({ success: false, message: `Etiraz müddəti (${RETURN_DISPUTE_DAYS} gün) bitib` }); return;
+    }
+    const description = String(req.body?.description || '').trim();
+    if (description.length < 10) { res.status(400).json({ success: false, message: 'Niyə razı olmadığınızı yazın (ən azı 10 simvol)' }); return; }
+    const category = ['DEFECTIVE', 'DAMAGED', 'NOT_AS_DESCRIBED', 'WRONG_ITEM', 'CHANGED_MIND'].includes(String(req.body?.category))
+      ? String(req.body.category) : 'RETURN_REJECTED';
+    const images = [...ret.images, ...uploadedNames(req)].slice(0, 8);
+    const complaint = await openDispute({
+      complainantId: ret.buyerId, targetUserId: ret.sellerId, orderId: ret.orderId, returnId: ret.id,
+      category, description, images, actor: 'BUYER',
+    });
+    res.status(201).json({ success: true, complaint });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }
@@ -1682,15 +1765,18 @@ router.put('/returns/:id/receive', adminAuth, async (req: AuthRequest, res: Resp
     const ret = await prisma.returnRequest.findUnique({ where: { id: parseInt(req.params.id) } });
     if (!ret || ret.sellerId !== req.adminId) { res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return; }
     if (ret.status !== 'RETURN_SHIPPED') { res.status(400).json({ success: false, message: 'Məhsul hələ göndərilməyib' }); return; }
-    const updated = await prisma.returnRequest.update({ where: { id: ret.id }, data: { status: 'RETURN_RECEIVED' } });
+    const updated = await prisma.returnRequest.update({
+      where: { id: ret.id },
+      data: { status: 'RETURN_RECEIVED', receivedAt: new Date(), receiveBy: null, refundBy: hoursFromNow(RETURN_REFUND_HOURS) },
+    });
+    await logReturnEvent(ret.id, 'SELLER', req.adminId!, 'RETURN_RECEIVED', 'Satıcı məhsulu qəbul etdi');
     await prisma.notification.create({
       data: {
         userId: ret.buyerId, type: 'ORDER', title: `Məhsul qəbul edildi — sifariş #${ret.orderId}`,
-        body: 'Satıcı qaytarılan məhsulu qəbul etdi. Növbəti addım: pulun geri ödənilməsi.',
-        link: '/orders',
+        body: `Satıcı qaytarılan məhsulu qəbul etdi. Pul ${RETURN_REFUND_HOURS} saat ərzində qaytarılacaq (satıcı etməsə sistem özü qaytarır).`,
+        link: '/iadeler',
       },
     }).catch(() => {});
-    // Qarşı tərəfin Sifarişlər səhifəsində iadə statusu dərhal dəyişsin.
     pushLive([ret.buyerId, ret.sellerId], { kind: 'return', id: ret.id, status: updated.status });
     res.json({ success: true, returnRequest: updated });
   } catch (error: any) {
@@ -1698,97 +1784,40 @@ router.put('/returns/:id/receive', adminAuth, async (req: AuthRequest, res: Resp
   }
 });
 
-// Issue refund + restore stock (seller, only RETURN_RECEIVED) - uses transaction
+// Satıcı: qaytarılan məhsul zədəli / fərqli / əskik gəldi → mübahisə (foto sübutla).
+router.post('/returns/:id/receive-problem', complaintLimiter, adminAuth, upload.array('images', 6), processImages, async (req: AuthRequest, res: Response) => {
+  try {
+    const ret = await prisma.returnRequest.findUnique({ where: { id: parseInt(String(req.params.id)) } });
+    if (!ret || ret.sellerId !== req.adminId) { res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return; }
+    if (ret.status !== 'RETURN_SHIPPED' && ret.status !== 'RETURN_RECEIVED') { res.status(400).json({ success: false, message: 'Bu mərhələdə problem bildirmək olmaz' }); return; }
+    const description = String(req.body?.description || '').trim();
+    const imgs = uploadedNames(req);
+    if (description.length < 10) { res.status(400).json({ success: false, message: 'Problemi ətraflı yazın (ən azı 10 simvol)' }); return; }
+    if (!imgs.length) { res.status(400).json({ success: false, message: 'Problemi göstərən ən azı 1 şəkil əlavə edin' }); return; }
+    await prisma.returnRequest.update({
+      where: { id: ret.id },
+      data: { sellerImages: [...ret.sellerImages, ...imgs].slice(0, 8), receivedAt: ret.receivedAt || new Date() },
+    });
+    const complaint = await openDispute({
+      complainantId: ret.sellerId, targetUserId: ret.buyerId, orderId: ret.orderId, returnId: ret.id,
+      category: 'RETURN_DAMAGED', description, images: imgs, actor: 'SELLER',
+    });
+    res.status(201).json({ success: true, complaint });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+// Issue refund + restore stock (seller, only RETURN_RECEIVED)
 router.put('/returns/:id/refund', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
-    const ret = await prisma.returnRequest.findUnique({
-      where: { id: parseInt(req.params.id) },
-      include: { orderItem: true, order: { include: { items: true } } },
-    });
+    const ret = await prisma.returnRequest.findUnique({ where: { id: parseInt(req.params.id) } });
     if (!ret || ret.sellerId !== req.adminId) { res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return; }
     if (ret.status !== 'RETURN_RECEIVED') { res.status(400).json({ success: false, message: 'Məhsul hələ qəbul edilməyib' }); return; }
-
-    // Kart ödənişidirsə — pulu BANK vasitəsilə geri qaytar (DB dəyişməzdən əvvəl).
-    // ORTAQ SERVİS işlədilir: ikiqat qaytarma qıfılı, uğursuzluqda təkrar cəhd,
-    // admin bildirişi və QİSMƏN iadə uçotu (Order.refundedAmount) oradadır.
-    // Əvvəl burada birbaşa `gatewayRefundOrder` çağırılırdı — nə qıfıl, nə
-    // təkrar cəhd vardı, sifariş isə qismən iadədə də tam REFUNDED olurdu.
-    const ord = ret.order;
-    const isCardPaid = !!((ord.gatewayRef || ord.gatewayOrderId) && ord.paymentStatus === 'PAID');
-    // Qalıqdan çox qaytarılmasın (məbləğ sorğu yaradılandan sonra da dəyişə bilər).
-    const remainingNow = Math.round((ord.total - (ord.refundedAmount || 0)) * 100) / 100;
-    const amt = Math.min(ret.refundAmount ?? remainingNow, remainingNow);
-    // NAĞD sifarişdə pul platformadan keçməyib — satıcı alıcıya nağd qaytarır.
-    // Bu halı ayrıca işarələyirik ki, alıcıya «bankdan qayıdacaq» kimi yanlış
-    // vəd verilməsin (əvvəl nağd iadədə də «Geri ödənildi» yazılırdı).
-    const cashRefund = !isCardPaid;
-    if (isCardPaid && amt > 0.009) {
-      const r = await refundOrderSafe(ord.id, 'RETURN', amt);
-      if (!r.ok) { res.status(502).json({ success: false, message: 'Bank iadəsi alınmadı: ' + (r.error || ''), retrying: true }); return; }
-    }
-
-    const stockWarnings: string[] = [];
-
-    // Transaction ile refund + stock restore atomik yap
-    const updated = await prisma.$transaction(async (tx) => {
-      // Restore stock
-      if (ret.orderItem) {
-        const listing = await tx.listing.findUnique({ where: { id: ret.orderItem.listingId } });
-        if (listing) {
-          await tx.listing.update({
-            where: { id: ret.orderItem.listingId },
-            data: { stock: { increment: ret.quantity } },
-          });
-        } else {
-          stockWarnings.push(`Elan #${ret.orderItem.listingId} silinib, stok bərpa edilə bilmədi`);
-        }
-      } else {
-        // Full order return - restore all items
-        for (const item of ret.order.items) {
-          const listing = await tx.listing.findUnique({ where: { id: item.listingId } });
-          if (listing) {
-            await tx.listing.update({
-              where: { id: item.listingId },
-              data: { stock: { increment: item.quantity } },
-            });
-          } else {
-            stockWarnings.push(`Elan #${item.listingId} silinib, stok bərpa edilə bilmədi`);
-          }
-        }
-      }
-
-      // Referal komissiyasını ləğv et (qaytarılmış mal üçün komissiya ödənilmir).
-      if (ord.referrerId && !ord.referralVoided) {
-        await tx.order.update({ where: { id: ord.id }, data: { referralVoided: true } });
-        await tx.notification.create({
-          data: { userId: ord.referrerId, type: 'REFERRAL', title: 'Referal komissiyası ləğv edildi', body: `Sifariş #${ord.id} qaytarıldığı üçün komissiya ləğv olundu.`, link: '/referral-earnings' },
-        }).catch(() => {});
-      }
-
-      return await tx.returnRequest.update({ where: { id: ret.id }, data: { status: 'REFUNDED', cashRefund } });
-    });
-
-    if (stockWarnings.length > 0) {
-      console.warn(`Refund #${ret.id} stock warnings:`, stockWarnings);
-    }
-
-    // ƏN VACİBİ: hesablaşmanı yenilə. Bu çağırış olmasa ledger sətri
-    // "ödəniləcək" qalırdı və admin alıcıya qaytarılmış pulu ikinci dəfə
-    // satıcıya köçürə bilərdi.
-    await recordSettlement(ord.id).catch(() => {});
-
-    await prisma.notification.create({
-      data: {
-        userId: ret.buyerId, type: 'ORDER', title: `Sifariş #${ord.id}`,
-        body: cashRefund
-          ? `İadə tamamlandı. Məbləğ (${amt.toFixed(2)} AZN) nağd ödəniş olduğu üçün satıcı tərəfindən nağd qaytarılır — almadınızsa dəstəyə yazın.`
-          : `İadə tamamlandı — ${amt.toFixed(2)} AZN kartınıza qaytarıldı. Banka düşməsi bir neçə iş günü çəkə bilər.`,
-        link: '/orders',
-      },
-    }).catch(() => {});
-
-    pushLive([ret.buyerId, ret.sellerId], { kind: 'return', id: ret.id, status: updated.status });
-    res.json({ success: true, returnRequest: updated, stockWarnings: stockWarnings.length > 0 ? stockWarnings : undefined });
+    const r = await finalizeReturnRefund(ret.id, 'SELLER', req.adminId!);
+    if (!r.ok) { res.status(r.retrying ? 502 : 400).json({ success: false, message: r.error, retrying: r.retrying }); return; }
+    const updated = await prisma.returnRequest.findUnique({ where: { id: ret.id } });
+    res.json({ success: true, returnRequest: updated, stockWarnings: r.stockWarnings?.length ? r.stockWarnings : undefined });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }
