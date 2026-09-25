@@ -1,6 +1,8 @@
 import { Router, Response } from 'express';
 import { PrismaClient } from '@prisma/client';
 import { adminAuth, AuthRequest } from '../middleware/auth';
+import { markReadByPath } from '../services/notificationRead';
+import { pushLive } from '../services/live';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -34,7 +36,20 @@ router.put('/notifications/:id/read', adminAuth, async (req: AuthRequest, res: R
       where: { id: notif.id },
       data: { read: true },
     });
+    pushLive(req.adminId!, { kind: 'notification' }); // digər açıq tablar da yenilənsin
     res.json({ success: true, notification: updated });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+// Açılan səhifəyə aid oxunmamış bildirişləri oxunmuş et (zəngdəki sayğac anlıq azalsın).
+router.put('/notifications/read-by-path', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const path = String(req.body?.path || '').slice(0, 500);
+    if (!path.startsWith('/')) { res.status(400).json({ success: false, message: 'path lazımdır' }); return; }
+    const count = await markReadByPath(req.adminId!, path);
+    res.json({ success: true, count });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }
@@ -47,6 +62,7 @@ router.put('/notifications/read-all', adminAuth, async (req: AuthRequest, res: R
       where: { userId: req.adminId!, read: false },
       data: { read: true },
     });
+    pushLive(req.adminId!, { kind: 'notification' });
     res.json({ success: true });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });

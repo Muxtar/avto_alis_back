@@ -3,6 +3,7 @@ import { Prisma, PrismaClient } from '@prisma/client';
 import { adminAuth, AuthRequest } from '../middleware/auth';
 import { messageLimiter } from '../middleware/rateLimiter';
 import { emitToUser, isUserOnline } from '../services/callSignaling';
+import { markReadForChat } from '../services/notificationRead';
 import { chatUpload } from '../middleware/upload';
 
 const router = Router();
@@ -602,7 +603,12 @@ router.get('/messages/:partnerId', adminAuth, async (req: AuthRequest, res: Resp
       where: { senderId: partnerId, receiverId: userId, read: false, AND: [seg] },
       data: { read: true },
     });
-    if (upd.count > 0) emitToUser(partnerId, 'chat:read', { by: userId });
+    if (upd.count > 0) {
+      emitToUser(partnerId, 'chat:read', { by: userId });
+      // Oxuyanın ÖZ tabları da: qlobal «oxunmamış mesaj» sayğacı anlıq azalsın.
+      emitToUser(userId, 'chat:read', { by: userId, self: true });
+    }
+    markReadForChat(userId, partnerId).catch(() => {});
 
     const partner = await prisma.user.findUnique({ where: { id: partnerId }, select: { id: true, name: true, phone: true, type: true, avatar: true } });
     res.json({ messages, partner, segment: segment || null, total, hasMore: total > (before ? messages.length : limit) });
