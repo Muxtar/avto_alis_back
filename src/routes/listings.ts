@@ -364,7 +364,9 @@ router.get('/listings/:id', async (req: Request, res: Response) => {
     // məhsulu ALMIŞ alıcı ona RƏY YAZA BİLMİRDİ — sifarişdəki «Rəy yaz»
     // düyməsi «Elan tapılmadı» səhifəsinə aparırdı.
     const buyerOfListing = viewerId != null ? await purchasedListing(viewerId, listing.id) : false;
-    if (listing.expiresAt && listing.expiresAt <= new Date() && !buyerOfListing) {
+    // Sahib də vaxtı bitmiş öz elanını açır — bildirişdən gəlib yeniləyə bilsin.
+    const isOwner = viewerId != null && viewerId === listing.userId;
+    if (listing.expiresAt && listing.expiresAt <= new Date() && !buyerOfListing && !isOwner) {
       res.status(404).json({ success: false, message: 'Elan tapılmadı' });
       return;
     }

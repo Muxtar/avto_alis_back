@@ -1886,7 +1886,7 @@ router.post('/admin/listings/reactivate-expired', requirePermission('listings'),
           { expiresAt: { lte: now } },
         ],
       },
-      data: { expiresAt: newExpiresAt },
+      data: { expiresAt: newExpiresAt, expiryNotifiedAt: null },
     });
 
     res.json({

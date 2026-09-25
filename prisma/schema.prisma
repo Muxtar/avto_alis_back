@@ -415,6 +415,9 @@ model Listing {
   rejectReason         String? // rədd edilibsə səbəb (sahibi görür)
   reviewedAt           DateTime? // admin nə vaxt baxdı
   expiresAt            DateTime?
+  // Müddət bitəndə sahibinə bildiriş göndərilib (təkrar göndərilməsin).
+  // Elan yenilənəndə null-a qaytarılır — növbəti bitmədə yenə bildiriş gedir.
+  expiryNotifiedAt     DateTime?
   // Biznes bağlantısı — elan bir obyektə (filiala) aiddirsə kart ödənişi mümkün olur.
   businessId           Int?
   businessObjectId     Int?

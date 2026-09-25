@@ -6,6 +6,7 @@ import { recordSettlement, releaseHeldLedgers } from './settlement';
 import { endExpiredConsultations } from '../routes/consultations';
 import { cancelActiveYangoClaim } from '../routes/yango';
 import { closeExpiredGroups, settleDueGroups, syncGroupWindows } from './groupBuy';
+import { notifyExpiredListings } from './listingExpiry';
 
 const prisma = new PrismaClient();
 
@@ -269,6 +270,8 @@ export function startOrderExpiryJob() {
       .catch(() => {});
     // Vaxtı bitmiş konsultasiya seanslarını bağla (rəy/şikayət açılsın).
     endExpiredConsultations().catch(() => {});
+    // Müddəti bitmiş elanların sahiblərinə bildiriş (yeniləmək üçün).
+    notifyExpiredListings().catch(() => {});
   };
   setTimeout(run, 30 * 1000);              // start-dan 30 san sonra ilk yoxlama
   setInterval(run, 10 * 60 * 1000);        // sonra hər 10 dəqiqə

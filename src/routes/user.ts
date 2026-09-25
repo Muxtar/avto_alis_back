@@ -925,7 +925,7 @@ router.post('/me/listings/:id/reactivate', adminAuth, async (req: AuthRequest, r
     const expiresAt = new Date(now + 20 * 24 * 60 * 60 * 1000);
     const listing = await prisma.listing.update({
       where: { id: existing.id },
-      data: { expiresAt },
+      data: { expiresAt, expiryNotifiedAt: null },
     });
     res.json({ success: true, listing });
   } catch (error: any) {
