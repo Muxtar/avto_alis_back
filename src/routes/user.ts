@@ -15,6 +15,7 @@ import { validateTiers } from '../services/tierPricing';
 import { MIN_WINDOW_DAYS, MAX_WINDOW_DAYS, RETURN_WINDOW_DAYS } from '../services/groupBuy';
 import { isValidMonths } from '../services/installment';
 import { visibilityOf } from '../services/listingVisibility';
+import { onProfileChanged } from '../services/proGroups';
 import { SOCIAL_PLATFORMS as SOCIAL_PLATFORM_LIST, BIO_READABLE, validateSocialUrl, newVerifyCode, checkSocialCode, releaseSameHandle } from '../services/socialVerify';
 import fs from 'fs';
 import path from 'path';
@@ -514,7 +515,7 @@ router.put('/me', adminAuth, async (req: AuthRequest, res: Response) => {
       return Number.isFinite(n) ? n : null;
     };
     // Kimlik təsdiqlənibsə (şəkil var) ad/FIN/doğum tarixi/cins kilidlidir — yalnız kimlik qaldırıldıqdan sonra dəyişilir.
-    const cur = await prisma.user.findUnique({ where: { id: req.adminId }, select: { idCardImage: true } });
+    const cur = await prisma.user.findUnique({ where: { id: req.adminId }, select: { idCardImage: true, city: true, profession: true, professions: true } });
     const idLocked = !!cur?.idCardImage;
     const user = await prisma.user.update({
       where: { id: req.adminId },
@@ -537,6 +538,8 @@ router.put('/me', adminAuth, async (req: AuthRequest, res: Response) => {
         city: true, address: true, latitude: true, longitude: true,
       },
     });
+    // Peşə qrupları: yeni ixtisas → avtomatik qoşul; şəhər dəyişib → təklif + köhnədən çıxmaq özünə qalır.
+    if (cur) await onProfileChanged(req.adminId!, { city: cur.city, profession: cur.profession, professions: cur.professions }, { city: user.city, profession: user.profession, professions: user.professions }).catch(() => {});
     res.json({ success: true, user });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });

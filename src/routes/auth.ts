@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { PrismaClient, UserType } from '@prisma/client';
+import { syncProGroups } from '../services/proGroups';
 import bcrypt from 'bcryptjs';
 import { upload } from '../middleware/upload';
 import { generateToken, createSession, adminAuth, AuthRequest } from '../middleware/auth';
@@ -201,6 +202,8 @@ router.post('/register/complete', adminAuth, passportPairUpload, async (req: Aut
       select: { id: true, name: true, phone: true, email: true, type: true, role: true, verified: true, profileComplete: true, sellerVerified: true },
     });
 
+    // Peşə qrupu: «şəhər · ixtisas» — qeydiyyatda avtomatik qoşulma.
+    await syncProGroups(userId, 'AUTO').catch(() => {});
     res.json({ success: true, user });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
@@ -324,6 +327,8 @@ router.post('/register/complete-json', adminAuth, async (req: AuthRequest, res: 
       data: updateData,
       select: { id: true, name: true, phone: true, email: true, type: true, role: true, verified: true, profileComplete: true, sellerVerified: true, serviceBrands: true, serviceAllBrands: true, serviceCategories: true },
     });
+    // Peşə qrupu: «şəhər · ixtisas» — qeydiyyatda avtomatik qoşulma.
+    await syncProGroups(userId, 'AUTO').catch(() => {});
     res.json({ success: true, user });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
@@ -396,6 +401,8 @@ router.post('/register/complete-id', adminAuth, idPairUpload, processImages, asy
       },
       select: { id: true, name: true, phone: true, email: true, type: true, role: true, verified: true, profileComplete: true, sellerVerified: true, idVerifyStatus: true, faceMatchScore: true },
     });
+    // Peşə qrupu: «şəhər · ixtisas» — qeydiyyatda avtomatik qoşulma.
+    await syncProGroups(userId, 'AUTO').catch(() => {});
     res.json({ success: true, user });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });

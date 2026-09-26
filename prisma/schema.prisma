@@ -245,6 +245,8 @@ model User {
   consents      UserConsent[]
   businessFees  BusinessFee[]
 
+  // Peşə qrupları ilk dəfə sinxronlaşdırılıb (köhnə istifadəçilər üçün bir dəfəlik avtomatik qoşulma).
+  proGroupsSyncedAt DateTime?
   // Default location — used on listings + city-search browsing.
   city      String?
   address   String?
@@ -532,8 +534,29 @@ model Conversation {
   avatar      String?
   createdById Int
   createdAt   DateTime             @default(now())
+  // PEŞƏ QRUPU — «Bakı · Həkim»: sistem yaradır (CUSTOM = istifadəçinin öz qrupu).
+  // Hər şəhər + ixtisas cütü üçün BİR qrup (normallaşdırılmış açarlarla).
+  kind          String  @default("CUSTOM") // CUSTOM | PRO_CITY
+  cityKey       String?
+  professionKey String?
+  city          String? // göstəriş üçün
+  profession    String?
   members     ConversationMember[]
   messages    Message[]
+  proOptOuts  ProGroupOptOut[]
+
+  @@unique([kind, cityKey, professionKey])
+}
+
+// İstifadəçi peşə qrupundan ÖZÜ çıxıb — sistem onu avtomatik geri əlavə etmir.
+model ProGroupOptOut {
+  id             Int          @id @default(autoincrement())
+  conversationId Int
+  userId         Int
+  createdAt      DateTime     @default(now())
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@unique([conversationId, userId])
 }
 
 model ConversationMember {
@@ -543,6 +566,8 @@ model ConversationMember {
   role           String       @default("MEMBER") // ADMIN | MEMBER
   joinedAt       DateTime     @default(now())
   lastReadAt     DateTime? // oxunmamış say üçün
+  // Peşə qrupu artıq uyğun deyil (şəhər/ixtisas dəyişib), amma istifadəçi «qal» dedi.
+  keepStale      Boolean      @default(false)
   conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
 
   @@unique([conversationId, userId])

@@ -2,6 +2,8 @@ import { Router, Response } from 'express';
 import { PrismaClient } from '@prisma/client';
 import { adminAuth, AuthRequest } from '../middleware/auth';
 import { emitToUser } from '../services/callSignaling';
+import { leaveProGroup, syncProGroups } from '../services/proGroups';
+import { verifiedProfessions } from '../services/professionDiscount';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -23,18 +25,28 @@ function notify(ids: number[], conversationId: number) {
   ids.forEach((id) => emitToUser(id, 'chat:groupChanged', { conversationId }));
 }
 
+const isProGroup = async (id: number) => (await prisma.conversation.findUnique({ where: { id }, select: { kind: true } }))?.kind === 'PRO_CITY';
+
 // Qrupu üzv istifadəçi məlumatları ilə formala.
+// Peşə qrupunda üzvlər bir-birini tanımır — telefon nömrələri GİZLİDİR; ixtisası
+// sənədlə təsdiqli olanlar «verified» işarəsi alır.
 async function shapeGroup(conversationId: number) {
   const conv = await prisma.conversation.findUnique({ where: { id: conversationId }, include: { members: true } });
   if (!conv) return null;
+  const pro = conv.kind === 'PRO_CITY';
   const users = await prisma.user.findMany({ where: { id: { in: conv.members.map((m) => m.userId) } }, select: { id: true, name: true, avatar: true, type: true, phone: true } });
-  const umap = new Map(users.map((u) => [u.id, u]));
+  const umap = new Map(users.map((u) => [u.id, pro ? { ...u, phone: null } : u]));
+  const verified = new Set<number>();
+  if (pro && conv.professionKey) {
+    for (const m of conv.members.slice(0, 300)) if ((await verifiedProfessions(m.userId)).has(conv.professionKey)) verified.add(m.userId);
+  }
   return {
     id: conv.id,
     name: conv.name,
     avatar: conv.avatar,
     createdById: conv.createdById,
-    members: conv.members.map((m) => ({ userId: m.userId, role: m.role, user: umap.get(m.userId) || null })),
+    kind: conv.kind, city: conv.city, profession: conv.profession,
+    members: conv.members.map((m) => ({ userId: m.userId, role: pro ? 'MEMBER' : m.role, user: umap.get(m.userId) || null, verifiedProfession: verified.has(m.userId) })),
   };
 }
 
@@ -63,6 +75,8 @@ router.post('/groups', adminAuth, async (req: AuthRequest, res: Response) => {
 router.get('/groups', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
     const me = req.adminId!;
+    // Köhnə istifadəçi ilk dəfə — peşə qrupuna bir dəfəlik avtomatik qoşulma.
+    await syncProGroups(me, 'PASSIVE').catch(() => {});
     const memberships = await prisma.conversationMember.findMany({
       where: { userId: me },
       include: { conversation: true },
@@ -79,6 +93,7 @@ router.get('/groups', adminAuth, async (req: AuthRequest, res: Response) => {
         isGroup: true,
         name: mm.conversation.name,
         avatar: mm.conversation.avatar,
+        kind: mm.conversation.kind,
         memberCount,
         lastMessage,
         unreadCount,
@@ -128,6 +143,7 @@ router.get('/groups/:id/messages', adminAuth, async (req: AuthRequest, res: Resp
 router.post('/groups/:id/members', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
     const id = parseInt(String(req.params.id));
+    if (await isProGroup(id)) { res.status(403).json({ success: false, message: 'Peşə qrupuna üzv əlavə edilmir — hər kəs öz ixtisası və şəhəri ilə özü qoşulur' }); return; }
     const me = await getMember(id, req.adminId!);
     if (!me || me.role !== 'ADMIN') { res.status(403).json({ success: false, message: 'Yalnız qrup admini üzv əlavə edə bilər' }); return; }
     const raw: any[] = Array.isArray(req.body?.memberIds) ? req.body.memberIds : [];
@@ -154,6 +170,12 @@ router.delete('/groups/:id/members/:userId', adminAuth, async (req: AuthRequest,
     const me = await getMember(id, req.adminId!);
     if (!me) { res.status(403).json({ success: false, message: 'Bu qrupun üzvü deyilsiniz' }); return; }
     const isSelf = targetId === req.adminId!;
+    if (await isProGroup(id)) {
+      // Peşə qrupunda yalnız özün çıxa bilərsən (opt-out yazılır ki, geri avtomatik əlavə olunmayasan).
+      if (!isSelf) { res.status(403).json({ success: false, message: 'Peşə qrupunda başqasını çıxarmaq olmur' }); return; }
+      await leaveProGroup(req.adminId!, id);
+      res.json({ success: true }); return;
+    }
     if (!isSelf && me.role !== 'ADMIN') { res.status(403).json({ success: false, message: 'Yalnız admin üzv çıxara bilər' }); return; }
     const before = await memberIds(id);
     await prisma.conversationMember.deleteMany({ where: { conversationId: id, userId: targetId } });
@@ -169,6 +191,7 @@ router.patch('/groups/:id/members/:userId', adminAuth, async (req: AuthRequest, 
   try {
     const id = parseInt(String(req.params.id));
     const targetId = parseInt(String(req.params.userId));
+    if (await isProGroup(id)) { res.status(403).json({ success: false, message: 'Peşə qrupunda admin yoxdur' }); return; }
     const me = await getMember(id, req.adminId!);
     if (!me || me.role !== 'ADMIN') { res.status(403).json({ success: false, message: 'Yalnız admin səlahiyyət dəyişə bilər' }); return; }
     const role = String(req.body?.role || '').toUpperCase() === 'ADMIN' ? 'ADMIN' : 'MEMBER';
@@ -191,6 +214,7 @@ router.patch('/groups/:id/members/:userId', adminAuth, async (req: AuthRequest, 
 router.patch('/groups/:id', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
     const id = parseInt(String(req.params.id));
+    if (await isProGroup(id)) { res.status(403).json({ success: false, message: 'Peşə qrupunun adı şəhər və ixtisasdan gəlir — dəyişdirilmir' }); return; }
     const me = await getMember(id, req.adminId!);
     if (!me || me.role !== 'ADMIN') { res.status(403).json({ success: false, message: 'Yalnız admin dəyişə bilər' }); return; }
     const name = String(req.body?.name || '').trim();
