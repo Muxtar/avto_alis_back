@@ -286,6 +286,94 @@ router.delete('/messages/:id', adminAuth, async (req: AuthRequest, res: Response
   }
 });
 
+// ── TOPLU SİLMƏ (WhatsApp kimi bir neçə mesajı seçib silmək) ──
+// mode=me       → seçilənlər yalnız məndə gizlədilir (istənilən mesaj)
+// mode=everyone → yalnız MƏNİM göndərdiyim mesajlar hamı üçün silinir; başqasınınkı
+//                 atlanır (skipped) — frontend «hamı üçün sil»i yalnız öz mesajlarında təklif edir.
+router.post('/messages/bulk-delete', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.adminId!;
+    const ids: number[] = (Array.isArray(req.body?.ids) ? req.body.ids : []).map((x: any) => parseInt(String(x))).filter((n: number) => Number.isFinite(n)).slice(0, 500);
+    const mode = req.body?.mode === 'everyone' ? 'everyone' : 'me';
+    if (!ids.length) { res.status(400).json({ success: false, message: 'Mesaj seçilməyib' }); return; }
+    const msgs = await prisma.message.findMany({ where: { id: { in: ids } }, select: { id: true, senderId: true, receiverId: true, conversationId: true, deletedAt: true } });
+    // İştirakçılıq: 1:1-də göndərən/alan, qrupda üzv.
+    const groupIds = Array.from(new Set(msgs.map((m) => m.conversationId).filter((x): x is number => !!x)));
+    const memberOf = new Set(groupIds.length ? (await prisma.conversationMember.findMany({ where: { userId, conversationId: { in: groupIds } }, select: { conversationId: true } })).map((m) => m.conversationId) : []);
+    const mine = msgs.filter((m) => m.senderId === userId || m.receiverId === userId || (m.conversationId && memberOf.has(m.conversationId)));
+    let deleted = 0, hidden = 0, skipped = ids.length - mine.length;
+    if (mode === 'everyone') {
+      const own = mine.filter((m) => m.senderId === userId && !m.deletedAt);
+      skipped += mine.length - own.length;
+      if (own.length) {
+        const at = new Date();
+        await prisma.message.updateMany({ where: { id: { in: own.map((m) => m.id) } }, data: { deletedAt: at, content: '' } });
+        for (const m of own) (await messageRecipients(m)).forEach((uid) => emitToUser(uid, 'chat:deleted', { id: m.id, deletedAt: at }));
+        deleted = own.length;
+      }
+    } else {
+      const r = await prisma.message.updateMany({ where: { id: { in: mine.map((m) => m.id) }, NOT: { deletedForIds: { has: userId } } }, data: { deletedForIds: { push: userId } } });
+      hidden = r.count;
+      emitToUser(userId, 'chat:read', { by: userId, self: true }); // oxunmamış sayğac yenilənsin
+    }
+    res.json({ success: true, deleted, hidden, skipped });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+// ── ZƏNGLƏR (WhatsApp «Zənglər» sekmesi) ──
+// Zənglər söhbətdə CALL tipli mesaj kimi saxlanır; burada ayrıca siyahı kimi verilir.
+router.get('/me/calls', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.adminId!;
+    const onlyMissed = String(req.query.filter || '') === 'missed';
+    const rows = await prisma.message.findMany({
+      where: {
+        type: 'CALL', conversationId: null,
+        OR: [{ senderId: userId }, { receiverId: userId }],
+        NOT: { deletedForIds: { has: userId } },
+        ...(onlyMissed ? { receiverId: userId, callStatus: 'MISSED' } : {}),
+      },
+      orderBy: { createdAt: 'desc' }, take: 300,
+      select: { id: true, senderId: true, receiverId: true, callKind: true, callStatus: true, mediaDuration: true, createdAt: true },
+    });
+    const partnerIds = Array.from(new Set(rows.map((r) => (r.senderId === userId ? r.receiverId! : r.senderId))));
+    const users = await prisma.user.findMany({ where: { id: { in: partnerIds } }, select: { id: true, name: true, avatar: true, type: true } });
+    const calls = rows.map((r) => {
+      const outgoing = r.senderId === userId;
+      const partner = users.find((u) => u.id === (outgoing ? r.receiverId : r.senderId)) || null;
+      return {
+        id: r.id, partner, outgoing, kind: r.callKind || 'audio',
+        missed: r.callStatus === 'MISSED', // gedən zəngdə «cavablandırılmadı» deməkdir
+        duration: r.mediaDuration || 0, createdAt: r.createdAt,
+      };
+    });
+    res.json({ success: true, calls, missedCount: calls.filter((c) => c.missed && !c.outgoing).length });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+// Zəng tarixçəsini təmizlə (yalnız məndə). ids verilməsə — hamısı.
+router.post('/me/calls/clear', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.adminId!;
+    const ids: number[] | null = Array.isArray(req.body?.ids) ? req.body.ids.map((x: any) => parseInt(String(x))).filter((n: number) => Number.isFinite(n)) : null;
+    const r = await prisma.message.updateMany({
+      where: {
+        type: 'CALL', OR: [{ senderId: userId }, { receiverId: userId }],
+        NOT: { deletedForIds: { has: userId } },
+        ...(ids ? { id: { in: ids } } : {}),
+      },
+      data: { deletedForIds: { push: userId } },
+    });
+    res.json({ success: true, cleared: r.count });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
 // Yalnız məndə sil — mesaj yalnız bu istifadəçidə gizlədilir (WhatsApp "mənim üçün sil").
 router.post('/messages/:id/hide', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
