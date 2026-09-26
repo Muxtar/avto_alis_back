@@ -640,6 +640,8 @@ model CartItem {
   groupBuyId Int?
   // Referal linkindən gəlibsə — sifarişdə komissiya bu linkin sahibinə yazılır.
   referralCartId Int?
+  // Razılaşdırılmış qiymət təklifi — checkout-da vahid qiymət təklifdən götürülür.
+  priceOfferId Int?
   cart       Cart      @relation(fields: [cartId], references: [id], onDelete: Cascade)
   listing    Listing   @relation(fields: [listingId], references: [id], onDelete: Cascade)
   groupBuy   GroupBuy? @relation(fields: [groupBuyId], references: [id], onDelete: SetNull)
@@ -999,6 +1001,37 @@ model InquiryOffer {
   inquiry   Inquiry     @relation(fields: [inquiryId], references: [id], onDelete: Cascade)
   seller    User        @relation("SellerOffers", fields: [sellerId], references: [id], onDelete: Cascade)
   listing   Listing?    @relation(fields: [listingId], references: [id], onDelete: SetNull)
+}
+
+// QİYMƏT TƏKLİFİ — alıcı konkret elan üçün qiymət təklif edir (məs. 2 ədəd × 33.000
+// əvəzinə 35.000). Satıcı qəbul / rədd / əks-təklif edir. Qəbul olunanda alıcı üçün
+// həmin qiymətlə ALIŞ PƏNCƏRƏSİ açılır (acceptedUntil) — səbətə təklif qiyməti ilə düşür.
+// «Daha ucuza axtar» sorğusunda qəbul olunan satıcı təklifi də bura çevrilir.
+model PriceOffer {
+  id            Int       @id @default(autoincrement())
+  listingId     Int
+  buyerId       Int
+  sellerId      Int
+  quantity      Int       @default(1)
+  listPrice     Float // təklif anındakı elan qiyməti (surət)
+  unitPrice     Float // alıcının təklif etdiyi vahid qiymət
+  counterPrice  Float? // satıcının əks-təklifi
+  message       String?
+  sellerNote    String?
+  // PENDING (satıcı cavabı gözlənilir) · COUNTERED (alıcı cavabı gözlənilir) · ACCEPTED (alış pəncərəsi açıq)
+  // REJECTED · CANCELLED · EXPIRED · USED (sifariş verildi)
+  status        String    @default("PENDING")
+  finalPrice    Float? // razılaşdırılmış vahid qiymət
+  source        String    @default("OFFER") // OFFER | INQUIRY
+  expiresAt     DateTime? // cavab müddəti
+  acceptedUntil DateTime? // alış pəncərəsinin sonu
+  orderId       Int?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@index([buyerId, status])
+  @@index([sellerId, status])
+  @@index([listingId])
 }
 
 // ==================== BOLT FOOD BENZERI MODELLER ====================

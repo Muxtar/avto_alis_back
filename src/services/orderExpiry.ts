@@ -11,6 +11,7 @@ import { runDisputeDeadlines } from './disputeDecision';
 import { expireVips } from './vip';
 import { releaseReferralLedgers } from './referral';
 import { autoConfirmPickups } from './pickupFlow';
+import { expireOffers } from './priceOffer';
 
 const prisma = new PrismaClient();
 
@@ -285,6 +286,8 @@ export function startOrderExpiryJob() {
     autoConfirmPickups().catch((e) => console.error('[orderExpiry] autoConfirmPickups:', e?.message));
     // Qaytarma müddəti bitmiş referal komissiyaları ödənilə bilən et.
     releaseReferralLedgers().catch(() => {});
+    // Qiymət təklifləri: cavabsız təkliflər və istifadə olunmamış alış pəncərələri.
+    expireOffers().catch(() => {});
     // Müddəti bitmiş VIP elanları adi elana çevir.
     expireVips().catch(() => {});
   };

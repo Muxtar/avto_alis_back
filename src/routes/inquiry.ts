@@ -1,3 +1,4 @@
+import { openBuyWindow } from '../services/priceOffer';
 import { Router, Response } from 'express';
 import { PrismaClient, UserType } from '@prisma/client';
 import { adminAuth, requireType, requireSellerVerified, AuthRequest } from '../middleware/auth';
@@ -385,7 +386,18 @@ router.put('/inquiries/:id/offers/:offerId/accept', adminAuth, async (req: AuthR
       },
     });
 
-    res.json({ success: true, inquiry: updated, acceptedOffer: updated.offers[0] });
+    // «Daha ucuza axtar»: satıcı konkret elan təklif edibsə — həmin qiymətlə ALIŞ
+    // PƏNCƏRƏSİ açılır (əvvəl qəbul heç nə etmirdi, alıcı adi qiymətlə alırdı).
+    let priceOfferId: number | null = null;
+    if (offer.listingId) {
+      const l = await prisma.listing.findUnique({ where: { id: offer.listingId }, select: { price: true } });
+      const po = await prisma.priceOffer.create({
+        data: { listingId: offer.listingId, buyerId: inquiry.buyerId, sellerId: offer.sellerId, quantity: 1, listPrice: l?.price ?? offer.price, unitPrice: offer.price, message: inquiry.rawText.slice(0, 500), source: 'INQUIRY' },
+      });
+      await openBuyWindow(po.id, offer.price, 'BUYER');
+      priceOfferId = po.id;
+    }
+    res.json({ success: true, inquiry: updated, acceptedOffer: updated.offers[0], priceOfferId });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }
