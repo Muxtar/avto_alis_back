@@ -60,6 +60,12 @@ router.get('/listings', async (req: Request, res: Response) => {
     // Əsas kateqoriya seçiləndə alt-kateqoriyaları da tut (prefix uyğunluğu).
     if (category) (where.AND as Prisma.ListingWhereInput[]).push({ category: { startsWith: category as string } });
     if (type && type !== 'all') where.type = type as any;
+    // BİRGƏ ALIŞ bölməsi — groupBuyEnabled() ilə eyni şərt: pəncərə günü, stok > 1
+    // və say-qiymət pillələri (qrup qiyməti pillələrdən hesablanır).
+    if (req.query.groupBuy === '1') {
+      where.type = 'PRODUCT';
+      (where.AND as Prisma.ListingWhereInput[]).push({ groupBuyDays: { gt: 0 } }, { stock: { gt: 1 } }, { priceTiers: { some: {} } });
+    }
     if (condition) where.condition = condition as any;
     if (country) where.country = country as string;
     if (brand) where.brand = { contains: brand as string, mode: 'insensitive' };
