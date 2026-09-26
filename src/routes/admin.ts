@@ -1,3 +1,4 @@
+import { releaseSameHandle } from '../services/socialVerify';
 import { Router, Response } from 'express';
 import { PrismaClient, Prisma, UserType } from '@prisma/client';
 import { approveReturn, finalizeReturnRefund, rejectReturn } from '../services/returnFlow';
@@ -2701,9 +2702,10 @@ router.post('/admin/credentials/:id/:action', requirePermission('credentials'), 
 router.get('/admin/social-links', requirePermission('social'), async (req: AuthRequest, res: Response) => {
   try {
     const status = String(req.query.status || 'PENDING').toUpperCase();
-    const where: Prisma.SocialLinkWhereInput = status === 'VERIFIED' ? { verified: true } : status === 'ALL' ? {} : { verified: false };
+    // PENDING — yalnız istifadəçinin admin yoxlamasına göndərdikləri (kod biodadır).
+    const where: Prisma.SocialLinkWhereInput = status === 'VERIFIED' ? { verified: true } : status === 'ALL' ? {} : { verified: false, reviewRequestedAt: { not: null } };
     const links = await prisma.socialLink.findMany({
-      where, orderBy: { id: 'desc' }, take: 200,
+      where, orderBy: [{ reviewRequestedAt: 'desc' }, { id: 'desc' }], take: 200,
       include: { user: { select: { id: true, name: true, phone: true } } },
     });
     res.json({ success: true, links });
@@ -2717,7 +2719,19 @@ router.post('/admin/social-links/:id/:action', requirePermission('social'), asyn
     const id = parseInt(req.params.id);
     const action = String(req.params.action);
     if (!['verify', 'reject'].includes(action)) { res.status(400).json({ success: false, message: 'Yanlış əməliyyat' }); return; }
-    const link = await prisma.socialLink.update({ where: { id }, data: { verified: action === 'verify' } });
+    const link = await prisma.socialLink.update({
+      where: { id },
+      data: action === 'verify'
+        ? { verified: true, verifyMethod: 'ADMIN', verifiedAt: new Date(), reviewRequestedAt: null, lastCheckNote: null }
+        : { verified: false, verifyMethod: null, verifiedAt: null, reviewRequestedAt: null, lastCheckNote: String(req.body?.reason || 'Admin kodu profilinizdə tapmadı').slice(0, 300) },
+    });
+    await prisma.notification.create({ data: {
+      userId: link.userId, type: 'SYSTEM',
+      title: link.verified ? 'Sosial hesabınız təsdiqləndi ✓' : 'Sosial hesab təsdiqlənmədi',
+      body: link.verified ? `${link.platform} hesabınız profilinizdə təsdiqli görünür. Kodu biodan silə bilərsiniz.` : `${link.platform}: ${link.lastCheckNote}`,
+      link: '/profile#social',
+    } }).catch(() => {});
+    if (link.verified) await releaseSameHandle(link);
     pushLive(link.userId, { kind: 'social', id: link.id, status: link.verified ? 'VERIFIED' : 'REJECTED' });
     res.json({ success: true, link });
   } catch (error: any) {
@@ -2749,7 +2763,7 @@ router.get('/admin/overview', requireAdmin, async (_req: AuthRequest, res: Respo
       prisma.business.count({ where: { status: 'PENDING', deletedAt: null } }),
       prisma.sellerVerification.count({ where: { status: 'PENDING' } }),
       prisma.professionDocument.count({ where: { status: 'PENDING' } }),
-      prisma.socialLink.count({ where: { verified: false } }),
+      prisma.socialLink.count({ where: { verified: false, reviewRequestedAt: { not: null } } }),
       prisma.complaint.count({ where: { status: { in: ['OPEN', 'REVIEWING'] } } }),
       prisma.returnRequest.count({ where: { status: 'REQUESTED' } }),
       prisma.listing.count({ where: { status: 'PENDING' } }),

@@ -233,7 +233,7 @@ router.get('/sellers/:id', async (req: Request, res: Response) => {
         cvFile: true, cvPublic: true,
         consultationOffers: { where: { active: true }, select: { id: true, title: true, description: true, durationMinutes: true, price: true }, orderBy: { createdAt: 'asc' } },
         // Yalnız təsdiqlənmiş sosial hesablar public profildə görünür.
-        socialLinks: { where: { verified: true }, select: { platform: true, url: true } },
+        socialLinks: { where: { verified: true }, select: { platform: true, url: true, verifyMethod: true, verifiedAt: true } },
         // Yalnız istifadəçinin public etdiyi peşə sənədləri (YES ikonu ilə).
         professionDocuments: { where: { isPublic: true }, select: { id: true, title: true, image: true, documentType: true } },
         // Rəsmi işçilik — yalnız təsdiqlənmiş (ACTIVE) üzvlüklər public görünür.

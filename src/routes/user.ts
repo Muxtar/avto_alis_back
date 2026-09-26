@@ -10,11 +10,12 @@ import { analyzeCredential, verifyIdentityAI, extractIdName } from '../services/
 import { sendVerificationCode } from '../services/mailer';
 import { resolveFlag } from '../services/settings';
 import { emitToAdmins } from '../services/callSignaling';
-import { pushAdmins } from '../services/live';
+import { pushAdmins, pushLive } from '../services/live';
 import { validateTiers } from '../services/tierPricing';
 import { MIN_WINDOW_DAYS, MAX_WINDOW_DAYS, RETURN_WINDOW_DAYS } from '../services/groupBuy';
 import { isValidMonths } from '../services/installment';
 import { visibilityOf } from '../services/listingVisibility';
+import { SOCIAL_PLATFORMS as SOCIAL_PLATFORM_LIST, BIO_READABLE, validateSocialUrl, newVerifyCode, checkSocialCode, releaseSameHandle } from '../services/socialVerify';
 import fs from 'fs';
 import path from 'path';
 
@@ -48,7 +49,7 @@ router.get('/me', adminAuth, async (req: AuthRequest, res: Response) => {
         idAiNameMatch: true, idAiNameScore: true, idAiFaceMatch: true, idAiFaceScore: true, idAiReason: true,
         city: true, address: true, latitude: true, longitude: true,
         workplaces: true, vehicles: true,
-        socialLinks: { select: { id: true, platform: true, url: true, verified: true } },
+        socialLinks: { select: { id: true, platform: true, url: true, verified: true, verifyCode: true, verifyMethod: true, verifiedAt: true, reviewRequestedAt: true, proofUrl: true, lastCheckAt: true, lastCheckNote: true }, orderBy: { id: 'asc' } },
         professionDocuments: {
           select: {
             id: true, title: true, image: true, documentType: true, holderName: true,
@@ -1036,35 +1037,82 @@ router.post('/me/email/verify', adminAuth, async (req: AuthRequest, res: Respons
 });
 
 // ===================== SOSIAL MEDIA HESABLARI =====================
-const SOCIAL_PLATFORMS = ['instagram', 'facebook', 'tiktok', 'youtube', 'linkedin', 'twitter', 'telegram', 'website'];
+const SOCIAL_PLATFORMS: readonly string[] = SOCIAL_PLATFORM_LIST;
+const socialOut = (l: any) => ({ ...l, autoCheck: BIO_READABLE.has(l.platform) });
 
 router.get('/me/social', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
     const links = await prisma.socialLink.findMany({ where: { userId: req.adminId! }, orderBy: { id: 'asc' } });
-    res.json({ success: true, links });
+    res.json({ success: true, links: links.map(socialOut) });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
 
-// Əl ilə link əlavə et — admin təsdiqindən sonra public profildə görünür.
+// Link əlavə et / dəyiş — təsdiq kodu verilir. Link dəyişibsə köhnə təsdiq düşür.
 router.post('/me/social', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
     const platform = String(req.body.platform || '').toLowerCase().trim();
-    const url = String(req.body.url || '').trim();
     if (!SOCIAL_PLATFORMS.includes(platform)) { res.status(400).json({ success: false, message: 'Platforma yanlışdır' }); return; }
-    if (!/^https?:\/\//i.test(url)) { res.status(400).json({ success: false, message: 'Düzgün link daxil edin (https://...)' }); return; }
-    const link = await prisma.socialLink.upsert({
-      where: { userId_platform: { userId: req.adminId!, platform } },
-      update: { url, verified: false },
-      create: { userId: req.adminId!, platform, url },
-    });
-    pushAdmins('social', { id: link.id });
-    res.json({ success: true, link });
+    const v = validateSocialUrl(platform, String(req.body.url || '').trim());
+    if (!v.ok) { res.status(400).json({ success: false, message: v.message }); return; }
+    const cur = await prisma.socialLink.findUnique({ where: { userId_platform: { userId: req.adminId!, platform } } });
+    if (cur && cur.url === v.url) { res.json({ success: true, link: socialOut(cur) }); return; }
+    const reset = { url: v.url, verified: false, verifyCode: newVerifyCode(), verifyMethod: null, verifiedAt: null, reviewRequestedAt: null, proofUrl: null, lastCheckAt: null, lastCheckNote: null };
+    const link = cur
+      ? await prisma.socialLink.update({ where: { id: cur.id }, data: reset })
+      : await prisma.socialLink.create({ data: { userId: req.adminId!, platform, ...reset } });
+    res.json({ success: true, link: socialOut(link) });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
+async function markSocialVerified(id: number, method: string) {
+  const link = await prisma.socialLink.update({ where: { id }, data: { verified: true, verifyMethod: method, verifiedAt: new Date(), reviewRequestedAt: null, lastCheckNote: null } });
+  await releaseSameHandle(link);
+  return link;
+}
+
+// Kodu yoxla — sistem profil (və ya paylaşım) səhifəsini oxuyur.
+router.post('/me/social/:id/check', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const link = await prisma.socialLink.findUnique({ where: { id: parseInt(String(req.params.id)) } });
+    if (!link || link.userId !== req.adminId) { res.status(404).json({ success: false, message: 'Link tapılmadı' }); return; }
+    if (link.verified) { res.json({ success: true, verified: true, link: socialOut(link) }); return; }
+    if (link.lastCheckAt && Date.now() - link.lastCheckAt.getTime() < 15000) { res.status(429).json({ success: false, message: 'Bir az gözləyin və yenidən yoxlayın' }); return; }
+    let proofUrl: string | null = link.proofUrl;
+    if (req.body?.proofUrl !== undefined) {
+      const raw = String(req.body.proofUrl || '').trim();
+      if (raw) {
+        const pv = validateSocialUrl(link.platform, raw);
+        if (!pv.ok) { res.status(400).json({ success: false, message: `Paylaşım linki: ${pv.message}` }); return; }
+        proofUrl = pv.url;
+      } else proofUrl = null;
+    }
+    const code = link.verifyCode || newVerifyCode();
+    const r = await checkSocialCode({ platform: link.platform, url: link.url, code, proofUrl });
+    if (r.status === 'FOUND') {
+      await prisma.socialLink.update({ where: { id: link.id }, data: { verifyCode: code, proofUrl, lastCheckAt: new Date() } });
+      const done = await markSocialVerified(link.id, r.method);
+      res.json({ success: true, verified: true, link: socialOut(done), message: 'Hesab təsdiqləndi ✓ — kodu artıq biodan silə bilərsiniz' }); return;
+    }
+    const upd = await prisma.socialLink.update({ where: { id: link.id }, data: { verifyCode: code, proofUrl, lastCheckAt: new Date(), lastCheckNote: r.message } });
+    res.json({ success: true, verified: false, status: r.status, message: r.message, link: socialOut(upd) });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
+// Avtomatik oxunmayan hal — admin kodu profildə əl ilə yoxlasın.
+router.post('/me/social/:id/request-review', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const link = await prisma.socialLink.findUnique({ where: { id: parseInt(String(req.params.id)) } });
+    if (!link || link.userId !== req.adminId) { res.status(404).json({ success: false, message: 'Link tapılmadı' }); return; }
+    if (link.verified) { res.json({ success: true, link: socialOut(link) }); return; }
+    const upd = await prisma.socialLink.update({ where: { id: link.id }, data: { reviewRequestedAt: new Date(), verifyCode: link.verifyCode || newVerifyCode() } });
+    pushAdmins('social', { id: link.id, toast: 'Sosial hesab təsdiqi gözləyir' });
+    res.json({ success: true, link: socialOut(upd), message: 'Admin yoxlamasına göndərildi — kodu biodan silməyin' });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
 
 router.delete('/me/social/:id', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
-    const id = parseInt(req.params.id);
+    const id = parseInt(String(req.params.id));
     const link = await prisma.socialLink.findUnique({ where: { id } });
     if (!link || link.userId !== req.adminId) { res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return; }
     await prisma.socialLink.delete({ where: { id } });
@@ -1105,8 +1153,8 @@ router.get('/social/oauth/:platform/callback', async (req: Request, res: Respons
     const { url } = await provider.exchange(code);
     await prisma.socialLink.upsert({
       where: { userId_platform: { userId: decoded.userId, platform } },
-      update: { url, verified: true },
-      create: { userId: decoded.userId, platform, url, verified: true },
+      update: { url, verified: true, verifyMethod: 'OAUTH', verifiedAt: new Date(), reviewRequestedAt: null },
+      create: { userId: decoded.userId, platform, url, verified: true, verifyMethod: 'OAUTH', verifiedAt: new Date() },
     });
     return res.redirect(`${SOCIAL_FRONTEND_URL}/profile?social=connected`);
   } catch (e: any) {

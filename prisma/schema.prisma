@@ -847,6 +847,15 @@ model SocialLink {
   platform  String // instagram, facebook, tiktok, youtube, linkedin, twitter, telegram, website
   url       String
   verified  Boolean  @default(false)
+  // ── Təsdiq: istifadəçi bu kodu hesabının BİO-suna (və ya ictimai paylaşıma)
+  // yazır, sistem səhifəni oxuyub kodu tapır → hesab ona məxsusdur.
+  verifyCode        String? // TRX-XXXXXX — link dəyişəndə yenilənir
+  verifyMethod      String? // OAUTH | BIO_CODE | POST_CODE | ADMIN
+  verifiedAt        DateTime?
+  reviewRequestedAt DateTime? // avtomatik oxunmayan platforma — admin kodu əl ilə yoxlayır
+  proofUrl          String? // kodun yazıldığı ictimai paylaşım (istəyə bağlı)
+  lastCheckAt       DateTime?
+  lastCheckNote     String?
   createdAt DateTime @default(now())
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
