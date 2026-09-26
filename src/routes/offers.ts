@@ -146,9 +146,10 @@ router.post('/offers/:id/add-to-cart', adminAuth, async (req: AuthRequest, res: 
     if (!l || (l.type === 'PRODUCT' && l.stock < o.quantity)) { res.status(400).json({ success: false, message: 'Stokda kifayət qədər məhsul qalmayıb' }); return; }
     let cart = await prisma.cart.findUnique({ where: { userId: req.adminId! } });
     if (!cart) cart = await prisma.cart.create({ data: { userId: req.adminId! } });
-    // Eyni məhsulun adi sətri varsa — təklif sətrinə çevrilir (iki qiymət qarışmasın).
-    const existing = await prisma.cartItem.findFirst({ where: { cartId: cart.id, listingId: o.listingId, groupBuyId: null } });
-    if (existing) await prisma.cartItem.update({ where: { id: existing.id }, data: { quantity: o.quantity, priceOfferId: o.id, referralCartId: null } });
+    // Təklif sətri həmişə AYRI sətirdir — eyni məhsulun adi sətrinə toxunulmur
+    // (adi sətir öz qiyməti ilə, təklif sətri razılaşdırılmış qiymətlə qalır).
+    const existing = await prisma.cartItem.findFirst({ where: { cartId: cart.id, priceOfferId: o.id } });
+    if (existing) await prisma.cartItem.update({ where: { id: existing.id }, data: { quantity: o.quantity } });
     else await prisma.cartItem.create({ data: { cartId: cart.id, listingId: o.listingId, quantity: o.quantity, priceOfferId: o.id } });
     res.json({ success: true, redirect: '/cart' });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }

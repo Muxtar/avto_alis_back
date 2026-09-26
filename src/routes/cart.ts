@@ -451,7 +451,7 @@ router.post('/cart/import/:token', requireType(BUYER_TYPES), async (req: AuthReq
       if (listing.stock <= 0) { skipped.push(`${listing.title}: stokda yoxdur`); continue; }
       // Referal (məs. həkimin tövsiyəsi) — link hələ etibarlıdırsa komissiya ona yazılır.
       const referralCartId = it.referralCartId && sc.userId !== req.adminId ? Number(it.referralCartId) : null;
-      const cur = await prisma.cartItem.findFirst({ where: { cartId: cart.id, listingId: lid, groupBuyId: null } });
+      const cur = await prisma.cartItem.findFirst({ where: { cartId: cart.id, listingId: lid, groupBuyId: null, priceOfferId: null } });
       const q = Math.min(listing.stock, (cur?.quantity || 0) + qty);
       if (cur) await prisma.cartItem.update({ where: { id: cur.id }, data: { quantity: q, ...(referralCartId ? { referralCartId } : {}) } });
       else await prisma.cartItem.create({ data: { cartId: cart.id, listingId: lid, quantity: Math.min(listing.stock, qty), referralCartId } });
@@ -506,16 +506,24 @@ router.post('/cart/add', requireType(BUYER_TYPES), async (req: AuthRequest, res:
     let cart = await prisma.cart.findUnique({ where: { userId: req.adminId! } });
     if (!cart) cart = await prisma.cart.create({ data: { userId: req.adminId! } });
 
+    // Yalnız ADİ sətir artırılır. «Daha ucuza axtar» ilə razılaşdırılmış
+    // təklif sətri ayrıca qalır — onun sayı və qiyməti sabitdir, qarışmamalıdır.
     const existing = await prisma.cartItem.findFirst({
-      where: { cartId: cart.id, listingId },
+      where: { cartId: cart.id, listingId, priceOfferId: null },
     });
+    const offerQty = (await prisma.cartItem.aggregate({
+      where: { cartId: cart.id, listingId, priceOfferId: { not: null } }, _sum: { quantity: true },
+    }))._sum.quantity || 0;
 
     // H2 fix: validate combined quantity (existing + new) against stock.
+    // Stok hər iki sətrin cəminə görə yoxlanır.
     const totalRequested = (existing?.quantity || 0) + quantity;
-    if (listing.stock < totalRequested) {
+    if (listing.stock < totalRequested + offerQty) {
       res.status(400).json({
         success: false,
-        message: `Kifayət qədər stok yoxdur (mövcud: ${listing.stock})`,
+        message: offerQty
+          ? `Kifayət qədər stok yoxdur (mövcud: ${listing.stock}, ${offerQty} ədədi razılaşdırılmış qiymətlə səbətdədir)`
+          : `Kifayət qədər stok yoxdur (mövcud: ${listing.stock})`,
       });
       return;
     }
@@ -926,11 +934,14 @@ router.post('/cart/checkout', requireType(BUYER_TYPES), async (req: AuthRequest,
 
         // C6 fix: atomic stock decrement + check via updateMany with stock>=qty guard.
         // If any update fails the predicate, we throw to roll back the whole transaction.
+        // Eyni məhsulun iki sətri ola bilər (qiymət təklifi + adi) — stok CƏMƏ görə yoxlanır.
+        const qtyByListing = new Map<number, number>();
+        for (const i of items) qtyByListing.set(i.listingId, (qtyByListing.get(i.listingId) || 0) + i.quantity);
         for (const i of items) {
           // Stok burada AZALMIR (nə nağdda, nə kartda) — satıcı sifarişi təsdiqləyəndə
           // azalır (commitStockForOrder). Burada yalnız mövcudluq yoxlanır ki, tükənmiş
           // məhsula sifariş verilməsin. Satıcı ləğv etsə stoka toxunulmayıb.
-          if ((i.listing.stock ?? 0) < i.quantity) throw new Error(`"${i.listing.title}" üçün kifayət qədər stok yoxdur`);
+          if ((i.listing.stock ?? 0) < (qtyByListing.get(i.listingId) || i.quantity)) throw new Error(`"${i.listing.title}" üçün kifayət qədər stok yoxdur`);
         }
 
         // REFERAL: səbət sətri referal linkindən gəlibsə komissiya hesablanır.
@@ -990,8 +1001,9 @@ router.post('/cart/checkout', requireType(BUYER_TYPES), async (req: AuthRequest,
                 quantity: i.quantity,
                 price: unitOf(i),          // pillə / birgə alış qiyməti
                 title: i.listing.title,
-                referralPercent: ref?.perItem.get(i.listingId)?.percent ?? null,
-                referralAmount: ref?.perItem.get(i.listingId)?.amount ?? null,
+                // Referal yalnız linkdən gələn sətrə — eyni məhsulun təklif sətrinə yazılmır.
+                referralPercent: (i as any).referralCartId ? ref?.perItem.get(i.listingId)?.percent ?? null : null,
+                referralAmount: (i as any).referralCartId ? ref?.perItem.get(i.listingId)?.amount ?? null : null,
               })),
             },
           },
