@@ -328,3 +328,14 @@ export function requireSuperAdmin(req: AuthRequest, res: Response, next: NextFun
     res.status(403).json({ success: false, message: 'Yalnız super-admin icazəlidir' });
   }).catch(() => { if (!res.headersSent) res.status(403).json({ success: false, message: 'İcazə yoxdur' }); });
 }
+
+/** İstəyə bağlı giriş: token varsa və etibarlıdırsa istifadəçi id-si, yoxdursa null (ictimai endpointlər üçün). */
+export async function viewerIdFromReq(req: Request): Promise<number | null> {
+  const token = req.headers.authorization?.replace('Bearer ', '');
+  if (!token) return null;
+  try {
+    const d = jwt.verify(token, SIGNING_KEY) as { userId: number; sid?: string };
+    if (!(await isSessionActive(d.sid))) return null;
+    return d.userId || null;
+  } catch { return null; }
+}

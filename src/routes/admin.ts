@@ -2658,8 +2658,8 @@ router.get('/admin/credentials', requirePermission('credentials'), async (req: A
       select: {
         id: true, title: true, image: true, documentType: true, issuer: true, holderName: true,
         nameMatch: true, nameMatchScore: true, professionMatch: true, confidence: true,
-        fraudSignals: true, aiReason: true, status: true, createdAt: true,
-        user: { select: { id: true, name: true, phone: true, profession: true } },
+        fraudSignals: true, aiReason: true, status: true, createdAt: true, profession: true, validUntil: true,
+        user: { select: { id: true, name: true, phone: true, profession: true, professions: true } },
       },
     });
     res.json({ success: true, documents });
@@ -2673,17 +2673,27 @@ router.post('/admin/credentials/:id/:action', requirePermission('credentials'), 
     const id = parseInt(req.params.id);
     const action = String(req.params.action);
     if (!['approve', 'reject'].includes(action)) { res.status(400).json({ success: false, message: 'Yanlış əməliyyat' }); return; }
+    // Təsdiq HƏMİŞƏ konkret ixtisas üçündür (ixtisas endirimi/referal şərti ona baxır).
+    // Admin ixtisası düzəldə və sənədin bitmə tarixini qeyd edə bilər.
+    const cur = await prisma.professionDocument.findUnique({ where: { id }, select: { profession: true, user: { select: { profession: true } } } });
+    if (!cur) { res.status(404).json({ success: false, message: 'Sənəd tapılmadı' }); return; }
+    const profession = String(req.body?.profession || '').trim() || cur.profession || cur.user.profession || null;
+    if (action === 'approve' && !profession) { res.status(400).json({ success: false, message: 'Sənədin hansı ixtisası sübut etdiyini seçin' }); return; }
+    const vu = req.body?.validUntil ? new Date(req.body.validUntil) : null;
     const doc = await prisma.professionDocument.update({
       where: { id },
-      data: { status: action === 'approve' ? 'APPROVED' : 'REJECTED' },
-      select: { id: true, status: true, userId: true, title: true },
+      data: {
+        status: action === 'approve' ? 'APPROVED' : 'REJECTED', reviewedAt: new Date(),
+        ...(action === 'approve' ? { profession, validUntil: vu && !isNaN(vu.getTime()) ? vu : null } : {}),
+      },
+      select: { id: true, status: true, userId: true, title: true, profession: true },
     });
     await prisma.notification.create({
       data: {
         userId: doc.userId,
         type: 'SYSTEM',
         title: 'Peşə sənədi',
-        body: action === 'approve' ? `"${doc.title}" sənədiniz təsdiqləndi ✓` : `"${doc.title}" sənədiniz rədd edildi.`,
+        body: action === 'approve' ? `"${doc.title}" sənədiniz təsdiqləndi ✓ — «${doc.profession}» ixtisasınız artıq təsdiqlidir (mağazaların ixtisas endirimləri sizə tətbiq olunur).` : `"${doc.title}" sənədiniz rədd edildi.${req.body?.reason ? ` Səbəb: ${String(req.body.reason).slice(0, 200)}` : ''}`,
         link: '/profile',
       },
     }).catch(() => {});

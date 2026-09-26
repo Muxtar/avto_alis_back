@@ -596,13 +596,13 @@ model Cart {
 // Paylaşılan səbət — istifadəçi səbəti link kimi paylaşır, linki açan şəxs
 // məhsulları öz səbətinə alıb sifariş verir (məhsuldan anlayan başqasına kömək edir).
 model SharedCart {
-  id              Int      @id @default(autoincrement())
-  token           String   @unique
+  id              Int       @id @default(autoincrement())
+  token           String    @unique
   userId          Int // yaradan
   title           String? // ixtiyari ad ("Anama hədiyyə" və s.)
   items           Json // [{ listingId, quantity }]
   // Çatdırılma rejimi: RECIPIENT = alıcı öz ünvanını seçir; SENDER = göndərənin (aşağıdakı) ünvanına gedir.
-  deliveryMode    String   @default("RECIPIENT")
+  deliveryMode    String    @default("RECIPIENT")
   address         String? // SENDER rejimində göndərənin çatdırılma ünvanı
   city            String?
   latitude        Float?
@@ -614,37 +614,37 @@ model SharedCart {
   recipientUserId Int?
   // Çatdırılma üsulu (SENDER rejimində paylaşan seçir): DELIVERY | PICKUP,
   // DELIVERY üçün COURIER (Yango) | SELF (satıcı özü). Ödəyən yalnız ödəyir.
-  deliveryType    String   @default("DELIVERY")
+  deliveryType    String    @default("DELIVERY")
   deliveryMethod  String?
   // CART — adi paylaşım · BUNDLE — «paket/resept»: mütəxəssis (məs. həkim) məhsulları
   // seçib qeydlərlə başqasına göndərir, o öz ünvanı ilə alır.
-  kind            String   @default("CART")
+  kind            String    @default("CART")
   note            String? // ümumi qeyd (məs. «Səhər-axşam, yeməkdən sonra»)
   expiresAt       DateTime?
   cancelledAt     DateTime?
-    // Bu linkdən yaradılmış sifarişlər — link təkrar ödənilməsin deyə yoxlanılır.
-  orderIds        Int[]    @default([])
-  createdAt       DateTime @default(now())
-  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  // Bu linkdən yaradılmış sifarişlər — link təkrar ödənilməsin deyə yoxlanılır.
+  orderIds        Int[]     @default([])
+  createdAt       DateTime  @default(now())
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
 }
 
 model CartItem {
-  id         Int       @id @default(autoincrement())
-  cartId     Int
-  listingId  Int
-  quantity   Int       @default(1)
+  id             Int       @id @default(autoincrement())
+  cartId         Int
+  listingId      Int
+  quantity       Int       @default(1)
   // Birgə alış sətri — adi sətirdən AYRI saxlanılır (qiyməti qrupun ümumi
   // sayına görə hesablanır). Ona görə unikal açara da daxildir.
-  groupBuyId Int?
+  groupBuyId     Int?
   // Referal linkindən gəlibsə — sifarişdə komissiya bu linkin sahibinə yazılır.
   referralCartId Int?
   // Razılaşdırılmış qiymət təklifi — checkout-da vahid qiymət təklifdən götürülür.
-  priceOfferId Int?
-  cart       Cart      @relation(fields: [cartId], references: [id], onDelete: Cascade)
-  listing    Listing   @relation(fields: [listingId], references: [id], onDelete: Cascade)
-  groupBuy   GroupBuy? @relation(fields: [groupBuyId], references: [id], onDelete: SetNull)
+  priceOfferId   Int?
+  cart           Cart      @relation(fields: [cartId], references: [id], onDelete: Cascade)
+  listing        Listing   @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  groupBuy       GroupBuy? @relation(fields: [groupBuyId], references: [id], onDelete: SetNull)
 
   @@unique([cartId, listingId, groupBuyId])
 }
@@ -842,11 +842,11 @@ model EmailVerification {
 // İstifadəçinin sosial media hesabları — admin tərəfindən təsdiqlənir,
 // təsdiqlənənlər public profildə "✓" ilə göstərilir.
 model SocialLink {
-  id        Int      @id @default(autoincrement())
-  userId    Int
-  platform  String // instagram, facebook, tiktok, youtube, linkedin, twitter, telegram, website
-  url       String
-  verified  Boolean  @default(false)
+  id                Int       @id @default(autoincrement())
+  userId            Int
+  platform          String // instagram, facebook, tiktok, youtube, linkedin, twitter, telegram, website
+  url               String
+  verified          Boolean   @default(false)
   // ── Təsdiq: istifadəçi bu kodu hesabının BİO-suna (və ya ictimai paylaşıma)
   // yazır, sistem səhifəni oxuyub kodu tapır → hesab ona məxsusdur.
   verifyCode        String? // TRX-XXXXXX — link dəyişəndə yenilənir
@@ -856,8 +856,8 @@ model SocialLink {
   proofUrl          String? // kodun yazıldığı ictimai paylaşım (istəyə bağlı)
   lastCheckAt       DateTime?
   lastCheckNote     String?
-  createdAt DateTime @default(now())
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt         DateTime  @default(now())
+  user              User      @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([userId, platform])
 }
@@ -879,6 +879,11 @@ model ProfessionDocument {
   aiReason        String? // AI-ın qısa izahı
   isPublic        Boolean            @default(false) // public profildə görünsünmü (YES ikonu)
   status          VerificationStatus @default(PENDING) // PENDING / APPROVED / REJECTED (admin son sözü)
+  // Sənəd HANSI İXTİSASI sübut edir — ixtisas endirimi və referal «diplom» şərti
+  // yalnız həmin ixtisas üçün keçərlidir (əvvəl istənilən sənəd hər ixtisası açırdı).
+  profession      String?
+  validUntil      DateTime? // lisenziya/sertifikatın bitmə tarixi (admin qeyd edir) — keçəndə sübut sayılmır
+  reviewedAt      DateTime?
   createdAt       DateTime           @default(now())
   user            User               @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -887,43 +892,49 @@ model ProfessionDocument {
 }
 
 model OrderItem {
-  id             Int             @id @default(autoincrement())
-  orderId        Int
-  listingId      Int
-  quantity       Int
-  price          Float
-  title          String
+  id                    Int             @id @default(autoincrement())
+  orderId               Int
+  listingId             Int
+  quantity              Int
+  price                 Float
+  title                 String
   // Referal komissiyası bu sətir üçün (məhsula görə faiz fərqli ola bilər).
-  referralPercent Float?
-  referralAmount  Float?
-  order          Order           @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  listing        Listing         @relation(fields: [listingId], references: [id], onDelete: Cascade)
-  returnRequests ReturnRequest[]
+  referralPercent       Float?
+  referralAmount        Float?
+  // İXTİSAS ENDİRİMİ — alıcının təsdiqli ixtisasına görə mağazanın verdiyi endirim.
+  // price = endirimli vahid qiymət; listUnitPrice = endirimdən əvvəlki vahid qiymət.
+  proDiscountPercent    Float?
+  proDiscountAmount     Float?
+  proDiscountProfession String?
+  listUnitPrice         Float?
+  order                 Order           @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  listing               Listing         @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  returnRequests        ReturnRequest[]
 }
 
 model ReturnRequest {
-  id           Int          @id @default(autoincrement())
-  orderId      Int
-  orderItemId  Int?
-  buyerId      Int
-  sellerId     Int
-  status       ReturnStatus @default(REQUESTED)
-  reason       ReturnReason
-  reasonText   String?
-  quantity     Int
-  refundAmount Float?
+  id              Int           @id @default(autoincrement())
+  orderId         Int
+  orderItemId     Int?
+  buyerId         Int
+  sellerId        Int
+  status          ReturnStatus  @default(REQUESTED)
+  reason          ReturnReason
+  reasonText      String?
+  quantity        Int
+  refundAmount    Float?
   // Nağd ödənişdə pul platformadan keçmir — satıcı alıcıya NAĞD qaytarır.
   // Bu bayraq alıcıya «bankdan qayıdacaq» əvəzinə düzgün mətn göstərmək üçündür.
-  cashRefund   Boolean      @default(false)
-  sellerNote   String?
-  adminNote    String?
+  cashRefund      Boolean       @default(false)
+  sellerNote      String?
+  adminNote       String?
   // Alıcının sübut şəkilləri (qüsur, səhv məhsul və s.).
-  images       String[]     @default([])
+  images          String[]      @default([])
   // Satıcının məhsulu geri alanda çəkdiyi şəkillər (zədə/fərqli məhsul iddiası).
-  sellerImages String[]     @default([])
+  sellerImages    String[]      @default([])
   // Geri göndərmə üsulu və izləmə — COURIER | IN_PERSON | POST | YANGO.
-  returnMethod String?
-  trackingCode String?
+  returnMethod    String?
+  trackingCode    String?
   // MÜDDƏTLƏR — keçəndə sistem özü addım atır (services/returnFlow.ts):
   sellerRespondBy DateTime? // satıcı cavab verməzsə → avtomatik təsdiq
   shipBy          DateTime? // alıcı göndərməzsə → avtomatik ləğv
@@ -933,13 +944,13 @@ model ReturnRequest {
   receivedAt      DateTime?
   refundedAt      DateTime?
   disputeId       Int? // açılmış mübahisə (Complaint.id)
-  createdAt    DateTime     @default(now())
-  updatedAt    DateTime     @updatedAt
-  events       ReturnEvent[]
-  order        Order        @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  orderItem    OrderItem?   @relation(fields: [orderItemId], references: [id], onDelete: SetNull)
-  buyer        User         @relation("BuyerReturns", fields: [buyerId], references: [id], onDelete: Cascade)
-  seller       User         @relation("SellerReturns", fields: [sellerId], references: [id], onDelete: Cascade)
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+  events          ReturnEvent[]
+  order           Order         @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  orderItem       OrderItem?    @relation(fields: [orderItemId], references: [id], onDelete: SetNull)
+  buyer           User          @relation("BuyerReturns", fields: [buyerId], references: [id], onDelete: Cascade)
+  seller          User          @relation("SellerReturns", fields: [sellerId], references: [id], onDelete: Cascade)
 }
 
 // İadənin izlənmə tarixçəsi — hər addım kim tərəfindən, nə vaxt, hansı qeydlə.
@@ -1227,26 +1238,27 @@ model BankAccount {
 }
 
 model BusinessObject {
-  id              Int              @id @default(autoincrement())
-  businessId      Int
-  name            String // obyekt adı (məs. "Aptek №3")
-  phone           String? // obyekt telefonu
-  activityAreas   String[]         @default([]) // fəaliyyət sahələri (16 kateqoriya adları)
-  isActive        Boolean          @default(true) // aktiv/passiv
-  deletedAt       DateTime? // admin sildi — sətir tarixçə üçün qalır
-  address         String
-  city            String?
-  latitude        Float?
-  longitude       Float?
-  createdAt       DateTime         @default(now())
-  referralEnabled Boolean          @default(false) // referal (komissiyalı) satışa icazə
-  business        Business         @relation(fields: [businessId], references: [id], onDelete: Cascade)
-  listings        Listing[]
-  messages        Message[]
-  managers        BusinessMember[]
-  referralRules   ReferralRule[]
-  purchases       Order[]          @relation("ObjectPurchases") // bu obyekt adına edilən alışlar
-  comments        Comment[] // obyekt haqqında rəylər
+  id                  Int                  @id @default(autoincrement())
+  businessId          Int
+  name                String // obyekt adı (məs. "Aptek №3")
+  phone               String? // obyekt telefonu
+  activityAreas       String[]             @default([]) // fəaliyyət sahələri (16 kateqoriya adları)
+  isActive            Boolean              @default(true) // aktiv/passiv
+  deletedAt           DateTime? // admin sildi — sətir tarixçə üçün qalır
+  address             String
+  city                String?
+  latitude            Float?
+  longitude           Float?
+  createdAt           DateTime             @default(now())
+  referralEnabled     Boolean              @default(false) // referal (komissiyalı) satışa icazə
+  business            Business             @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  listings            Listing[]
+  messages            Message[]
+  managers            BusinessMember[]
+  referralRules       ReferralRule[]
+  professionDiscounts ProfessionDiscount[]
+  purchases           Order[]              @relation("ObjectPurchases") // bu obyekt adına edilən alışlar
+  comments            Comment[] // obyekt haqqında rəylər
 
   @@index([businessId])
 }
@@ -1359,7 +1371,7 @@ model ReferralCart {
   expiresAt  DateTime?
   clicks     Int       @default(0)
   createdAt  DateTime  @default(now())
-  referrer   User     @relation("ReferralCarts", fields: [referrerId], references: [id], onDelete: Cascade)
+  referrer   User      @relation("ReferralCarts", fields: [referrerId], references: [id], onDelete: Cascade)
 
   @@index([referrerId])
 }
@@ -1468,24 +1480,24 @@ enum ComplaintStatus {
 }
 
 model Complaint {
-  id             Int                  @id @default(autoincrement())
-  complainantId  Int
-  targetUserId   Int
-  consultationId Int? // dolu olarsa konkret seansa bağlıdır
-  listingId      Int? // dolu olarsa məhsul/elan şikayəti (eBay üslubu — foto sübutlu)
-  orderId        Int? // dolu olarsa konkret alış-sifariş şikayəti
-  category       String // TIME_WASTED / FRAUD / RUDE / FAKE_INFO / DEFECTIVE / DAMAGED / NOT_AS_DESCRIBED / WRONG_ITEM / OTHER
-  description    String
-  images         String[]             @default([]) // sübut şəkilləri (qüsurlu məhsul və s.)
-  status         ComplaintStatus      @default(OPEN)
-  resolution     String? // REFUNDED / WARNED / SUSPENDED / NO_ACTION / REJECTED
-  adminNote      String?
-  resolvedById   Int?
+  id                Int                  @id @default(autoincrement())
+  complainantId     Int
+  targetUserId      Int
+  consultationId    Int? // dolu olarsa konkret seansa bağlıdır
+  listingId         Int? // dolu olarsa məhsul/elan şikayəti (eBay üslubu — foto sübutlu)
+  orderId           Int? // dolu olarsa konkret alış-sifariş şikayəti
+  category          String // TIME_WASTED / FRAUD / RUDE / FAKE_INFO / DEFECTIVE / DAMAGED / NOT_AS_DESCRIBED / WRONG_ITEM / OTHER
+  description       String
+  images            String[]             @default([]) // sübut şəkilləri (qüsurlu məhsul və s.)
+  status            ComplaintStatus      @default(OPEN)
+  resolution        String? // REFUNDED / WARNED / SUSPENDED / NO_ACTION / REJECTED
+  adminNote         String?
+  resolvedById      Int?
   // Mübahisə (sifariş/məhsul şikayəti) — qarşı tərəfin cavabı və sistem qərarı.
   returnId          Int? // iadədən yaranıbsa
   respondBy         DateTime? // qarşı tərəf bu vaxta qədər cavab verməlidir
   sellerResponse    String?
-  sellerImages      String[]  @default([])
+  sellerImages      String[]             @default([])
   sellerRespondedAt DateTime?
   sellerAccepted    Boolean? // qarşı tərəf iddianı qəbul etdi
   decision          String? // COMPLAINANT (şikayətçinin xeyrinə) | RESPONDENT (qarşı tərəfin) | ESCALATED (admin)
@@ -1494,12 +1506,12 @@ model Complaint {
   aiConfidence      Float?
   aiRecommendation  String? // AI-ın admin üçün tövsiyəsi (qərar avtomatik tətbiq olunmayanda)
   decidedAt         DateTime?
-  appealed          Boolean   @default(false) // alıcı qərardan bir dəfə adminə müraciət edə bilər
-  createdAt      DateTime             @default(now())
-  resolvedAt     DateTime?
-  complainant    User                 @relation("ComplaintsMade", fields: [complainantId], references: [id], onDelete: Cascade)
-  target         User                 @relation("ComplaintsAgainst", fields: [targetUserId], references: [id], onDelete: Cascade)
-  consultation   ConsultationSession? @relation(fields: [consultationId], references: [id], onDelete: SetNull)
+  appealed          Boolean              @default(false) // alıcı qərardan bir dəfə adminə müraciət edə bilər
+  createdAt         DateTime             @default(now())
+  resolvedAt        DateTime?
+  complainant       User                 @relation("ComplaintsMade", fields: [complainantId], references: [id], onDelete: Cascade)
+  target            User                 @relation("ComplaintsAgainst", fields: [targetUserId], references: [id], onDelete: Cascade)
+  consultation      ConsultationSession? @relation(fields: [consultationId], references: [id], onDelete: SetNull)
 
   @@index([status])
   @@index([targetUserId])
@@ -1845,24 +1857,24 @@ model SocialOutreach {
 // audit, həm də İKİQAT QAYTARMA qıfılıdır (iki ləğv sorğusu eyni anda gəlsə
 // yalnız biri şlüzə çatır).
 model RefundAttempt {
-  id        Int       @id @default(autoincrement())
-  orderId   Int       @unique
-  amount    Float
-  reason    String // CANCELLED | TIMEOUT | RETURN | ADMIN
-  status    String    @default("PENDING") // PENDING | DONE | FAILED
-  attempts  Int       @default(0)
-  lastError String?
+  id          Int       @id @default(autoincrement())
+  orderId     Int       @unique
+  amount      Float
+  reason      String // CANCELLED | TIMEOUT | RETURN | ADMIN
+  status      String    @default("PENDING") // PENDING | DONE | FAILED
+  attempts    Int       @default(0)
+  lastError   String?
   // ŞÜBHƏLİ CƏHD: şlüzə sorğu getdi, amma cavab gəlmədi (timeout/şəbəkə) və ya
   // sətir yarımçıq qaldı. Pul ÇIXMIŞ ola bilər — avtomatik təkrar cəhd
   // İKİQAT qaytarma deməkdir, ona görə belə sətirlər yalnız admin baxışı ilə
   // həll olunur (retryFailedRefunds onları götürmür).
-  needsReview Boolean @default(false)
-  provider  String?
-  adminNote String? // admin əl ilə həll edibsə (məs. bankdan köçürüldü)
-  doneAt    DateTime?
-  createdAt DateTime  @default(now())
-  updatedAt DateTime  @updatedAt
-  order     Order     @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  needsReview Boolean   @default(false)
+  provider    String?
+  adminNote   String? // admin əl ilə həll edibsə (məs. bankdan köçürüldü)
+  doneAt      DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  order       Order     @relation(fields: [orderId], references: [id], onDelete: Cascade)
 
   @@index([status])
 }
@@ -1935,4 +1947,27 @@ model UserConsent {
 
   @@unique([userId, documentId])
   @@index([userId, slug])
+}
+
+// ── İXTİSAS ENDİRİMİ ──
+// Mağaza (biznes obyekti) seçdiyi ixtisas sahiblərinə endirim verir: «Həkimlərə
+// −10%». Endirim yalnız həmin ixtisası ADMİN TƏSDİQLİ SƏNƏDLƏ sübut etmiş
+// alıcıya tətbiq olunur (ProfessionDocument.profession + status APPROVED).
+model ProfessionDiscount {
+  id                  Int            @id @default(autoincrement())
+  businessObjectId    Int
+  profession          String
+  percent             Float // 1..50
+  scope               String         @default("ALL") // ALL | SELECTED
+  listingIds          Int[]          @default([])
+  maxDiscountPerOrder Float? // bir sifarişdə bu qaydadan maks. endirim (₼)
+  maxUnitsPerOrder    Int? // bir sifarişdə endirimli maks. ədəd (hər məhsul üçün)
+  active              Boolean        @default(true)
+  validUntil          DateTime?
+  createdAt           DateTime       @default(now())
+  updatedAt           DateTime       @updatedAt
+  object              BusinessObject @relation(fields: [businessObjectId], references: [id], onDelete: Cascade)
+
+  @@unique([businessObjectId, profession])
+  @@index([profession])
 }

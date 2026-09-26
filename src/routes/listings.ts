@@ -235,7 +235,7 @@ router.get('/sellers/:id', async (req: Request, res: Response) => {
         // Yalnız təsdiqlənmiş sosial hesablar public profildə görünür.
         socialLinks: { where: { verified: true }, select: { platform: true, url: true, verifyMethod: true, verifiedAt: true } },
         // Yalnız istifadəçinin public etdiyi peşə sənədləri (YES ikonu ilə).
-        professionDocuments: { where: { isPublic: true }, select: { id: true, title: true, image: true, documentType: true } },
+        professionDocuments: { where: { isPublic: true }, select: { id: true, title: true, image: true, documentType: true, profession: true, status: true } },
         // Rəsmi işçilik — yalnız təsdiqlənmiş (ACTIVE) üzvlüklər public görünür.
         businessMemberships: {
           where: { status: 'ACTIVE' },

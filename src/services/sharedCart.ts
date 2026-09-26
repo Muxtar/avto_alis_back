@@ -13,6 +13,7 @@
 // yoxlamadakı/arxivlənmiş elan satılırdı, pillə qiyməti tətbiq olunmurdu. İndi
 // paylaşım anında və ödəniş anında EYNİ yoxlamalar (validateSharedItems) işləyir.
 import { PrismaClient } from '@prisma/client';
+import { bestRulesForBuyer, applyProDiscounts } from './professionDiscount';
 import { unitPriceFor, type Tier } from './tierPricing';
 import { groupBuyEnabled } from './groupBuy';
 import { checkPrice as yangoCheckPrice, isYangoConfigured, YANGO_MAX_WEIGHT_KG } from './yangoDelivery';
@@ -35,6 +36,8 @@ export interface ValidatedLine {
   listingId: number; title: string; quantity: number; unit: number; lineTotal: number;
   sellerId: number; referralCartId: number | null; note: string | null;
   groupBuy: boolean; // elanda birgə alış açıqdır → sifariş pəncərəyə qoşulmalıdır
+  // İxtisas endirimi (ALICININ təsdiqli ixtisasına görə — ödəyənin deyil).
+  proDiscountPercent?: number | null; proDiscountAmount?: number | null; proDiscountProfession?: string | null; listUnitPrice?: number | null;
 }
 
 /**
@@ -42,7 +45,7 @@ export interface ValidatedLine {
  * card=true → hamısı biznes məhsulu olmalıdır (kartla ödəniş yalnız VÖEN-li satıcıda).
  * Qaytarır: sətirlər (hazırkı pillə qiyməti ilə) + satıcı üzrə çatdırılma haqqı, və ya səbəb.
  */
-export async function validateSharedItems(items: SharedItemInput[], delivery: DeliveryChoice | null, opts: { card: boolean }) {
+export async function validateSharedItems(items: SharedItemInput[], delivery: DeliveryChoice | null, opts: { card: boolean; buyerId?: number | null }) {
   const ids = items.map((i) => Number(i.listingId));
   const listings = await prisma.listing.findMany({
     where: { id: { in: ids } },
@@ -64,6 +67,18 @@ export async function validateSharedItems(items: SharedItemInput[], delivery: De
     const gb = groupBuyEnabled(l as any);
     const unit = !gb && tiers.length ? unitPriceFor(l.price, tiers, qty) : l.price;
     lines.push({ listingId: l.id, title: l.title, quantity: qty, unit, lineTotal: Math.round(unit * qty * 100) / 100, sellerId: l.userId, referralCartId: it.referralCartId ?? null, note: it.note ?? null, groupBuy: gb });
+  }
+  // İxtisas endirimi — səbət/checkout ilə eyni hesab; birgə alış sətirləri xaric.
+  if (opts.buyerId) {
+    const rules = await bestRulesForBuyer(opts.buyerId, listings.map((l) => ({ id: l.id, businessObjectId: l.businessObjectId, userId: l.userId })));
+    const pro = applyProDiscounts(lines.map((ln, idx) => ({ key: idx, listingId: ln.listingId, qty: ln.quantity, unit: ln.unit, skip: ln.groupBuy })), rules);
+    lines.forEach((ln, idx) => {
+      const p = pro.get(idx);
+      if (!p || !p.discount) return;
+      ln.listUnitPrice = ln.unit; ln.unit = p.unit;
+      ln.lineTotal = Math.round((ln.lineTotal - p.discount) * 100) / 100;
+      ln.proDiscountPercent = p.percent; ln.proDiscountAmount = p.discount; ln.proDiscountProfession = p.profession;
+    });
   }
   if (opts.card) {
     // Biznes aktiv və təsdiqli olmalıdır.

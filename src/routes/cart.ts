@@ -1,4 +1,5 @@
 import { Router, Response } from 'express';
+import { bestRulesForBuyer, applyProDiscounts } from '../services/professionDiscount';
 import { rateLimit } from '../middleware/rateLimiter';
 import { PrismaClient, UserType } from '@prisma/client';
 import { adminAuth, requireType, AuthRequest } from '../middleware/auth';
@@ -108,8 +109,22 @@ router.get('/cart', adminAuth, async (req: AuthRequest, res: Response) => {
         pricing: priceInfo(i.listing.price, tiers, inGroupBuy ? (groupTotalQty || 0) + i.quantity : i.quantity),
       };
     }));
-    const total = Math.round(priced.reduce((sum, i) => sum + i.lineTotal, 0) * 100) / 100;
-    res.json({ cart: { ...cart, items: priced }, total, count: cart.items.length });
+    // İXTİSAS ENDİRİMİ — alıcının sənədlə təsdiqli ixtisasına görə mağazanın endirimi.
+    // Təklif (razılaşdırılmış qiymət) və birgə alış sətirlərinə tətbiq olunmur.
+    const proRules = await bestRulesForBuyer(req.adminId!, cart.items.map((i) => ({ id: i.listing.id, businessObjectId: i.listing.businessObjectId, userId: i.listing.userId })));
+    const pro = applyProDiscounts(priced.map((i) => ({ key: i.id, listingId: i.listingId, qty: i.quantity, unit: i.unitPrice, skip: !!(i as any).priceOfferId || i.groupRefundLater })), proRules);
+    const withPro = priced.map((i) => {
+      const p = pro.get(i.id);
+      if (!p || !p.discount) return { ...i, proDiscount: null };
+      return {
+        ...i,
+        unitPrice: p.unit,
+        lineTotal: Math.round((i.lineTotal - p.discount) * 100) / 100,
+        proDiscount: { percent: p.percent, profession: p.profession, amount: p.discount, listUnit: p.listUnit },
+      };
+    });
+    const total = Math.round(withPro.reduce((sum, i) => sum + i.lineTotal, 0) * 100) / 100;
+    res.json({ cart: { ...cart, items: withPro }, total, count: cart.items.length });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }
@@ -193,7 +208,7 @@ router.post('/cart/share', adminAuth, async (req: AuthRequest, res: Response) =>
       if (!loc.phone) { res.status(400).json({ success: false, message: 'Əlaqə telefonunu yazın (kuryer/satıcı zəng edə bilsin)' }); return; }
       delivery = { deliveryType: dType, deliveryMethod: dMethod as any, latitude: loc.latitude, longitude: loc.longitude };
     }
-    const v = await validateSharedItems(items, delivery, { card: deliveryMode === 'SENDER' });
+    const v = await validateSharedItems(items, delivery, { card: deliveryMode === 'SENDER', buyerId: recipientUserId || req.adminId });
     if (!v.ok) { res.status(400).json({ success: false, message: v.message }); return; }
 
     // Qiymət surəti (ödəyən qiymət dəyişibsə xəbərdar olsun) + referal (paylaşan uyğundursa).
@@ -342,7 +357,7 @@ router.post('/shared-cart/:token/pay', guestPayLimiter, async (req: AuthRequest,
     if (req.adminId && req.adminId === buyerId && !req.body?.selfPay) void 0;
 
     const items = (Array.isArray(sc.items) ? (sc.items as any[]) : []) as SharedItemInput[];
-    const v = await validateSharedItems(items, deliveryFromShare(sc), { card: true });
+    const v = await validateSharedItems(items, deliveryFromShare(sc), { card: true, buyerId });
     if (!v.ok) { res.status(400).json({ success: false, message: v.message }); return; }
 
     const payerName = String(req.body?.payerName || '').trim().slice(0, 80) || null;
@@ -380,7 +395,7 @@ router.post('/shared-cart/:token/pay', guestPayLimiter, async (req: AuthRequest,
           pickupCode: genPickupCode(),
           sharedCartId: sc.id, payerName, payerPhone, payerUserId, groupBuyId,
           referrerId: ref?.referrerId ?? null, referralPercent: ref?.percent ?? null, referralAmount: ref?.amount ?? null, referralCartId: ref?.referralCartId ?? null,
-          items: { create: lines.map((l) => ({ listingId: l.listingId, quantity: l.quantity, price: l.unit, title: l.title, referralPercent: ref?.perItem.get(l.listingId)?.percent ?? null, referralAmount: ref?.perItem.get(l.listingId)?.amount ?? null })) },
+          items: { create: lines.map((l) => ({ listingId: l.listingId, quantity: l.quantity, price: l.unit, title: l.title, referralPercent: ref?.perItem.get(l.listingId)?.percent ?? null, referralAmount: ref?.perItem.get(l.listingId)?.amount ?? null, proDiscountPercent: l.proDiscountPercent ?? null, proDiscountAmount: l.proDiscountAmount ?? null, proDiscountProfession: l.proDiscountProfession ?? null, listUnitPrice: l.listUnitPrice ?? null })) },
         } as any,
         select: { id: true, total: true },
       });
@@ -828,6 +843,14 @@ router.post('/cart/checkout', requireType(BUYER_TYPES), async (req: AuthRequest,
       }
       unitPrices.set(i.id, unit);
     }
+    // İXTİSAS ENDİRİMİ — səbətdəki ilə eyni hesab (təklif/birgə alış sətirləri xaric).
+    const proRules = await bestRulesForBuyer(req.adminId!, cart.items.map((i) => ({ id: i.listing.id, businessObjectId: (i.listing as any).businessObjectId ?? null, userId: i.listing.userId })));
+    const proPriced = applyProDiscounts(cart.items.map((i) => ({
+      key: i.id, listingId: i.listingId, qty: i.quantity, unit: unitPrices.get(i.id) ?? i.listing.price,
+      skip: !!(i as any).priceOfferId || groupBuyEnabled(i.listing as any),
+    })), proRules);
+    for (const [key, p] of proPriced) if (p.discount > 0) unitPrices.set(key, p.unit);
+    const proOf = (i: { id: number }) => { const p = proPriced.get(i.id); return p && p.discount > 0 ? p : null; };
     const unitOf = (i: { id: number; listing: { price: number } }) => unitPrices.get(i.id) ?? i.listing.price;
 
     const subtotal = cart.items.reduce((sum, i) => sum + unitOf(i) * i.quantity, 0);
@@ -1004,6 +1027,11 @@ router.post('/cart/checkout', requireType(BUYER_TYPES), async (req: AuthRequest,
                 // Referal yalnız linkdən gələn sətrə — eyni məhsulun təklif sətrinə yazılmır.
                 referralPercent: (i as any).referralCartId ? ref?.perItem.get(i.listingId)?.percent ?? null : null,
                 referralAmount: (i as any).referralCartId ? ref?.perItem.get(i.listingId)?.amount ?? null : null,
+                // İxtisas endirimi — satıcı və alıcı sifarişdə görsün (price artıq endirimlidir).
+                proDiscountPercent: proOf(i)?.percent ?? null,
+                proDiscountAmount: proOf(i)?.discount ?? null,
+                proDiscountProfession: proOf(i)?.profession ?? null,
+                listUnitPrice: proOf(i)?.listUnit ?? null,
               })),
             },
           },

@@ -19,6 +19,7 @@
 // referal satıcıya ReferralLedger yazılır — çatdırılandan sonra qaytarma
 // müddəti bitəndə ödənilə bilən olur, admin ReferralPayout ilə ödəyir.
 import { PrismaClient } from '@prisma/client';
+import { verifiedProfessions } from './professionDiscount';
 import { getPayoutHoldDays } from './settlement';
 
 const prisma = new PrismaClient();
@@ -77,7 +78,7 @@ export async function eligibility(p: Program | { id: number; sellerId: number; e
   // PROFESSION — istifadəçinin BÜTÜN ixtisasları yoxlanır (əvvəl yalnız əsas ixtisas).
   const me = await prisma.user.findUnique({
     where: { id: userId },
-    select: { profession: true, professions: true, cvFile: true, professionDocuments: { where: { status: 'APPROVED' }, select: { id: true } } },
+    select: { profession: true, professions: true, cvFile: true },
   });
   if (!me) return { ok: false, reason: 'İstifadəçi tapılmadı' };
   const mine = new Set([me.profession, ...(me.professions || [])].map(norm).filter(Boolean));
@@ -86,13 +87,19 @@ export async function eligibility(p: Program | { id: number; sellerId: number; e
     const list = p.rules.map((r: any) => r.profession).join(', ');
     return { ok: false, partnerStatus: pStatus, reason: list ? `Bu satıcı yalnız bu ixtisaslarla işləyir: ${list}` : 'Satıcı referal ixtisaslarını təyin etməyib' };
   }
-  const hasDoc = me.professionDocuments.length > 0;
+  // Diplom şərti HƏMİN ixtisas üzrə təsdiqli sənəd tələb edir — əvvəl istənilən
+  // təsdiqli sənəd (məs. başqa sahədə sertifikat) istənilən ixtisası açırdı.
+  const verified = await verifiedProfessions(userId);
   const hasCv = !!me.cvFile;
-  const passes = (d: string) => d === 'NONE' || (d === 'DIPLOMA' ? hasDoc : d === 'CV' ? hasCv : hasDoc || hasCv);
-  const ok = rules.filter((r: any) => passes(r.requiredDoc)).sort((a: any, b: any) => b.commissionPercent - a.commissionPercent);
+  const passes = (r: any) => {
+    const hasDoc = verified.has(norm(r.profession));
+    const d = r.requiredDoc;
+    return d === 'NONE' || (d === 'DIPLOMA' ? hasDoc : d === 'CV' ? hasCv : hasDoc || hasCv);
+  };
+  const ok = rules.filter((r: any) => passes(r)).sort((a: any, b: any) => b.commissionPercent - a.commissionPercent);
   if (!ok.length) {
     const d = rules[0].requiredDoc;
-    return { ok: false, partnerStatus: pStatus, reason: d === 'DIPLOMA' ? 'Təsdiqlənmiş diplom/sertifikat tələb olunur' : d === 'CV' ? 'CV tələb olunur' : 'Diplom və ya CV tələb olunur' };
+    return { ok: false, partnerStatus: pStatus, reason: d === 'DIPLOMA' ? `«${rules[0].profession}» ixtisası üzrə təsdiqlənmiş diplom/sertifikat tələb olunur (profil → Peşə sənədləri)` : d === 'CV' ? 'CV tələb olunur' : 'Diplom və ya CV tələb olunur' };
   }
   return { ok: true, reason: '', rulePercent: ok[0].commissionPercent, partnerStatus: pStatus };
 }

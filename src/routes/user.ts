@@ -54,7 +54,7 @@ router.get('/me', adminAuth, async (req: AuthRequest, res: Response) => {
           select: {
             id: true, title: true, image: true, documentType: true, holderName: true,
             nameMatch: true, nameMatchScore: true, professionMatch: true, confidence: true,
-            aiReason: true, status: true, isPublic: true, createdAt: true,
+            aiReason: true, status: true, isPublic: true, createdAt: true, profession: true, validUntil: true,
           },
           orderBy: { createdAt: 'desc' },
         },
@@ -233,7 +233,7 @@ router.get('/me/credentials', adminAuth, async (req: AuthRequest, res: Response)
       select: {
         id: true, title: true, image: true, documentType: true, holderName: true,
         nameMatch: true, nameMatchScore: true, professionMatch: true, confidence: true,
-        fraudSignals: true, aiReason: true, status: true, createdAt: true,
+        fraudSignals: true, aiReason: true, status: true, createdAt: true, profession: true, validUntil: true,
       },
     });
     res.json({ success: true, documents: docs });
@@ -249,12 +249,20 @@ router.post('/me/credentials', adminAuth, upload.single('document'), processImag
 
     const me = await prisma.user.findUnique({
       where: { id: req.adminId! },
-      select: { name: true, profession: true },
+      select: { name: true, profession: true, professions: true },
     });
     const expectedName = (me?.name || '').trim();
+    // Sənəd HANSI ixtisası sübut edir — profildəki ixtisaslardan biri olmalıdır.
+    // (İxtisas endirimi və referal «diplom» şərti yalnız həmin ixtisasa keçərlidir.)
+    const claimed = Array.from(new Set([me?.profession, ...(me?.professions || [])].filter(Boolean) as string[]));
+    const profession = String(req.body.profession || '').trim() || (claimed.length === 1 ? claimed[0] : '');
+    if (!profession) { res.status(400).json({ success: false, message: claimed.length ? 'Sənədin hansı ixtisasa aid olduğunu seçin' : 'Əvvəlcə profildə ixtisasınızı qeyd edin' }); return; }
+    if (!claimed.some((c) => c.trim().toLocaleLowerCase('az') === profession.toLocaleLowerCase('az'))) {
+      res.status(400).json({ success: false, message: 'Sənəd yalnız profilinizdəki ixtisaslardan birinə aid ola bilər' }); return;
+    }
 
-    // AI analizi — ad-soyad uyğunluğunu yoxlayır. Xəta olsa belə sənəd saxlanılır (admin yoxlayar).
-    const ai = await analyzeCredential(file.path, expectedName, me?.profession || null);
+    // AI analizi — ad-soyad və ixtisas uyğunluğunu yoxlayır. Xəta olsa belə sənəd saxlanılır (admin yoxlayar).
+    const ai = await analyzeCredential(file.path, expectedName, profession);
 
     const doc = await prisma.professionDocument.create({
       data: {
@@ -270,16 +278,37 @@ router.post('/me/credentials', adminAuth, upload.single('document'), processImag
         confidence: ai.ok ? ai.confidence : null,
         fraudSignals: ai.fraudSignals,
         aiReason: ai.error ? ai.error : ai.reason,
+        profession,
         status: 'PENDING',
       },
       select: {
         id: true, title: true, image: true, documentType: true, holderName: true,
         nameMatch: true, nameMatchScore: true, professionMatch: true, confidence: true,
-        fraudSignals: true, aiReason: true, status: true, createdAt: true,
+        fraudSignals: true, aiReason: true, status: true, createdAt: true, profession: true, validUntil: true,
       },
     });
-    pushAdmins('credential', { id: doc.id, toast: `Yeni peşə sənədi: ${doc.title}` });
+    pushAdmins('credential', { id: doc.id, toast: `Yeni peşə sənədi: ${doc.title} (${profession})` });
     res.status(201).json({ success: true, document: doc, ai: { ok: ai.ok, error: ai.error } });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
+// Köhnə (ixtisası qeyd olunmamış) sənədi ixtisasa bağla — admin yenidən yoxlayır.
+router.put('/me/credentials/:id/profession', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const id = parseInt(String(req.params.id));
+    const doc = await prisma.professionDocument.findUnique({ where: { id }, select: { userId: true, profession: true, title: true } });
+    if (!doc || doc.userId !== req.adminId) { res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return; }
+    const me = await prisma.user.findUnique({ where: { id: req.adminId! }, select: { profession: true, professions: true } });
+    const profession = String(req.body?.profession || '').trim();
+    const claimed = [me?.profession, ...(me?.professions || [])].filter(Boolean) as string[];
+    if (!profession || !claimed.some((c) => c.trim().toLocaleLowerCase('az') === profession.toLocaleLowerCase('az'))) {
+      res.status(400).json({ success: false, message: 'Profilinizdəki ixtisaslardan birini seçin' }); return;
+    }
+    if (doc.profession && doc.profession.toLocaleLowerCase('az') === profession.toLocaleLowerCase('az')) { res.json({ success: true }); return; }
+    // İxtisas dəyişir → təsdiq yenidən lazımdır (sənəd başqa ixtisası sübut etmir ola bilər).
+    const upd = await prisma.professionDocument.update({ where: { id }, data: { profession, status: 'PENDING', reviewedAt: null } });
+    pushAdmins('credential', { id, toast: `Peşə sənədi ixtisasa bağlandı: ${doc.title} (${profession})` });
+    res.json({ success: true, document: upd });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
 
