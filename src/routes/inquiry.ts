@@ -69,9 +69,17 @@ router.post('/chat', inquiryLimiter, requireType([UserType.CAR_OWNER]), async (r
 });
 
 // Create inquiry (buyer) - direct inquiry creation
-router.post('/inquiries', inquiryLimiter, requireType([UserType.CAR_OWNER]), async (req: AuthRequest, res: Response) => {
+// Alıcı ola bilən bütün hesab növləri (səbət ilə eyni) — əvvəl yalnız CAR_OWNER idi,
+// usta və ehtiyat hissə satıcısı «daha ucuz» sorğusu göndərə bilmirdi (403).
+router.post('/inquiries', inquiryLimiter, requireType([UserType.CAR_OWNER, UserType.MECHANIC, UserType.PARTS_SELLER]), async (req: AuthRequest, res: Response) => {
   try {
-    const { text, cities } = req.body;
+    const { cities } = req.body;
+    let text: string = String(req.body.text || '');
+    // Məhsul kartından gəlibsə — elanın adı və hazırkı qiyməti istinad kimi əlavə olunur,
+    // həmin elanın satıcısına isə ayrıca sorğu getmir (ona birbaşa təklif verilir).
+    const refListingId = parseInt(String(req.body.listingId || ''));
+    const ref = Number.isFinite(refListingId) ? await prisma.listing.findUnique({ where: { id: refListingId }, select: { id: true, title: true, price: true, userId: true } }) : null;
+    if (ref && text.trim() && !text.includes(`${ref.price} ₼`)) text = `${text.trim()}\n(Saytda gördüyüm qiymət: ${ref.price} ₼ — daha ucuz təklif gözləyirəm)`;
     if (!text?.trim()) {
       res.status(400).json({ success: false, message: 'Sorğu mətni tələb olunur' });
       return;
@@ -82,7 +90,7 @@ router.post('/inquiries', inquiryLimiter, requireType([UserType.CAR_OWNER]), asy
     const aiAnalysis = await analyzeRequest(text.trim());
 
     // Uygun saticilari bul
-    const sellerIds = await findRelevantSellers(aiAnalysis, req.adminId!, cityList);
+    const sellerIds = (await findRelevantSellers(aiAnalysis, req.adminId!, cityList)).filter((id) => !ref || id !== ref.userId);
 
     // Inquiry olustur
     const inquiry = await prisma.inquiry.create({

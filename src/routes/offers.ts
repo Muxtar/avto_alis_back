@@ -5,7 +5,7 @@ import { adminAuth, AuthRequest } from '../middleware/auth';
 import { rateLimit } from '../middleware/rateLimiter';
 import { pushLive } from '../services/live';
 import { visibilityOf } from '../services/listingVisibility';
-import { currentUnitPrice, openBuyWindow, OFFER_RESPOND_HOURS, OFFER_MIN_RATIO, OFFER_STATUS_AZ } from '../services/priceOffer';
+import { currentUnitPrice, openBuyWindow, isOnlineListing, OFFER_RESPOND_HOURS, OFFER_MIN_RATIO, OFFER_STATUS_AZ } from '../services/priceOffer';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -28,8 +28,7 @@ router.post('/listings/:id/offers', offerLimiter, adminAuth, async (req: AuthReq
     if (!cur) { res.status(404).json({ success: false, message: 'Elan tapılmadı' }); return; }
     const l = cur.listing;
     if (l.userId === req.adminId) { res.status(400).json({ success: false, message: 'Öz elanınıza təklif verə bilməzsiniz' }); return; }
-    // Fərdi (VÖEN-siz) elan saytda onlayn alınmır — razılaşdırılmış qiymətlə səbətə atmaq mümkün olmazdı.
-    if (!l.businessId && !l.businessObjectId) { res.status(400).json({ success: false, message: 'Bu elan fərdi satıcınındır — onlayn alınmır, qiyməti satıcı ilə mesajla razılaşdırın' }); return; }
+    // Fərdi (VÖEN-siz) elana da təklif göndərilir — razılaşanda alış chat-da davam edir (səbət yox).
     const full = await prisma.listing.findUnique({ where: { id: listingId }, select: { status: true, type: true, archivedAt: true, expiresAt: true, business: { select: { isActive: true } }, businessObject: { select: { isActive: true } } } });
     if (!full || !visibilityOf(full).visible) { res.status(400).json({ success: false, message: 'Elan hazırda satışda deyil' }); return; }
     if (l.type === 'PRODUCT' && l.stock < quantity) { res.status(400).json({ success: false, message: `Stokda ${l.stock} ədəd var` }); return; }
@@ -49,7 +48,7 @@ router.post('/listings/:id/offers', offerLimiter, adminAuth, async (req: AuthReq
     await notify(l.userId, `Qiymət təklifi: «${l.title}»`,
       `${buyer?.name || 'Alıcı'}: ${quantity} ədəd × ${unitPrice} ₼ (sizin qiymət ${cur.unit} ₼, −${pct}%).${message ? ` «${message.slice(0, 100)}»` : ''} ${OFFER_RESPOND_HOURS} saat ərzində cavab verin.`,
       `/offers?tab=selling&id=${offer.id}`);
-    res.status(201).json({ success: true, offer });
+    res.status(201).json({ success: true, offer, online: isOnlineListing(l) });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
 
@@ -61,7 +60,7 @@ router.get('/me/offers', adminAuth, async (req: AuthRequest, res: Response) => {
       where: selling ? { sellerId: req.adminId! } : { buyerId: req.adminId! },
       orderBy: { updatedAt: 'desc' }, take: 200,
     });
-    const listings = await prisma.listing.findMany({ where: { id: { in: offers.map((o) => o.listingId) } }, select: { id: true, title: true, images: true, price: true, stock: true } });
+    const listings = await prisma.listing.findMany({ where: { id: { in: offers.map((o) => o.listingId) } }, select: { id: true, title: true, images: true, price: true, stock: true, businessId: true, businessObjectId: true } });
     const users = await prisma.user.findMany({ where: { id: { in: offers.map((o) => (selling ? o.buyerId : o.sellerId)) } }, select: { id: true, name: true, avatar: true } });
     const counts = selling
       ? await prisma.priceOffer.count({ where: { sellerId: req.adminId!, status: 'PENDING' } })
@@ -71,6 +70,8 @@ router.get('/me/offers', adminAuth, async (req: AuthRequest, res: Response) => {
       offers: offers.map((o) => ({
         ...o, statusLabel: OFFER_STATUS_AZ[o.status] || o.status,
         listing: listings.find((l) => l.id === o.listingId) || null,
+        // false → fərdi elan: razılaşma chat-da, «Səbətə at» yoxdur.
+        online: isOnlineListing(listings.find((l) => l.id === o.listingId)),
         counterparty: users.find((u) => u.id === (selling ? o.buyerId : o.sellerId)) || null,
         inCart: false,
       })),
@@ -142,7 +143,8 @@ router.post('/offers/:id/add-to-cart', adminAuth, async (req: AuthRequest, res: 
     const o = await prisma.priceOffer.findUnique({ where: { id: parseInt(String(req.params.id)) } });
     if (!o || o.buyerId !== req.adminId) { res.status(404).json({ success: false, message: 'Təklif tapılmadı' }); return; }
     if (o.status !== 'ACCEPTED' || !o.acceptedUntil || o.acceptedUntil < new Date()) { res.status(400).json({ success: false, message: 'Razılaşdırılmış qiymətin müddəti bitib' }); return; }
-    const l = await prisma.listing.findUnique({ where: { id: o.listingId }, select: { stock: true, type: true } });
+    const l = await prisma.listing.findUnique({ where: { id: o.listingId }, select: { stock: true, type: true, businessId: true, businessObjectId: true } });
+    if (l && !isOnlineListing(l)) { res.status(400).json({ success: false, message: 'Bu elan fərdi satıcınındır — onlayn alınmır, alışı satıcı ilə mesajlaşaraq tamamlayın', chat: `/messages?chat=${o.sellerId}&seg=BUSINESS` }); return; }
     if (!l || (l.type === 'PRODUCT' && l.stock < o.quantity)) { res.status(400).json({ success: false, message: 'Stokda kifayət qədər məhsul qalmayıb' }); return; }
     let cart = await prisma.cart.findUnique({ where: { userId: req.adminId! } });
     if (!cart) cart = await prisma.cart.create({ data: { userId: req.adminId! } });
