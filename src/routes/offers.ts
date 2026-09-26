@@ -5,6 +5,7 @@ import { adminAuth, AuthRequest } from '../middleware/auth';
 import { rateLimit } from '../middleware/rateLimiter';
 import { pushLive } from '../services/live';
 import { visibilityOf } from '../services/listingVisibility';
+import { groupBuyEnabled } from '../services/groupBuy';
 import { currentUnitPrice, openBuyWindow, isOnlineListing, OFFER_RESPOND_HOURS, OFFER_MIN_RATIO, OFFER_STATUS_AZ } from '../services/priceOffer';
 
 const router = Router();
@@ -28,6 +29,8 @@ router.post('/listings/:id/offers', offerLimiter, adminAuth, async (req: AuthReq
     if (!cur) { res.status(404).json({ success: false, message: 'Elan tapılmadı' }); return; }
     const l = cur.listing;
     if (l.userId === req.adminId) { res.status(400).json({ success: false, message: 'Öz elanınıza təklif verə bilməzsiniz' }); return; }
+    // Birgə alış məhsulu — qiyməti qrupun sayı müəyyən edir, fərdi qiymət təklifi olmur.
+    if (groupBuyEnabled(l as any)) { res.status(400).json({ success: false, message: 'Bu məhsul birgə alışla satılır — qiymət qrup böyüdükcə özü düşür, ayrıca təklif göndərilmir' }); return; }
     // Fərdi (VÖEN-siz) elana da təklif göndərilir — razılaşanda alış chat-da davam edir (səbət yox).
     const full = await prisma.listing.findUnique({ where: { id: listingId }, select: { status: true, type: true, archivedAt: true, expiresAt: true, business: { select: { isActive: true } }, businessObject: { select: { isActive: true } } } });
     if (!full || !visibilityOf(full).visible) { res.status(400).json({ success: false, message: 'Elan hazırda satışda deyil' }); return; }
