@@ -40,12 +40,23 @@ export interface ReceiptData {
 }
 
 /** Çek şəklini portaldan al (sabit host — SSRF riski yoxdur). */
+export class PortalUnreachable extends Error {}
+
 export async function fetchReceiptImage(fiscalId: string): Promise<Buffer> {
-  const res = await fetch(EKASSA_DOC_URL + encodeURIComponent(fiscalId), {
-    headers: { 'User-Lang': 'az', Accept: 'image/*' },
-    signal: AbortSignal.timeout(20000),
-  }).catch(() => null);
-  if (!res) throw new Error('e-kassa portalına qoşulmaq alınmadı — bir az sonra yenidən yoxlayın');
+  // İki cəhd — portal bəzən ilk qoşulmada gecikir.
+  let res: Response | null = null;
+  let lastErr: any = null;
+  for (let attempt = 0; attempt < 2 && !res; attempt++) {
+    res = await fetch(EKASSA_DOC_URL + encodeURIComponent(fiscalId), {
+      headers: { 'User-Lang': 'az', Accept: 'image/*', 'User-Agent': 'Mozilla/5.0 (tradixai receipt reader)' },
+      signal: AbortSignal.timeout(12000),
+    }).catch((e) => { lastErr = e; return null; });
+  }
+  if (!res) {
+    // Səbəb loglarda görünsün (DNS, TLS, timeout, firewall…).
+    console.error('[ekassa] portal fetch failed:', lastErr?.name, lastErr?.cause?.code || lastErr?.cause?.message || lastErr?.message);
+    throw new PortalUnreachable('e-kassa portalına qoşulmaq alınmadı');
+  }
   // Portal olmayan çek üçün 209 + «Kassa çeki tapılmamışdır» ŞƏKLİ qaytarır — onu AI-ya vermirik.
   if (res.status === 404 || res.status === 209) throw new Error('Kassa çeki tapılmadı. Yeni vurulmuş çek portalda bir az gec görünə bilər; 7 gün ərzində tapılmasa Dövlət Vergi Xidmətinə müraciət edin.');
   if (res.status !== 200 || !(res.headers.get('content-type') || '').startsWith('image/')) throw new Error(`e-kassa çeki qaytarmadı (${res.status})`);
@@ -58,21 +69,32 @@ const num = (v: any) => { const n = typeof v === 'number' ? v : parseFloat(Strin
 
 /** Çek şəklini AI ilə oxu (portal şəkli və ya kağız çekin fotosu). */
 export async function readReceiptImage(image: Buffer, mediaType: 'image/jpeg' | 'image/png', fiscalHint?: string): Promise<ReceiptData> {
+  return readReceiptSource({ type: 'base64', media_type: mediaType, data: image.toString('base64') }, fiscalHint);
+}
+
+/** Serverimiz portala çata bilməyəndə: şəkli Anthropic-in özü URL-dən götürür. */
+export async function readReceiptFromPortalUrl(fiscalId: string): Promise<ReceiptData> {
+  return readReceiptSource({ type: 'url', url: EKASSA_DOC_URL + encodeURIComponent(fiscalId) }, fiscalId);
+}
+
+async function readReceiptSource(source: any, fiscalHint?: string): Promise<ReceiptData> {
   const c = ai();
   if (!c) throw new Error('Çek analizi hazırda aktiv deyil (AI açarı yoxdur)');
   const prompt = `Bu Azərbaycan e-kassa satış çekidir. Yalnız JSON qaytar (başqa mətn yox):
 {"store":{"objectName":"","address":"","objectCode":"","taxpayer":"","voen":""},"receiptNo":"","cashier":"","date":"YYYY-MM-DD","time":"HH:MM:SS",
 "items":[{"name":"çekdəki ad olduğu kimi","searchQuery":"məhsulun anlaşıqlı adı axtarış üçün (qısaltmaları aç, marka + məhsul növü + həcm/çəki, Azərbaycan dilində, məs. «Activia qara gavalılı yoqurt»)","qty":1,"unit":"ədəd|kq|l|...","price":0,"total":0,"vatPercent":18}],
 "total":0,"vatTotal":0,"payment":{"cashless":0,"cash":0,"bonus":0,"prepayment":0,"credit":0},"fiscalId":""}
-Rəqəmləri çekdəki kimi ver (nöqtə ilə). Oxunmayan sahəni null qoy. Çek deyilsə {"error":"not_receipt"} qaytar.`;
+Rəqəmləri çekdəki kimi ver (nöqtə ilə). Oxunmayan sahəni null qoy. Çek ingiliscə ola bilər — sahələri yenə doldur.
+Şəkildə «Kassa çeki tapılmamışdır» / «receipt not found» yazılıbsa {"error":"not_found"} qaytar. Çek deyilsə {"error":"not_receipt"} qaytar.`;
   const r = await c.messages.create({
     model: AI_MODEL, max_tokens: 2500,
-    messages: [{ role: 'user', content: [{ type: 'image', source: { type: 'base64', media_type: mediaType, data: image.toString('base64') } }, { type: 'text', text: prompt }] }],
+    messages: [{ role: 'user', content: [{ type: 'image', source }, { type: 'text', text: prompt }] }],
   });
   const text = r.content.map((b: any) => (b.type === 'text' ? b.text : '')).join('');
   const json = text.slice(text.indexOf('{'), text.lastIndexOf('}') + 1);
   let d: any;
   try { d = JSON.parse(json); } catch { throw new Error('Çek oxunmadı — şəkil aydın deyil'); }
+  if (d.error === 'not_found') throw new Error('Kassa çeki tapılmadı. Yeni vurulmuş çek portalda bir az gec görünə bilər; 7 gün ərzində tapılmasa Dövlət Vergi Xidmətinə müraciət edin.');
   if (d.error) throw new Error('Şəkildə e-kassa çeki tanınmadı');
   const items: ReceiptItem[] = (Array.isArray(d.items) ? d.items : []).slice(0, 200).map((i: any) => ({
     name: String(i.name || '').trim().slice(0, 200),
@@ -97,8 +119,20 @@ Rəqəmləri çekdəki kimi ver (nöqtə ilə). Oxunmayan sahəni null qoy. Çek
 export async function getReceipt(fiscalId: string) {
   const cached = await prisma.scannedReceipt.findUnique({ where: { fiscalId } });
   if (cached) return cached;
-  const img = await fetchReceiptImage(fiscalId);
-  const data = await readReceiptImage(img, 'image/jpeg', fiscalId);
+  let data: ReceiptData;
+  try {
+    const img = await fetchReceiptImage(fiscalId);
+    data = await readReceiptImage(img, 'image/jpeg', fiscalId);
+  } catch (e) {
+    if (!(e instanceof PortalUnreachable)) throw e;
+    // Serverimiz portala çata bilmədi (məs. hostinqin IP-si bloklanıb) — Anthropic şəkli özü alsın.
+    try { data = await readReceiptFromPortalUrl(fiscalId); }
+    catch (e2: any) {
+      console.error('[ekassa] url fallback failed:', e2?.message);
+      if (/tapılmadı|tanınmadı/.test(e2?.message || '')) throw e2;
+      throw new Error('e-kassa portalına hazırda qoşulmaq alınmadı. «🖼 Şəkil» bölməsindən çekin fotosunu yükləyin — çek şəkildən oxunacaq.');
+    }
+  }
   const issuedAt = data.date ? new Date(`${data.date}T${/^\d{2}:\d{2}(:\d{2})?$/.test(data.time || '') ? data.time : '00:00:00'}+04:00`) : null;
   try {
     return await prisma.scannedReceipt.create({
