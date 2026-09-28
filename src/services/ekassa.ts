@@ -42,17 +42,23 @@ export interface ReceiptData {
 /** Çek şəklini portaldan al (sabit host — SSRF riski yoxdur). */
 export class PortalUnreachable extends Error {}
 
+// e-kassa portalı yalnız Azərbaycan IP-lərinə açıqdır — xarici hostinqdən (Railway,
+// Anthropic) qoşulma TIMEOUT olur (yoxlanılıb: UND_ERR_CONNECT_TIMEOUT). Hər skanda
+// 10+ saniyə gözləməmək üçün portal əlçatmazdırsa 10 dəqiqə birbaşa foto yoluna keçirik.
+let portalDownUntil = 0;
+export const portalLikelyDown = () => Date.now() < portalDownUntil;
+
 export async function fetchReceiptImage(fiscalId: string): Promise<Buffer> {
+  if (portalLikelyDown()) throw new PortalUnreachable('e-kassa portalı əlçatan deyil');
   // İki cəhd — portal bəzən ilk qoşulmada gecikir.
   let res: Response | null = null;
   let lastErr: any = null;
-  for (let attempt = 0; attempt < 2 && !res; attempt++) {
-    res = await fetch(EKASSA_DOC_URL + encodeURIComponent(fiscalId), {
-      headers: { 'User-Lang': 'az', Accept: 'image/*', 'User-Agent': 'Mozilla/5.0 (tradixai receipt reader)' },
-      signal: AbortSignal.timeout(12000),
-    }).catch((e) => { lastErr = e; return null; });
-  }
+  res = await fetch(EKASSA_DOC_URL + encodeURIComponent(fiscalId), {
+    headers: { 'User-Lang': 'az', Accept: 'image/*', 'User-Agent': 'Mozilla/5.0 (tradixai receipt reader)' },
+    signal: AbortSignal.timeout(7000),
+  }).catch((e) => { lastErr = e; return null; });
   if (!res) {
+    portalDownUntil = Date.now() + 10 * 60 * 1000;
     // Səbəb loglarda görünsün (DNS, TLS, timeout, firewall…).
     console.error('[ekassa] portal fetch failed:', lastErr?.name, lastErr?.cause?.code || lastErr?.cause?.message || lastErr?.message);
     throw new PortalUnreachable('e-kassa portalına qoşulmaq alınmadı');
@@ -119,20 +125,9 @@ Rəqəmləri çekdəki kimi ver (nöqtə ilə). Oxunmayan sahəni null qoy. Çek
 export async function getReceipt(fiscalId: string) {
   const cached = await prisma.scannedReceipt.findUnique({ where: { fiscalId } });
   if (cached) return cached;
-  let data: ReceiptData;
-  try {
-    const img = await fetchReceiptImage(fiscalId);
-    data = await readReceiptImage(img, 'image/jpeg', fiscalId);
-  } catch (e) {
-    if (!(e instanceof PortalUnreachable)) throw e;
-    // Serverimiz portala çata bilmədi (məs. hostinqin IP-si bloklanıb) — Anthropic şəkli özü alsın.
-    try { data = await readReceiptFromPortalUrl(fiscalId); }
-    catch (e2: any) {
-      console.error('[ekassa] url fallback failed:', e2?.message);
-      if (/tapılmadı|tanınmadı/.test(e2?.message || '')) throw e2;
-      throw new Error('e-kassa portalına hazırda qoşulmaq alınmadı. «🖼 Şəkil» bölməsindən çekin fotosunu yükləyin — çek şəkildən oxunacaq.');
-    }
-  }
+  // Portal əlçatmazdırsa PortalUnreachable yuxarı qalxır — marşrut istifadəçidən çekin fotosunu istəyir.
+  const img = await fetchReceiptImage(fiscalId);
+  const data = await readReceiptImage(img, 'image/jpeg', fiscalId);
   const issuedAt = data.date ? new Date(`${data.date}T${/^\d{2}:\d{2}(:\d{2})?$/.test(data.time || '') ? data.time : '00:00:00'}+04:00`) : null;
   try {
     return await prisma.scannedReceipt.create({

@@ -7,7 +7,7 @@ import { adminAuth, AuthRequest } from '../middleware/auth';
 import { upload } from '../middleware/upload';
 import { processImages } from '../middleware/imageProcess';
 import { receiptLimiter } from '../middleware/rateLimiter';
-import { parseFiscalId, getReceipt, matchItems, readReceiptImage, readReceiptFromPortalUrl, type ReceiptData } from '../services/ekassa';
+import { parseFiscalId, getReceipt, matchItems, readReceiptImage, PortalUnreachable, type ReceiptData } from '../services/ekassa';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -24,8 +24,20 @@ router.post('/receipts/scan', receiptLimiter, adminAuth, async (req: AuthRequest
   try {
     const fiscalId = parseFiscalId(String(req.body?.text || ''));
     if (!fiscalId) { res.status(400).json({ success: false, message: 'Bu QR e-kassa çeki deyil. Çekin altındakı QR kodu oxudun (monitoring.e-kassa.gov.az linki).' }); return; }
-    const rec = await getReceipt(fiscalId);
-    await respond(res, req.adminId!, rec);
+    // Artıq oxunubsa (başqa istifadəçi də ola bilər) — dərhal keşdən.
+    const cached = await prisma.scannedReceipt.findUnique({ where: { fiscalId } });
+    if (cached) { await respond(res, req.adminId!, cached); return; }
+    try {
+      const rec = await getReceipt(fiscalId);
+      await respond(res, req.adminId!, rec);
+    } catch (e: any) {
+      if (e instanceof PortalUnreachable) {
+        // QR oxundu, amma portal xaricdən əlçatan deyil — çekin fotosu ilə davam (fiskal ID saxlanılır).
+        res.status(409).json({ success: false, code: 'PORTAL_DOWN', fiscalId, message: 'QR oxundu ✓ — indi çekin tam şəklini çəkin, məhsullar şəkildən oxunacaq.' });
+        return;
+      }
+      throw e;
+    }
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
 
@@ -35,10 +47,13 @@ router.post('/receipts/scan-photo', receiptLimiter, adminAuth, upload.single('im
   try {
     if (!file) { res.status(400).json({ success: false, message: 'Çekin şəklini seçin' }); return; }
     const buf = await fs.promises.readFile(file.path);
-    const key = `photo-${crypto.createHash('sha1').update(buf).digest('hex').slice(0, 24)}`;
+    // QR-dan fiskal ID gəlibsə — çek onunla saxlanılır (təkrar skanda AI yenidən işləmir).
+    const fid = parseFiscalId(String(req.body?.fiscalId || ''));
+    const key = fid || `photo-${crypto.createHash('sha1').update(buf).digest('hex').slice(0, 24)}`;
     let rec = await prisma.scannedReceipt.findUnique({ where: { fiscalId: key } });
     if (!rec) {
       const data = await readReceiptImage(buf, 'image/jpeg', key);
+      if (fid) data.fiscalId = fid;
       rec = await prisma.scannedReceipt.upsert({
         where: { fiscalId: key }, update: {},
         create: { fiscalId: key, storeName: data.store.objectName, voen: data.store.voen, total: data.total, data: data as unknown as Prisma.InputJsonValue },
@@ -50,7 +65,6 @@ router.post('/receipts/scan-photo', receiptLimiter, adminAuth, upload.single('im
 });
 
 // Diaqnostika (açıq, sirr yoxdur): server e-kassa portalına çata bilirmi, AI açarı qoyulubmu.
-let lastAiDiag = 0;
 router.get('/receipts/diag', async (_req, res: Response) => {
   const started = Date.now();
   let portal: any = { ok: false };
@@ -60,16 +74,7 @@ router.get('/receipts/diag', async (_req, res: Response) => {
   } catch (e: any) {
     portal = { ok: false, error: e?.name, code: e?.cause?.code || null, message: String(e?.cause?.message || e?.message || '').slice(0, 160) };
   }
-  // ?ai=1 — Claude şəkli URL-dən özü ala bilirmi (10 dəqiqədə bir dəfə, xərc qoruması).
-  let aiUrl: any = undefined;
-  if (_req.query.ai === '1' && process.env.ANTHROPIC_API_KEY && Date.now() - lastAiDiag > 10 * 60 * 1000) {
-    lastAiDiag = Date.now();
-    try {
-      const d = await readReceiptFromPortalUrl('BfnEuM65Cq4NXKKKPfL89ofPeX8pwJy32tNuowJLjCSE');
-      aiUrl = { ok: true, store: d.store.objectName, items: d.items.length, total: d.total };
-    } catch (e: any) { aiUrl = { ok: false, message: String(e?.message || e).slice(0, 300) }; }
-  }
-  res.json({ portal: { ...portal, ms: Date.now() - started }, ai: { configured: !!process.env.ANTHROPIC_API_KEY }, aiUrl, node: process.version });
+  res.json({ portal: { ...portal, ms: Date.now() - started }, ai: { configured: !!process.env.ANTHROPIC_API_KEY }, node: process.version });
 });
 
 // Çeklərim.
