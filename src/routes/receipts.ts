@@ -49,6 +49,19 @@ router.post('/receipts/scan-photo', receiptLimiter, adminAuth, upload.single('im
   finally { if (file) fs.promises.unlink(file.path).catch(() => {}); }
 });
 
+// Diaqnostika (açıq, sirr yoxdur): server e-kassa portalına çata bilirmi, AI açarı qoyulubmu.
+router.get('/receipts/diag', async (_req, res: Response) => {
+  const started = Date.now();
+  let portal: any = { ok: false };
+  try {
+    const r = await fetch('https://monitoring.e-kassa.gov.az/pks-monitoring/2.0.0/documents/BfnEuM65Cq4NXKKKPfL89ofPeX8pwJy32tNuowJLjCSE', { headers: { 'User-Lang': 'az' }, signal: AbortSignal.timeout(12000) });
+    portal = { ok: r.status === 200, status: r.status, type: r.headers.get('content-type') };
+  } catch (e: any) {
+    portal = { ok: false, error: e?.name, code: e?.cause?.code || null, message: String(e?.cause?.message || e?.message || '').slice(0, 160) };
+  }
+  res.json({ portal: { ...portal, ms: Date.now() - started }, ai: { configured: !!process.env.ANTHROPIC_API_KEY }, node: process.version });
+});
+
 // Çeklərim.
 router.get('/me/receipts', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
