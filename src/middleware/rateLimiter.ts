@@ -82,3 +82,6 @@ export const otpLimiter = rateLimit(5, 5 * 60 * 1000);
 
 // AI köməkçi — hər sorğu Claude çağırır (xərc), ona görə məhdudlaşdırılır.
 export const aiChatLimiter = rateLimit(30, 5 * 60 * 1000);
+
+// E-kassa çek analizi — AI xərci: 30 çek / saat (keşlənmiş çek sayılmır, amma limit hamısına).
+export const receiptLimiter = rateLimit(30, 60 * 60 * 1000);

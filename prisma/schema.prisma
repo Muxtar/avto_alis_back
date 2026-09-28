@@ -1996,3 +1996,29 @@ model ProfessionDiscount {
   @@unique([businessObjectId, profession])
   @@index([profession])
 }
+
+// ── E-KASSA ÇEKLƏRİ ── QR (monitoring.e-kassa.gov.az/#/index?doc=<fiskal ID>) oxunur,
+// çek şəkli dövlət portalından alınır və AI ilə strukturlaşdırılır. Eyni çek bir
+// dəfə analiz olunur (fiskal ID ilə keş), istifadəçilərin tarixçəsi ayrıca saxlanır.
+model ScannedReceipt {
+  id          Int           @id @default(autoincrement())
+  fiscalId    String        @unique
+  storeName   String?
+  voen        String?
+  total       Float?
+  issuedAt    DateTime?
+  data        Json // { store, receiptNo, cashier, items[], totals, payment }
+  createdAt   DateTime      @default(now())
+  scans       ReceiptScan[]
+}
+
+model ReceiptScan {
+  id        Int            @id @default(autoincrement())
+  userId    Int
+  receiptId Int
+  createdAt DateTime       @default(now())
+  receipt   ScannedReceipt @relation(fields: [receiptId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, receiptId])
+  @@index([userId])
+}
