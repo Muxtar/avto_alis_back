@@ -12,6 +12,11 @@ import { searchWords } from './searchTerms';
 
 const prisma = new PrismaClient();
 const EKASSA_DOC_URL = 'https://monitoring.e-kassa.gov.az/pks-monitoring/2.0.0/documents/';
+// Portal YALNIZ Azərbaycan IP-lərinə açıqdır. Azərbaycanda kiçik proxy qurulubsa
+// (tools/ekassa-proxy), çek onun üzərindən avtomatik alınır:
+//   EKASSA_PROXY_URL=https://ekassa-proxy.example.az   EKASSA_PROXY_KEY=<gizli açar>
+const PROXY_URL = (process.env.EKASSA_PROXY_URL || '').replace(/\/+$/, '');
+const PROXY_KEY = process.env.EKASSA_PROXY_KEY || '';
 const AI_MODEL = process.env.RECEIPT_AI_MODEL || process.env.CREDENTIAL_AI_MODEL || 'claude-sonnet-5';
 // Fiskal ID — base58 (portalın öz yoxlaması: /^[A-HJ-NP-Za-km-z1-9]*$/).
 const FISCAL_RE = /^[A-HJ-NP-Za-km-z1-9]{10,64}$/;
@@ -53,9 +58,10 @@ export async function fetchReceiptImage(fiscalId: string): Promise<Buffer> {
   // İki cəhd — portal bəzən ilk qoşulmada gecikir.
   let res: Response | null = null;
   let lastErr: any = null;
-  res = await fetch(EKASSA_DOC_URL + encodeURIComponent(fiscalId), {
-    headers: { 'User-Lang': 'az', Accept: 'image/*', 'User-Agent': 'Mozilla/5.0 (tradixai receipt reader)' },
-    signal: AbortSignal.timeout(7000),
+  const url = PROXY_URL ? `${PROXY_URL}/doc/${encodeURIComponent(fiscalId)}` : EKASSA_DOC_URL + encodeURIComponent(fiscalId);
+  res = await fetch(url, {
+    headers: { 'User-Lang': 'az', Accept: 'image/*', 'User-Agent': 'Mozilla/5.0 (tradixai receipt reader)', ...(PROXY_KEY ? { 'X-Proxy-Key': PROXY_KEY } : {}) },
+    signal: AbortSignal.timeout(PROXY_URL ? 15000 : 7000),
   }).catch((e) => { lastErr = e; return null; });
   if (!res) {
     portalDownUntil = Date.now() + 10 * 60 * 1000;
@@ -78,12 +84,12 @@ export async function readReceiptImage(image: Buffer, mediaType: 'image/jpeg' | 
   return readReceiptSource({ type: 'base64', media_type: mediaType, data: image.toString('base64') }, fiscalHint);
 }
 
-/** Serverimiz portala çata bilməyəndə: şəkli Anthropic-in özü URL-dən götürür. */
-export async function readReceiptFromPortalUrl(fiscalId: string): Promise<ReceiptData> {
-  return readReceiptSource({ type: 'url', url: EKASSA_DOC_URL + encodeURIComponent(fiscalId) }, fiscalId);
+/** Portaldan yüklənmiş çek PDF kimi gəlibsə. */
+export async function readReceiptPdf(pdf: Buffer, fiscalHint?: string): Promise<ReceiptData> {
+  return readReceiptSource({ type: 'base64', media_type: 'application/pdf', data: pdf.toString('base64') }, fiscalHint, 'document');
 }
 
-async function readReceiptSource(source: any, fiscalHint?: string): Promise<ReceiptData> {
+async function readReceiptSource(source: any, fiscalHint?: string, blockType: 'image' | 'document' = 'image'): Promise<ReceiptData> {
   const c = ai();
   if (!c) throw new Error('Çek analizi hazırda aktiv deyil (AI açarı yoxdur)');
   const prompt = `Bu Azərbaycan e-kassa satış çekidir. Yalnız JSON qaytar (başqa mətn yox):
@@ -94,7 +100,7 @@ Rəqəmləri çekdəki kimi ver (nöqtə ilə). Oxunmayan sahəni null qoy. Çek
 Şəkildə «Kassa çeki tapılmamışdır» / «receipt not found» yazılıbsa {"error":"not_found"} qaytar. Çek deyilsə {"error":"not_receipt"} qaytar.`;
   const r = await c.messages.create({
     model: AI_MODEL, max_tokens: 2500,
-    messages: [{ role: 'user', content: [{ type: 'image', source }, { type: 'text', text: prompt }] }],
+    messages: [{ role: 'user', content: [{ type: blockType, source } as any, { type: 'text', text: prompt }] }],
   });
   const text = r.content.map((b: any) => (b.type === 'text' ? b.text : '')).join('');
   const json = text.slice(text.indexOf('{'), text.lastIndexOf('}') + 1);

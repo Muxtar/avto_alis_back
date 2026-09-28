@@ -4,10 +4,10 @@ import { PrismaClient, Prisma } from '@prisma/client';
 import crypto from 'crypto';
 import fs from 'fs';
 import { adminAuth, AuthRequest } from '../middleware/auth';
-import { upload } from '../middleware/upload';
+import { docUpload } from '../middleware/upload';
 import { processImages } from '../middleware/imageProcess';
 import { receiptLimiter } from '../middleware/rateLimiter';
-import { parseFiscalId, getReceipt, matchItems, readReceiptImage, PortalUnreachable, type ReceiptData } from '../services/ekassa';
+import { parseFiscalId, getReceipt, matchItems, readReceiptImage, readReceiptPdf, PortalUnreachable, type ReceiptData } from '../services/ekassa';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -42,7 +42,8 @@ router.post('/receipts/scan', receiptLimiter, adminAuth, async (req: AuthRequest
 });
 
 // QR oxunmadı — kağız çekin FOTOSU birbaşa AI ilə oxunur (şəkil hash-i ilə keş).
-router.post('/receipts/scan-photo', receiptLimiter, adminAuth, upload.single('image'), processImages, async (req: AuthRequest, res: Response) => {
+// Portaldan yüklənmiş çek faylı (document.jpg / PDF) və ya kağız çekin fotosu.
+router.post('/receipts/scan-photo', receiptLimiter, adminAuth, docUpload.single('image'), processImages, async (req: AuthRequest, res: Response) => {
   const file = req.file as Express.Multer.File | undefined;
   try {
     if (!file) { res.status(400).json({ success: false, message: 'Çekin şəklini seçin' }); return; }
@@ -52,7 +53,8 @@ router.post('/receipts/scan-photo', receiptLimiter, adminAuth, upload.single('im
     const key = fid || `photo-${crypto.createHash('sha1').update(buf).digest('hex').slice(0, 24)}`;
     let rec = await prisma.scannedReceipt.findUnique({ where: { fiscalId: key } });
     if (!rec) {
-      const data = await readReceiptImage(buf, 'image/jpeg', key);
+      const isPdf = file.mimetype === 'application/pdf' || /\.pdf$/i.test(file.originalname);
+      const data = isPdf ? await readReceiptPdf(buf, key) : await readReceiptImage(buf, 'image/jpeg', key);
       if (fid) data.fiscalId = fid;
       rec = await prisma.scannedReceipt.upsert({
         where: { fiscalId: key }, update: {},
