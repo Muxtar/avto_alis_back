@@ -7,7 +7,7 @@ import { adminAuth, AuthRequest } from '../middleware/auth';
 import { upload } from '../middleware/upload';
 import { processImages } from '../middleware/imageProcess';
 import { receiptLimiter } from '../middleware/rateLimiter';
-import { parseFiscalId, getReceipt, matchItems, readReceiptImage, type ReceiptData } from '../services/ekassa';
+import { parseFiscalId, getReceipt, matchItems, readReceiptImage, readReceiptFromPortalUrl, type ReceiptData } from '../services/ekassa';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -50,6 +50,7 @@ router.post('/receipts/scan-photo', receiptLimiter, adminAuth, upload.single('im
 });
 
 // Diaqnostika (açıq, sirr yoxdur): server e-kassa portalına çata bilirmi, AI açarı qoyulubmu.
+let lastAiDiag = 0;
 router.get('/receipts/diag', async (_req, res: Response) => {
   const started = Date.now();
   let portal: any = { ok: false };
@@ -59,7 +60,16 @@ router.get('/receipts/diag', async (_req, res: Response) => {
   } catch (e: any) {
     portal = { ok: false, error: e?.name, code: e?.cause?.code || null, message: String(e?.cause?.message || e?.message || '').slice(0, 160) };
   }
-  res.json({ portal: { ...portal, ms: Date.now() - started }, ai: { configured: !!process.env.ANTHROPIC_API_KEY }, node: process.version });
+  // ?ai=1 — Claude şəkli URL-dən özü ala bilirmi (10 dəqiqədə bir dəfə, xərc qoruması).
+  let aiUrl: any = undefined;
+  if (_req.query.ai === '1' && process.env.ANTHROPIC_API_KEY && Date.now() - lastAiDiag > 10 * 60 * 1000) {
+    lastAiDiag = Date.now();
+    try {
+      const d = await readReceiptFromPortalUrl('BfnEuM65Cq4NXKKKPfL89ofPeX8pwJy32tNuowJLjCSE');
+      aiUrl = { ok: true, store: d.store.objectName, items: d.items.length, total: d.total };
+    } catch (e: any) { aiUrl = { ok: false, message: String(e?.message || e).slice(0, 300) }; }
+  }
+  res.json({ portal: { ...portal, ms: Date.now() - started }, ai: { configured: !!process.env.ANTHROPIC_API_KEY }, aiUrl, node: process.version });
 });
 
 // Çeklərim.
