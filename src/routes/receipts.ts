@@ -7,16 +7,19 @@ import { adminAuth, AuthRequest } from '../middleware/auth';
 import { docUpload } from '../middleware/upload';
 import { processImages } from '../middleware/imageProcess';
 import { receiptLimiter } from '../middleware/rateLimiter';
-import { parseFiscalId, getReceipt, matchItems, readReceiptImage, readReceiptPdf, PortalUnreachable, type ReceiptData } from '../services/ekassa';
+import { parseFiscalId, getReceipt, matchItems, receiptTotals, recordStorePrices, readReceiptImage, readReceiptPdf, PortalUnreachable, type ReceiptData } from '../services/ekassa';
 
 const router = Router();
 const prisma = new PrismaClient();
 
-async function respond(res: Response, userId: number, rec: { id: number; fiscalId: string; data: any; createdAt: Date }) {
+async function respond(res: Response, userId: number, rec: { id: number; fiscalId: string; data: any; createdAt: Date; issuedAt?: Date | null }) {
   await prisma.receiptScan.upsert({ where: { userId_receiptId: { userId, receiptId: rec.id } }, create: { userId, receiptId: rec.id }, update: {} });
   const data = rec.data as ReceiptData;
-  const matches = await matchItems(data.items || []);
-  res.json({ success: true, receipt: { ...data, id: rec.id, fiscalId: rec.fiscalId, items: (data.items || []).map((it, i) => ({ ...it, ...matches[i] })) } });
+  const matches = await matchItems(data.items || [], rec.id);
+  res.json({
+    success: true,
+    receipt: { ...data, id: rec.id, fiscalId: rec.fiscalId, items: (data.items || []).map((it, i) => ({ ...it, ...matches[i] })), totals: receiptTotals(data.items || [], matches) },
+  });
 }
 
 // QR mətni / e-kassa linki / fiskal ID.
@@ -58,8 +61,9 @@ router.post('/receipts/scan-photo', receiptLimiter, adminAuth, docUpload.single(
       if (fid) data.fiscalId = fid;
       rec = await prisma.scannedReceipt.upsert({
         where: { fiscalId: key }, update: {},
-        create: { fiscalId: key, storeName: data.store.objectName, voen: data.store.voen, total: data.total, data: data as unknown as Prisma.InputJsonValue },
+        create: { fiscalId: key, storeName: data.store.objectName, voen: data.store.voen, total: data.total, issuedAt: data.date ? new Date(`${data.date}T${data.time && /^\d{2}:\d{2}/.test(data.time) ? data.time : '00:00'}+04:00`) : null, data: data as unknown as Prisma.InputJsonValue },
       });
+      await recordStorePrices(rec);
     }
     await respond(res, req.adminId!, rec);
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }

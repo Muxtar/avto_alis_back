@@ -7,6 +7,7 @@ import { upload } from '../middleware/upload';
 import { processImages } from '../middleware/imageProcess';
 import { adminAuth, AuthRequest, verifyTokenUserId } from '../middleware/auth';
 import { purchasedListing, reviewStats } from '../services/reviewGating';
+import { normalizeGtin, isRestrictedGtin } from '../services/gtin';
 import { searchWords } from '../services/searchTerms';
 import { pushAdmins } from '../services/live';
 
@@ -30,7 +31,10 @@ router.get('/listings', async (req: Request, res: Response) => {
         { OR: [{ businessObjectId: null }, { businessObject: { isActive: true } }] },
       ],
     };
-    if (search) {
+    // Axtarış ştrix-koddursa (8–14 rəqəm) — dəqiq barkod uyğunluğu.
+    const searchCode = search && /^\s*\d[\d\s-]{6,16}\d\s*$/.test(String(search)) ? normalizeGtin(String(search)) : null;
+    if (searchCode) (where.AND as Prisma.ListingWhereInput[]).push({ barcode: searchCode });
+    else if (search) {
       // Ümumi axtarış: məhsul/xidmət (başlıq, təsvir, KATEQORİYA, marka, model),
       // satıcının adı, şirkət/obyekt adı, şəhər.
       //
@@ -613,6 +617,29 @@ router.post('/listings', adminAuth, upload.array('images', 5), processImages, as
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }
+});
+
+
+// Ştrix-kod üzrə: saytdakı elanlar + mağazalardakı qiymətlər (çeklərdən, son 90 gün) + ad təklifi.
+// Elan yerləşdirəndə formu doldurmaq və məhsul səhifəsində «mağazalarda qiymət» üçün.
+router.get('/barcodes/:code', async (req: Request, res: Response) => {
+  try {
+    const code = normalizeGtin(String(req.params.code));
+    if (!code) { res.status(400).json({ success: false, message: 'Ştrix-kod düzgün deyil' }); return; }
+    const since = new Date(Date.now() - 90 * 864e5);
+    const [listings, prices] = await Promise.all([
+      prisma.listing.findMany({ where: { barcode: code, status: 'APPROVED', archivedAt: null, OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }] }, select: { id: true, title: true, price: true, images: true, city: true }, orderBy: { price: 'asc' }, take: 10 }),
+      isRestrictedGtin(code) ? [] : prisma.storePrice.findMany({ where: { barcode: code, observedAt: { gte: since } }, orderBy: { observedAt: 'desc' }, take: 60 }),
+    ]);
+    const byStore = new Map<string, any>();
+    for (const p of prices) { const k = `${p.voen || ''}|${p.storeName || ''}`; if (!byStore.has(k)) byStore.set(k, p); }
+    res.json({
+      success: true, barcode: code, restricted: isRestrictedGtin(code),
+      suggestedName: prices[0]?.name || listings[0]?.title || null,
+      listings,
+      stores: [...byStore.values()].sort((a, b) => a.unitPrice - b.unitPrice).map((p) => ({ store: p.storeName, price: p.unitPrice, observedAt: p.observedAt })),
+    });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
 
 export default router;

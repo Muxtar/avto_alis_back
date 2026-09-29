@@ -355,6 +355,8 @@ model Listing {
   id                   Int             @id @default(autoincrement())
   userId               Int
   title                String
+  // Ştrix-kod (GTIN: EAN-13/EAN-8/UPC-A/ITF-14) — çeklə və mağazalarla qiymət müqayisəsi üçün.
+  barcode              String?
   description          String
   price                Float
   category             String
@@ -460,6 +462,7 @@ model Listing {
   @@index([paymentType])
   @@index([businessId])
   @@index([businessObjectId])
+  @@index([barcode])
 }
 
 enum MessageType {
@@ -2010,6 +2013,7 @@ model ScannedReceipt {
   data        Json // { store, receiptNo, cashier, items[], totals, payment }
   createdAt   DateTime      @default(now())
   scans       ReceiptScan[]
+  prices      StorePrice[]
 }
 
 model ReceiptScan {
@@ -2021,4 +2025,25 @@ model ReceiptScan {
 
   @@unique([userId, receiptId])
   @@index([userId])
+}
+
+// MAĞAZA QİYMƏTLƏRİ — oxudulan çeklərdən anonim müşahidələr: «məhsul → mağaza → qiymət → tarix».
+// İstifadəçi saxlanmır (yalnız çek), eyni çek bir dəfə sayılır.
+model StorePrice {
+  id         Int            @id @default(autoincrement())
+  receiptId  Int
+  barcode    String?
+  nameKey    String // normallaşdırılmış ad (barkod yoxdursa müqayisə üçün)
+  name       String
+  storeName  String?
+  voen       String?
+  objectCode String?
+  unit       String?
+  unitPrice  Float
+  observedAt DateTime
+  receipt    ScannedReceipt @relation(fields: [receiptId], references: [id], onDelete: Cascade)
+
+  @@unique([receiptId, nameKey])
+  @@index([barcode])
+  @@index([nameKey])
 }

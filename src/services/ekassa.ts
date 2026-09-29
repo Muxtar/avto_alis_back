@@ -9,6 +9,8 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { PrismaClient, Prisma } from '@prisma/client';
 import { searchWords } from './searchTerms';
+import { ocrImage, parseReceiptText } from './receiptOcr';
+import { isRestrictedGtin } from './gtin';
 
 const prisma = new PrismaClient();
 const EKASSA_DOC_URL = 'https://monitoring.e-kassa.gov.az/pks-monitoring/2.0.0/documents/';
@@ -34,7 +36,11 @@ export function parseFiscalId(input: string): string | null {
   return FISCAL_RE.test(cand) ? cand : null;
 }
 
-export interface ReceiptItem { name: string; searchQuery: string; qty: number; unit: string | null; price: number; total: number; vatPercent: number | null }
+export interface ReceiptItem {
+  name: string; searchQuery: string; qty: number; unit: string | null; price: number; total: number; vatPercent: number | null;
+  barcode?: string | null;           // GTIN (yoxlama rəqəmi ilə təsdiqli)
+  check?: 'ok' | 'mismatch';          // say × qiymət = cəm?
+}
 export interface ReceiptData {
   store: { objectName: string | null; address: string | null; objectCode: string | null; taxpayer: string | null; voen: string | null };
   receiptNo: string | null; cashier: string | null; date: string | null; time: string | null;
@@ -42,7 +48,12 @@ export interface ReceiptData {
   total: number | null; vatTotal: number | null;
   payment: { cashless: number; cash: number; bonus: number; prepayment: number; credit: number };
   fiscalId: string;
+  source?: 'ocr' | 'ai';
+  checks?: { itemsSum: number; totalMatches: boolean; confidence: number };
 }
+
+// Ödənişli AI yalnız açıq-aydın icazə veriləndə (OCR heç nə tapmayanda) — default BAĞLI.
+const AI_FALLBACK = process.env.RECEIPT_AI_FALLBACK === '1';
 
 /** Çek şəklini portaldan al (sabit host — SSRF riski yoxdur). */
 export class PortalUnreachable extends Error {}
@@ -79,14 +90,49 @@ export async function fetchReceiptImage(fiscalId: string): Promise<Buffer> {
 
 const num = (v: any) => { const n = typeof v === 'number' ? v : parseFloat(String(v ?? '').replace(',', '.')); return Number.isFinite(n) ? Math.round(n * 100) / 100 : 0; };
 
-/** Çek şəklini AI ilə oxu (portal şəkli və ya kağız çekin fotosu). */
+/**
+ * Çek şəklini oxu — PULSUZ: Tesseract OCR + qaydalarla təhlil (services/receiptOcr).
+ * Ödənişli AI yalnız RECEIPT_AI_FALLBACK=1 olanda və OCR heç bir məhsul tapmayanda.
+ */
 export async function readReceiptImage(image: Buffer, mediaType: 'image/jpeg' | 'image/png', fiscalHint?: string): Promise<ReceiptData> {
-  return readReceiptSource({ type: 'base64', media_type: mediaType, data: image.toString('base64') }, fiscalHint);
+  const { text, confidence } = await ocrImage(image);
+  if (/Kassa çeki tapılmamışdır|tapılmamışdır/i.test(text)) throw new Error('Kassa çeki tapılmadı (portalda yoxdur). 7 gün ərzində tapılmasa Dövlət Vergi Xidmətinə müraciət edin.');
+  const p = parseReceiptText(text, confidence);
+  if (!p.items.length) {
+    if (AI_FALLBACK && ai()) return { ...(await readReceiptSource({ type: 'base64', media_type: mediaType, data: image.toString('base64') }, fiscalHint)), source: 'ai' };
+    throw new Error('Çekdə məhsul cədvəli oxunmadı. e-kassadan yüklənmiş çeki (document.jpg) seçin və ya daha aydın şəkil çəkin.');
+  }
+  return {
+    store: p.store, receiptNo: p.receiptNo, cashier: p.cashier, date: p.date, time: p.time,
+    items: p.items.map((i) => ({ name: i.name, searchQuery: i.name, qty: i.qty, unit: i.unit, price: i.price, total: i.total, vatPercent: i.vatPercent, barcode: i.barcode, check: i.check })),
+    total: p.total, vatTotal: p.vatTotal, payment: p.payment,
+    fiscalId: fiscalHint || p.shortFiscalId || '',
+    source: 'ocr', checks: p.checks,
+  };
 }
 
-/** Portaldan yüklənmiş çek PDF kimi gəlibsə. */
+/** PDF — OCR PDF-i birbaşa oxumur; e-kassa «Çeki yüklə» onsuz da JPG verir. */
 export async function readReceiptPdf(pdf: Buffer, fiscalHint?: string): Promise<ReceiptData> {
-  return readReceiptSource({ type: 'base64', media_type: 'application/pdf', data: pdf.toString('base64') }, fiscalHint, 'document');
+  if (AI_FALLBACK && ai()) return { ...(await readReceiptSource({ type: 'base64', media_type: 'application/pdf', data: pdf.toString('base64') }, fiscalHint, 'document')), source: 'ai' };
+  throw new Error('PDF çek hazırda oxunmur — e-kassadakı «Çeki yüklə» ilə düşən JPG faylını (document.jpg) seçin.');
+}
+
+// ── MAĞAZA QİYMƏTLƏRİ ──
+export const nameKeyOf = (s: string) => searchWords(s).join(' ').slice(0, 160) || s.toLocaleLowerCase('az').trim();
+
+/** Çekdəki qiymətləri anonim müşahidə kimi yaz (eyni çek bir dəfə). */
+export async function recordStorePrices(rec: { id: number; data: any; issuedAt: Date | null; createdAt: Date }) {
+  const d = rec.data as ReceiptData;
+  const when = rec.issuedAt || rec.createdAt;
+  for (const it of d.items || []) {
+    if (!(it.price > 0) || it.check === 'mismatch') continue; // şübhəli sətir bazaya düşmür
+    const nameKey = nameKeyOf(it.name);
+    await prisma.storePrice.upsert({
+      where: { receiptId_nameKey: { receiptId: rec.id, nameKey } },
+      update: {},
+      create: { receiptId: rec.id, barcode: it.barcode || null, nameKey, name: it.name, storeName: d.store?.objectName || null, voen: d.store?.voen || null, objectCode: d.store?.objectCode || null, unit: it.unit, unitPrice: it.price, observedAt: when },
+    }).catch(() => {});
+  }
 }
 
 async function readReceiptSource(source: any, fiscalHint?: string, blockType: 'image' | 'document' = 'image'): Promise<ReceiptData> {
@@ -136,42 +182,77 @@ export async function getReceipt(fiscalId: string) {
   const data = await readReceiptImage(img, 'image/jpeg', fiscalId);
   const issuedAt = data.date ? new Date(`${data.date}T${/^\d{2}:\d{2}(:\d{2})?$/.test(data.time || '') ? data.time : '00:00:00'}+04:00`) : null;
   try {
-    return await prisma.scannedReceipt.create({
+    const rec = await prisma.scannedReceipt.create({
       data: { fiscalId, storeName: data.store.objectName, voen: data.store.voen, total: data.total, issuedAt: issuedAt && !isNaN(issuedAt.getTime()) ? issuedAt : null, data: data as unknown as Prisma.InputJsonValue },
     });
+    await recordStorePrices(rec);
+    return rec;
   } catch {
     return prisma.scannedReceipt.findUniqueOrThrow({ where: { fiscalId } }); // paralel skan
   }
 }
 
-/** Hər məhsul üçün saytda oxşar elanlar (ən uyğun, sonra ən ucuz). */
-export async function matchItems(items: ReceiptItem[]) {
+const r2 = (n: number) => Math.round(n * 100) / 100;
+
+/**
+ * Hər məhsul üçün:
+ *   1) saytda EYNİ ŞTRİX-KODLU elanlar (dəqiq uyğunluq, ən ucuz əvvəl);
+ *   2) yoxdursa — ad oxşarlığı (təxmini);
+ *   3) digər mağazalardakı qiymətlər (başqa çeklərdən, son 90 gün).
+ * Çəki ilə satılan / daxili kodlar (20–29…) başqa mağaza ilə müqayisə edilmir.
+ */
+export async function matchItems(items: ReceiptItem[], excludeReceiptId?: number) {
   const now = new Date();
+  const since = new Date(Date.now() - 90 * 864e5);
+  const live = { status: 'APPROVED' as const, type: 'PRODUCT' as const, archivedAt: null, OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] };
+  const sel = { id: true, title: true, price: true, images: true, city: true, stock: true, barcode: true, businessObject: { select: { name: true } }, user: { select: { name: true } } };
   return Promise.all(items.map(async (it) => {
-    const words = searchWords(it.searchQuery || it.name).filter((w) => w.length >= 3).slice(0, 6);
-    if (!words.length) return { matches: [] as any[] };
-    const cands = await prisma.listing.findMany({
-      where: {
-        status: 'APPROVED', type: 'PRODUCT', archivedAt: null,
-        AND: [
-          { OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] },
-          { OR: words.map((w) => ({ title: { contains: w, mode: 'insensitive' as const } })) },
-        ],
-      },
-      select: { id: true, title: true, price: true, images: true, city: true, stock: true, businessObjectId: true, businessObject: { select: { name: true } }, user: { select: { name: true } } },
-      take: 40,
+    const code = it.barcode && !isRestrictedGtin(it.barcode) ? it.barcode : null;
+    let exact: any[] = [];
+    if (code) exact = await prisma.listing.findMany({ where: { ...live, barcode: code }, select: sel, orderBy: { price: 'asc' }, take: 4 });
+    let fuzzy: any[] = [];
+    if (!exact.length) {
+      const words = searchWords(it.searchQuery || it.name).filter((w) => w.length >= 3).slice(0, 6);
+      if (words.length) {
+        const cands = await prisma.listing.findMany({ where: { ...live, AND: [{ OR: words.map((w) => ({ title: { contains: w, mode: 'insensitive' as const } })) }] }, select: sel, take: 40 });
+        const need = Math.min(2, words.length);
+        fuzzy = cands.map((l) => ({ l, score: words.filter((w) => l.title.toLocaleLowerCase('az').includes(w)).length }))
+          .filter((x) => x.score >= need).sort((a, b) => b.score - a.score || a.l.price - b.l.price).slice(0, 4).map((x) => x.l);
+      }
+    }
+    const shape = (l: any, exactMatch: boolean) => ({
+      id: l.id, title: l.title, price: l.price, image: l.images?.[0] || null, city: l.city,
+      seller: l.businessObject?.name || l.user?.name || null, exact: exactMatch,
+      cheaperBy: it.price > 0 && l.price < it.price ? Math.round((1 - l.price / it.price) * 100) : 0,
+      diffTotal: it.price > 0 ? r2((it.price - l.price) * it.qty) : 0, // + → saytda ucuz
     });
-    const need = Math.min(2, words.length);
-    const scored = cands.map((l) => {
-      const t = l.title.toLocaleLowerCase('az');
-      return { l, score: words.filter((w) => t.includes(w)).length };
-    }).filter((x) => x.score >= need).sort((a, b) => b.score - a.score || a.l.price - b.l.price).slice(0, 4);
+    // Digər mağazalar — hər mağazadan ən son qiymət, ucuzdan bahaya.
+    const obs = code || !it.barcode
+      ? await prisma.storePrice.findMany({
+          where: { observedAt: { gte: since }, ...(excludeReceiptId ? { receiptId: { not: excludeReceiptId } } : {}), ...(code ? { barcode: code } : { nameKey: nameKeyOf(it.name) }) },
+          orderBy: { observedAt: 'desc' }, take: 50,
+        })
+      : [];
+    const byStore = new Map<string, any>();
+    for (const o of obs) { const k = `${o.voen || ''}|${o.storeName || ''}`; if (!byStore.has(k)) byStore.set(k, o); }
+    const otherStores = [...byStore.values()].sort((a, b) => a.unitPrice - b.unitPrice).slice(0, 4)
+      .map((o) => ({ store: o.storeName, price: o.unitPrice, observedAt: o.observedAt, exact: !!code, diff: r2(it.price - o.unitPrice) }));
     return {
-      matches: scored.map(({ l, score }) => ({
-        id: l.id, title: l.title, price: l.price, image: l.images?.[0] || null, city: l.city,
-        seller: l.businessObject?.name || l.user?.name || null, score,
-        cheaperBy: it.price > 0 && l.price < it.price ? Math.round((1 - l.price / it.price) * 100) : 0,
-      })),
+      matchType: exact.length ? 'barcode' : fuzzy.length ? 'name' : 'none',
+      restricted: !!(it.barcode && isRestrictedGtin(it.barcode)),
+      matches: (exact.length ? exact.map((l) => shape(l, true)) : fuzzy.map((l) => shape(l, false))),
+      otherStores,
     };
   }));
+}
+
+/** Çek üzrə yekun: çekdə ödənilən vs saytda (ən ucuz uyğun elanla) alınsaydı. */
+export function receiptTotals(items: ReceiptItem[], matched: { matches: any[] }[]) {
+  let paid = 0, matchedPaid = 0, site = 0, found = 0;
+  items.forEach((it, i) => {
+    paid += it.total;
+    const best = [...(matched[i]?.matches || [])].sort((a, b) => a.price - b.price)[0];
+    if (best) { found++; matchedPaid += it.total; site += best.price * it.qty; }
+  });
+  return { paid: r2(paid), found, matchedPaid: r2(matchedPaid), siteTotal: r2(site), saving: r2(matchedPaid - site) };
 }

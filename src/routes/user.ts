@@ -16,6 +16,7 @@ import { MIN_WINDOW_DAYS, MAX_WINDOW_DAYS, RETURN_WINDOW_DAYS } from '../service
 import { isValidMonths } from '../services/installment';
 import { visibilityOf } from '../services/listingVisibility';
 import { onProfileChanged } from '../services/proGroups';
+import { normalizeGtin } from '../services/gtin';
 import { SOCIAL_PLATFORMS as SOCIAL_PLATFORM_LIST, BIO_READABLE, validateSocialUrl, newVerifyCode, checkSocialCode, releaseSameHandle } from '../services/socialVerify';
 import fs from 'fs';
 import path from 'path';
@@ -574,6 +575,21 @@ router.get('/me/listings', adminAuth, async (req: AuthRequest, res: Response) =>
 // Create my listing — any logged-in user can post (PRODUCT or SERVICE).
 // If `city`/`location` aren't provided, falls back to the user's default
 // location from their profile so listings always carry where they're from.
+/**
+ * Elan ştrix-kodu: boşdursa null; doludursa yoxlama rəqəmi ilə GTIN olmalıdır.
+ * Eyni satıcının eyni ştrix-kodla İKİNCİ aktiv elanı olmur (qiymət müqayisəsi qarışmasın).
+ */
+async function barcodeFor(raw: any, userId: number, exceptId?: number): Promise<{ ok: true; value: string | null } | { ok: false; message: string }> {
+  if (raw === undefined) return { ok: true, value: undefined as any };
+  const str = String(raw ?? '').trim();
+  if (!str) return { ok: true, value: null };
+  const code = normalizeGtin(str);
+  if (!code) return { ok: false, message: 'Ştrix-kod düzgün deyil — qutudakı 8, 12, 13 və ya 14 rəqəmli kodu yazın (yoxlama rəqəmi uyğun gəlmir)' };
+  const dup = await prisma.listing.findFirst({ where: { userId, barcode: code, archivedAt: null, ...(exceptId ? { id: { not: exceptId } } : {}) }, select: { id: true, title: true } });
+  if (dup) return { ok: false, message: `Bu ştrix-kodla artıq elanınız var: «${dup.title}» (#${dup.id}) — onu yeniləyin` };
+  return { ok: true, value: code };
+}
+
 router.post('/me/listings', listingWriteLimiter, adminAuth, upload.array('images', 5), processImages, async (req: AuthRequest, res: Response) => {
   try {
     const { title, description, price, category, type, location, phone, condition, country, brand, stock, forVehicle, unit, unitValue, year, model, city, fuelType, paymentType, businessObjectId, attributes, listingMode, barter, forRent, bookable, bookingType, maxGuests, openTime, closeTime, deliveryMethod } = req.body;
@@ -595,6 +611,8 @@ router.post('/me/listings', listingWriteLimiter, adminAuth, upload.array('images
     if (type !== 'PRODUCT' && type !== 'SERVICE') {
       res.status(400).json({ success: false, message: 'Tip yalnız PRODUCT və ya SERVICE ola bilər' }); return;
     }
+    const bc = type === 'PRODUCT' ? await barcodeFor(req.body.barcode, req.adminId!) : { ok: true as const, value: null };
+    if (!bc.ok) { res.status(400).json({ success: false, message: bc.message }); return; }
 
     // Biznes obyekti seçilibsə — TƏSDİQLƏNMİŞ biznesə aid olmalıdır (kart üçün).
     let bizId: number | null = null;
@@ -643,6 +661,7 @@ router.post('/me/listings', listingWriteLimiter, adminAuth, upload.array('images
     const listing = await prisma.listing.create({
       data: {
         userId: req.adminId!, title, description, price: parseFloat(price),
+        barcode: bc.value ?? null,
         category, type, images, location: effectiveLocation, phone: phone || null,
         condition: condition || 'NEW',
         country: country || null,
@@ -737,6 +756,8 @@ router.put('/me/listings/:id', adminAuth, upload.array('images', 5), processImag
     }
     const { title, description, price, category, type, location, phone, condition, country, brand, stock, forVehicle, unit, unitValue, year, model, city, fuelType, paymentType, existingImages, attributes, barter, forRent, bookable, bookingType, maxGuests, openTime, closeTime, deliveryMethod } = req.body;
     const parsedAttrs = attributes !== undefined ? (() => { try { const o = JSON.parse(attributes); return o && typeof o === 'object' ? o : {}; } catch { return {}; } })() : undefined;
+    const bcUpd = await barcodeFor(req.body.barcode, req.adminId!, existing.id);
+    if (!bcUpd.ok) { res.status(400).json({ success: false, message: bcUpd.message }); return; }
 
     let nextImages: string[] | undefined;
     const isMultipart = (req.headers['content-type'] || '').includes('multipart/form-data');
@@ -762,6 +783,7 @@ router.put('/me/listings/:id', adminAuth, upload.array('images', 5), processImag
       where: { id: parseInt(req.params.id) },
       data: {
         ...(title !== undefined && { title }), ...(description !== undefined && { description }),
+        ...(req.body.barcode !== undefined && { barcode: bcUpd.value }),
         ...(price !== undefined && { price: parseFloat(price) }), ...(category !== undefined && { category }),
         ...(type !== undefined && { type }), ...(location !== undefined && { location }),
         ...(phone !== undefined && { phone }),
