@@ -1443,6 +1443,11 @@ enum ConsultationStatus {
   ACTIVE // sayğac işləyir
   PAUSED // peşəkar dayandırıb
   ENDED // vaxt bitib və ya bağlanıb
+  // ── Əvvəlcədən ödənilən TƏKLİF axını (flow = OFFER) ──
+  OFFERED // alıcı qiymət+müddət+mesaj yazıb ödəyib (pul platformada), peşəkarın cavabı gözlənilir — chat 🔒
+  COUNTERED // peşəkar öz qiymətini/müddətini təklif edib, alıcının cavabı gözlənilir
+  EXPIRED // 7 gün cavab gəlmədi (və ya şəxs qoşulmadı) — pul qaytarıldı
+  CANCELLED // alıcı geri götürdü və ya qarşı təklifi rədd etdi — pul qaytarıldı
 }
 
 // Peşəkarın "Rəy" təklifi — müddət + qiymət (profilə bağlı, məhsul elanı deyil).
@@ -1466,7 +1471,24 @@ model ConsultationOffer {
 model ConsultationSession {
   id              Int                @id @default(autoincrement())
   buyerId         Int
-  professionalId  Int
+  // OFFER axınında hədəf hələ platformada deyilsə (sosial profil / nömrə) boşdur —
+  // şəxs qoşulub hesabını təsdiqləyəndə doldurulur.
+  professionalId  Int?
+  flow            String             @default("REQUEST") // REQUEST (köhnə: əvvəl qəbul, sonra ödəniş) | OFFER (əvvəl ödəniş, sonra qəbul)
+  offerMessage    String? // alıcının ilk mesajı (təkliflə birlikdə)
+  targetSocial    String? // «instagram:ad» — platformada olmayan hədəf
+  targetPhoneKey  String? // son 9 rəqəm
+  targetName      String?
+  targetUrl       String?
+  targetAvatar    String?
+  expiresAt       DateTime? // bu tarixə qədər qəbul edilməsə pul qaytarılır
+  paidAmount      Float              @default(0) // platformada saxlanan (qaytarılmamış) məbləğ
+  counterPrice    Float?
+  counterMinutes  Int?
+  counterMessage  String?
+  counterAt       DateTime?
+  pendingTopUp    Float? // qarşı təklif baha çıxdı — alıcının ödəməli olduğu fərq
+  payments        ConsultationPayment[]
   offerId         Int?
   title           String?
   price           Float
@@ -1490,12 +1512,40 @@ model ConsultationSession {
   startedAt       DateTime?
   endedAt         DateTime?
   buyer           User               @relation("ConsultationBuyer", fields: [buyerId], references: [id], onDelete: Cascade)
-  professional    User               @relation("ConsultationProfessional", fields: [professionalId], references: [id], onDelete: Cascade)
+  professional    User?              @relation("ConsultationProfessional", fields: [professionalId], references: [id], onDelete: Cascade)
   offer           ConsultationOffer? @relation(fields: [offerId], references: [id], onDelete: SetNull)
   messages        Message[]
 
   @@index([buyerId])
   @@index([professionalId])
+  @@index([status, expiresAt])
+  @@index([targetSocial])
+  @@index([targetPhoneKey])
+}
+
+// Konsultasiyanın hər ödənişi ayrıca (ilkin + fərq + vaxt artırma) — qaytarma
+// hansı ödənişdən nə qədər geri veriləcəyini bilsin deyə.
+model ConsultationPayment {
+  id              Int                 @id @default(autoincrement())
+  sessionId       Int
+  amount          Float
+  purpose         String              @default("INITIAL") // INITIAL | TOPUP | EXTEND
+  provider        String?
+  ref             String?
+  gatewayOrderId  Int?
+  gatewayPassword String?
+  status          String              @default("PENDING") // PENDING | PAID | FAILED
+  refunded        Float               @default(0)
+  refundError     String?
+  // Şlüzə sorğu getdi, cavab gəlmədi — pul çıxmış ola bilər; avtomatik təkrar YOX, admin baxır.
+  needsReview     Boolean             @default(false)
+  paidAt          DateTime?
+  createdAt       DateTime            @default(now())
+  session         ConsultationSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([ref])
+  @@index([gatewayOrderId])
+  @@index([sessionId])
 }
 
 // ── Şikayət (profil / Rəy konsultasiyası) ─────────────────────────────────────

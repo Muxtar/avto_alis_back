@@ -145,6 +145,7 @@ type SocialRow = {
   key: string; platform: string; handle: string; url: string | null; name: string | null; avatar: string | null;
   senders: Map<number, number>; messages: number; consults: number; media: number;
   firstAt: Date; lastAt: Date; pending: number; deliveredTo: number | null; deliveredAt: Date | null; previews: string[];
+  offers: number; offerTotal: number; offerExpiresAt: Date | null;
 };
 async function socialRows(): Promise<SocialRow[]> {
   const list = await prisma.pendingInvite.findMany({ where: { social: { not: null } }, orderBy: { id: 'asc' }, take: 5000 });
@@ -154,7 +155,7 @@ async function socialRows(): Promise<SocialRow[]> {
     let r = rows.get(key);
     if (!r) {
       const [platform, handle] = key.split(':');
-      r = { key, platform, handle, url: i.targetUrl, name: i.targetName, avatar: i.targetAvatar, senders: new Map(), messages: 0, consults: 0, media: 0, firstAt: i.createdAt, lastAt: i.createdAt, pending: 0, deliveredTo: null, deliveredAt: null, previews: [] };
+      r = { key, platform, handle, url: i.targetUrl, name: i.targetName, avatar: i.targetAvatar, senders: new Map(), messages: 0, consults: 0, media: 0, firstAt: i.createdAt, lastAt: i.createdAt, pending: 0, deliveredTo: null, deliveredAt: null, previews: [], offers: 0, offerTotal: 0, offerExpiresAt: null };
       rows.set(key, r);
     }
     r.senders.set(i.senderId, (r.senders.get(i.senderId) || 0) + 1);
@@ -165,6 +166,28 @@ async function socialRows(): Promise<SocialRow[]> {
     if (i.targetName) r.name = i.targetName;
     if (!i.deliveredAt) { r.pending++; if (i.content && r.previews.length < 3) r.previews.push(i.content.slice(0, 160)); }
     else if (i.deliveredToId) { r.deliveredTo = i.deliveredToId; r.deliveredAt = i.deliveredAt; }
+  }
+  // Əvvəlcədən ödənilmiş Rəy təklifləri (pul platformada) — ən vacibləri, 7 günə qaytarılır.
+  const offers = await prisma.consultationSession.findMany({
+    where: { flow: 'OFFER', targetSocial: { not: null }, paymentStatus: { in: ['PAID', 'REFUND_PENDING'] } },
+    select: { targetSocial: true, targetName: true, targetUrl: true, targetAvatar: true, buyerId: true, price: true, status: true, professionalId: true, createdAt: true, expiresAt: true, startedAt: true },
+    take: 5000,
+  });
+  for (const o of offers) {
+    const key = o.targetSocial!;
+    let r = rows.get(key);
+    if (!r) {
+      const [platform, handle] = key.split(':');
+      r = { key, platform, handle, url: o.targetUrl, name: o.targetName, avatar: o.targetAvatar, senders: new Map(), messages: 0, consults: 0, media: 0, firstAt: o.createdAt, lastAt: o.createdAt, pending: 0, deliveredTo: null, deliveredAt: null, previews: [], offers: 0, offerTotal: 0, offerExpiresAt: null };
+      rows.set(key, r);
+    }
+    r.senders.set(o.buyerId, (r.senders.get(o.buyerId) || 0) + 1);
+    if (o.createdAt > r.lastAt) r.lastAt = o.createdAt;
+    if (o.professionalId) { r.deliveredTo = o.professionalId; r.deliveredAt = o.startedAt || o.createdAt; continue; }
+    if (o.status === 'OFFERED' || o.status === 'COUNTERED') {
+      r.offers++; r.offerTotal = Math.round((r.offerTotal + o.price) * 100) / 100; r.pending++;
+      if (o.expiresAt && (!r.offerExpiresAt || o.expiresAt < r.offerExpiresAt)) r.offerExpiresAt = o.expiresAt;
+    }
   }
   return [...rows.values()];
 }
@@ -193,6 +216,7 @@ router.get('/admin/social-invites', requirePermission('outreach'), async (req: A
         key: r.key, platform: r.platform, handle: r.handle, url: r.url, name: r.name, avatar: r.avatar,
         senders: [...r.senders.entries()].map(([id, count]) => ({ id, count, name: uById.get(id)?.name || `#${id}`, phone: uById.get(id)?.phone || null })),
         messages: r.messages, consults: r.consults, media: r.media, pending: r.pending,
+        offers: r.offers, offerTotal: r.offerTotal, offerExpiresAt: r.offerExpiresAt,
         firstAt: r.firstAt, lastAt: r.lastAt, previews: r.previews, requested: reqCount.get(r.key) || 0,
         state, notice: n ? { notifiedAt: n.notifiedAt, by: n.notifiedByName, times: n.timesNotified, note: n.note } : null,
         deliveredTo: r.deliveredTo ? { id: r.deliveredTo, name: uById.get(r.deliveredTo)?.name || null, at: r.deliveredAt } : null,
@@ -203,7 +227,8 @@ router.get('/admin/social-invites', requirePermission('outreach'), async (req: A
     const items = all
       .filter((x) => status === 'ALL' || x.state === status)
       .filter((x) => !q || [x.name, x.handle, x.platform, ...x.senders.map((s) => s.name)].some((v) => String(v || '').toLowerCase().includes(q)))
-      .sort((a, b) => (b.requested - a.requested) || (+new Date(b.lastAt) - +new Date(a.lastAt)));
+      // Ödənişli təklif gözləyən profillər ən yuxarıda (7 günə pul qaytarılır), sonra xüsusi müraciətlər.
+      .sort((a, b) => (b.offers - a.offers) || (b.requested - a.requested) || (+new Date(b.lastAt) - +new Date(a.lastAt)));
     res.json({ success: true, items, counts });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
@@ -214,7 +239,9 @@ router.post('/admin/social-invites/notified', requirePermission('outreach'), asy
   try {
     const key = String(req.body?.key || '').toLowerCase();
     const note = String(req.body?.note || '').trim().slice(0, 500) || null;
-    const invites = await prisma.pendingInvite.findMany({ where: { social: key, deliveredAt: null }, select: { senderId: true, targetName: true, targetUrl: true } });
+    const inv = await prisma.pendingInvite.findMany({ where: { social: key, deliveredAt: null }, select: { senderId: true, targetName: true } });
+    const offs = await prisma.consultationSession.findMany({ where: { flow: 'OFFER', targetSocial: key, professionalId: null, status: { in: ['OFFERED', 'COUNTERED'] }, paymentStatus: 'PAID' }, select: { buyerId: true, targetName: true } });
+    const invites = [...inv, ...offs.map((o) => ({ senderId: o.buyerId, targetName: o.targetName }))];
     if (!invites.length) { res.status(404).json({ success: false, message: 'Bu profilə gözləyən mesaj yoxdur' }); return; }
     const by = req.adminName || 'Admin';
     await prisma.socialTargetNotice.upsert({

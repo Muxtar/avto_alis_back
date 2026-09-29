@@ -3,11 +3,15 @@ import { deliverPendingInvites } from '../services/pendingInvites';
 
 // Admin xəbər verməli olduğu sosial profillərin sayı (gözləyən mesajı olan, sonuncu mesajdan sonra xəbər verilməyən).
 async function pendingSocialTargets(): Promise<number> {
-  const rows = await prisma.pendingInvite.groupBy({ by: ['social'], where: { social: { not: null }, deliveredAt: null }, _max: { createdAt: true } });
-  if (!rows.length) return 0;
-  const notices = await prisma.socialTargetNotice.findMany({ where: { social: { in: rows.map((r) => r.social!) } } });
+  const inv = await prisma.pendingInvite.groupBy({ by: ['social'], where: { social: { not: null }, deliveredAt: null }, _max: { createdAt: true } });
+  const off = await prisma.consultationSession.groupBy({ by: ['targetSocial'], where: { flow: 'OFFER', targetSocial: { not: null }, professionalId: null, status: { in: ['OFFERED', 'COUNTERED'] }, paymentStatus: 'PAID' }, _max: { createdAt: true } });
+  const last = new Map<string, Date>();
+  for (const r of inv) last.set(r.social!, r._max.createdAt!);
+  for (const r of off) { const k = r.targetSocial!; const d = r._max.createdAt!; if (!last.has(k) || last.get(k)! < d) last.set(k, d); }
+  if (!last.size) return 0;
+  const notices = await prisma.socialTargetNotice.findMany({ where: { social: { in: [...last.keys()] } } });
   const n = new Map(notices.map((x) => [x.social, x.notifiedAt]));
-  return rows.filter((r) => { const at = n.get(r.social!); return !at || at < r._max.createdAt!; }).length;
+  return [...last.entries()].filter(([k, d]) => { const at = n.get(k); return !at || at < d; }).length;
 }
 import { Router, Response } from 'express';
 import { PrismaClient, Prisma, UserType } from '@prisma/client';

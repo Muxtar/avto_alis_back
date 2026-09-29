@@ -51,6 +51,8 @@ export async function deliverPendingInvites(userId: number): Promise<number> {
   const key = phoneKeyOf(user.phone);
   const links = await prisma.socialLink.findMany({ where: { userId, verified: true }, select: { platform: true, url: true } });
   const socialKeys = links.map((l) => socialKeyOf(l.platform, l.url)).filter((k): k is string => !!k);
+  // Əvvəlcədən ödənilmiş Rəy təklifləri (nömrəyə / sosial hesaba) — indi ona çatır.
+  await import('./consultOffers').then((m) => m.claimOffers(userId, { phoneKey: key, social: socialKeys })).catch((e) => console.error('[invites] claimOffers:', e?.message));
   const or: any[] = [];
   if (key.length >= 7) or.push({ phoneKey: key });
   if (socialKeys.length) or.push({ social: { in: socialKeys } });

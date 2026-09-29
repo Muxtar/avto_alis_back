@@ -1,5 +1,6 @@
 // Satıcı təsdiqi axını — kartla ödənilmiş sifariş satıcı təsdiqini gözləyir.
 // Satıcı müəyyən müddət ərzində təsdiqləməzsə pul AVTOMATİK alıcıya qaytarılır.
+import { expireOffers as expireConsultOffers } from './consultOffers';
 import { PrismaClient } from '@prisma/client';
 import { refundOrderSafe, retryFailedRefunds, unstickPendingRefunds, restoreStockForOrder, syncCommittedStock } from './refunds';
 import { recordSettlement, releaseHeldLedgers } from './settlement';
@@ -275,6 +276,8 @@ export function startOrderExpiryJob() {
       .catch(() => {});
     // Vaxtı bitmiş konsultasiya seanslarını bağla (rəy/şikayət açılsın).
     endExpiredConsultations().catch(() => {});
+    // Əvvəlcədən ödənilmiş Rəy təklifləri: 7 gün cavabsız → pul qaytarılır.
+    expireConsultOffers().catch((e) => console.error('[orderExpiry] expireConsultOffers:', e?.message));
     // Müddəti bitmiş elanların sahiblərinə bildiriş (yeniləmək üçün).
     notifyExpiredListings().catch(() => {});
     // İadə/mübahisə müddətləri: cavabsız satıcı → avtomatik təsdiq, göndərilməyən

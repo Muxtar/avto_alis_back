@@ -94,7 +94,9 @@ router.get('/payment/callback', async (req: Request, res: Response) => {
     }
     // Əvvəlki vəziyyəti bilmək üçün order-ləri item-lərlə birlikdə əvvəlcədən oxu (idempotentlik).
     const orders = await prisma.order.findMany({ where: { gatewayOrderId }, include: { items: true } });
-    const consultCount = await prisma.consultationSession.count({ where: { gatewayOrderId } });
+    // Təklif ödənişləri ayrıca cədvəldədir (sessiyanın son referansı yenisi ilə əvəz oluna bilər).
+    const consultCount = await prisma.consultationSession.count({ where: { gatewayOrderId } })
+      + await prisma.consultationPayment.count({ where: { gatewayOrderId } });
     // Biznes yaratma haqqı da bu callback-dən keçir (sifariş deyil, ayrı cədvəl).
     const isFee = await isBusinessFeeRef({ gatewayOrderId });
     if (orders.length === 0 && consultCount === 0 && !isFee) {
@@ -167,7 +169,8 @@ router.get('/payment/yigim/callback', async (req: Request, res: Response) => {
   if (!reference) { res.status(400).send('reference required'); return; }
   try {
     const order = await prisma.order.findFirst({ where: { gatewayRef: reference }, select: { id: true } });
-    const consultCount = await prisma.consultationSession.count({ where: { gatewayRef: reference } });
+    const consultCount = await prisma.consultationSession.count({ where: { gatewayRef: reference } })
+      + await prisma.consultationPayment.count({ where: { ref: reference } });
     const isFee = await isBusinessFeeRef({ gatewayRef: reference });
     if (!order && consultCount === 0 && !isFee) { res.status(404).send('not found'); return; }
 

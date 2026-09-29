@@ -38,6 +38,7 @@ router.post('/complaints', complaintLimiter, adminAuth, upload.array('images', M
     if (consultationId) {
       const s = await prisma.consultationSession.findUnique({ where: { id: consultationId } });
       if (!s || s.buyerId !== req.adminId) { res.status(403).json({ success: false, message: 'Bu seansdan şikayət edə bilməzsiniz' }); return; }
+      if (!s.professionalId) { res.status(400).json({ success: false, message: 'Bu təklifin qarşı tərəfi hələ platformada deyil' }); return; }
       targetUserId = s.professionalId;
       const ageDays = (Date.now() - new Date(s.createdAt).getTime()) / 86400000;
       if (ageDays > COMPLAINT_WINDOW_DAYS) { res.status(400).json({ success: false, message: 'Şikayət müddəti bitib (7 gün)' }); return; }

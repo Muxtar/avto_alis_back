@@ -694,7 +694,7 @@ router.get('/messages/conversations', adminAuth, async (req: AuthRequest, res: R
     const paid = Array.from(convMap.values()).filter((c) => c.segment === 'PAID');
     if (paid.length) {
       const ids = paid.map((c) => c.lastMessage.consultationId).filter(Boolean);
-      const sess = await prisma.consultationSession.findMany({ where: { id: { in: ids } }, select: { id: true, title: true, status: true, price: true, professionalId: true } });
+      const sess = await prisma.consultationSession.findMany({ where: { id: { in: ids } }, select: { id: true, title: true, status: true, price: true, professionalId: true, flow: true, expiresAt: true, paymentStatus: true, counterPrice: true, counterMinutes: true, durationSeconds: true } });
       const byId = new Map(sess.map((x) => [x.id, x]));
       for (const c of paid) { const x = byId.get(c.lastMessage.consultationId); if (x) c.consultation = { ...x, role: x.professionalId === userId ? 'professional' : 'buyer' }; }
     }
