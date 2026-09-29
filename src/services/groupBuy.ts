@@ -75,7 +75,9 @@ export async function groupQty(groupBuyId: number): Promise<number> {
 // ─────────────────────────── PƏNCƏRƏ İDARƏSİ ───────────────────────────
 
 /** Elanda birgə alış açıqdırmı? (satıcı müddət seçib + pillə var + stok > 1) */
-export function groupBuyEnabled(listing: { stock: number; groupBuyDays: number | null; priceTiers: any[] }): boolean {
+export function groupBuyEnabled(listing: { type?: string; stock: number; groupBuyDays: number | null; priceTiers: any[] }): boolean {
+  // Yalnız MƏHSUL — xidmət elanında birgə alış olmur.
+  if (listing.type && listing.type !== 'PRODUCT') return false;
   return !!listing.groupBuyDays && listing.groupBuyDays > 0 && listing.stock > 1 && (listing.priceTiers?.length || 0) > 0;
 }
 
@@ -97,7 +99,7 @@ export async function ensureActiveGroup(listingId: number, buyerId: number, tx?:
   const db = (tx || prisma) as Prisma.TransactionClient;
   const listing = await db.listing.findUnique({
     where: { id: listingId },
-    select: { id: true, stock: true, groupBuyDays: true, priceTiers: { select: { id: true } } },
+    select: { id: true, type: true, stock: true, groupBuyDays: true, priceTiers: { select: { id: true } } },
   });
   if (!listing || !groupBuyEnabled(listing as any)) return null;
 

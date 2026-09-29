@@ -21,7 +21,7 @@ router.get('/listings/:id/price', async (req: Request, res: Response) => {
     const qty = Math.max(1, parseInt(String(req.query.qty || '1')) || 1);
     const listing = await prisma.listing.findUnique({
       where: { id },
-      select: { id: true, price: true, stock: true, groupBuyDays: true, priceTiers: { orderBy: { minQty: 'asc' } } },
+      select: { id: true, type: true, price: true, stock: true, groupBuyDays: true, priceTiers: { orderBy: { minQty: 'asc' } } },
     });
     if (!listing) { res.status(404).json({ success: false, message: 'Elan tapılmadı' }); return; }
     const tiers: Tier[] = listing.priceTiers.map((t) => ({ minQty: t.minQty, price: t.price }));
@@ -46,7 +46,7 @@ router.get('/listings/:id/group-buy', async (req: Request, res: Response) => {
     const id = parseInt(String(req.params.id));
     const listing = await prisma.listing.findUnique({
       where: { id },
-      select: { id: true, price: true, stock: true, groupBuyDays: true, priceTiers: { orderBy: { minQty: 'asc' } } },
+      select: { id: true, type: true, price: true, stock: true, groupBuyDays: true, priceTiers: { orderBy: { minQty: 'asc' } } },
     });
     if (!listing) { res.status(404).json({ success: false, message: 'Elan tapılmadı' }); return; }
     const enabled = groupBuyEnabled(listing as any);

@@ -726,6 +726,8 @@ router.post('/me/listings', listingWriteLimiter, adminAuth, upload.array('images
     // endirimi alır. Şərt: stok > 1 və ən azı bir pillə.
     const gbDays = groupBuyDaysOf(req.body?.groupBuyDays);
     if (gbDays) {
+      // Birgə alış yalnız MƏHSUL elanında — xidmətin stoku/ədəd pilləsi yoxdur.
+      if (listing.type !== 'PRODUCT') { res.status(400).json({ success: false, message: 'Birgə alış yalnız məhsul elanlarında mümkündür, xidmətdə yox' }); return; }
       if (!tv.tiers.length) { res.status(400).json({ success: false, message: 'Birgə alış üçün ən azı bir say-qiymət pilləsi lazımdır' }); return; }
       if (listing.stock <= 1) { res.status(400).json({ success: false, message: 'Birgə alış üçün stok 1-dən çox olmalıdır' }); return; }
       // Endirim fərqi kartla qaytarılır — ona görə elan kartla alına bilməlidir (VÖEN).
@@ -873,9 +875,15 @@ router.put('/me/listings/:id', adminAuth, upload.array('images', 5), processImag
       }
       tierCount = v.tiers.length;
     }
+    // Elan xidmətə çevrilibsə birgə alış söndürülür (yalnız məhsulda olur).
+    if (listing.type !== 'PRODUCT' && (listing as any).groupBuyDays) {
+      await prisma.listing.update({ where: { id: listing.id }, data: { groupBuyDays: null } });
+      (listing as any).groupBuyDays = null;
+    }
     // Birgə alış pəncərəsi. 0 və ya boş → yeni pəncərə açılmır.
     if (req.body?.groupBuyDays !== undefined) {
       const gbDays = groupBuyDaysOf(req.body.groupBuyDays);
+      if (gbDays && listing.type !== 'PRODUCT') { res.status(400).json({ success: false, message: 'Birgə alış yalnız məhsul elanlarında mümkündür, xidmətdə yox' }); return; }
       if (gbDays && !tierCount) { res.status(400).json({ success: false, message: 'Birgə alış üçün ən azı bir say-qiymət pilləsi lazımdır' }); return; }
       if (gbDays && listing.stock <= 1) { res.status(400).json({ success: false, message: 'Birgə alış üçün stok 1-dən çox olmalıdır' }); return; }
       if (gbDays && !listing.businessId && !listing.businessObjectId) {
