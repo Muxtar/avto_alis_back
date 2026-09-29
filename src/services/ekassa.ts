@@ -11,6 +11,7 @@ import { PrismaClient, Prisma } from '@prisma/client';
 import { searchWords } from './searchTerms';
 import { ocrImage, parseReceiptText } from './receiptOcr';
 import { isRestrictedGtin } from './gtin';
+import { agentOnline, fetchViaAgent } from './ekassaAgent';
 
 const prisma = new PrismaClient();
 const EKASSA_DOC_URL = 'https://monitoring.e-kassa.gov.az/pks-monitoring/2.0.0/documents/';
@@ -65,6 +66,15 @@ let portalDownUntil = 0;
 export const portalLikelyDown = () => Date.now() < portalDownUntil;
 
 export async function fetchReceiptImage(fiscalId: string): Promise<Buffer> {
+  // 1) Bakıdakı agent qoşuludursa — çek onun üzərindən (tam avtomatik).
+  if (agentOnline()) {
+    const r = await fetchViaAgent(fiscalId).catch((e) => { console.error('[ekassa] agent:', e.message); return null; });
+    if (r) {
+      if (r.status === 404 || r.status === 209) throw new Error('Kassa çeki tapılmadı. Yeni vurulmuş çek portalda bir az gec görünə bilər; 7 gün ərzində tapılmasa Dövlət Vergi Xidmətinə müraciət edin.');
+      if (r.status === 200 && r.type.startsWith('image/') && r.body.length >= 2000) return r.body;
+      console.error('[ekassa] agent bad result', r.status, r.type, r.body.length);
+    }
+  }
   if (portalLikelyDown()) throw new PortalUnreachable('e-kassa portalı əlçatan deyil');
   // İki cəhd — portal bəzən ilk qoşulmada gecikir.
   let res: Response | null = null;

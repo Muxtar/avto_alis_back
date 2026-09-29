@@ -1,5 +1,5 @@
 // E-KASSA ÇEKLƏRİ — QR ilə çek oxut, məhsulları saytda tap. Məntiq: services/ekassa.ts.
-import { Router, Response } from 'express';
+import express, { Router, Response } from 'express';
 import { PrismaClient, Prisma } from '@prisma/client';
 import crypto from 'crypto';
 import fs from 'fs';
@@ -7,6 +7,7 @@ import { adminAuth, AuthRequest } from '../middleware/auth';
 import { docUpload } from '../middleware/upload';
 import { processImages } from '../middleware/imageProcess';
 import { receiptLimiter } from '../middleware/rateLimiter';
+import { agentEnabled, agentKeyOk, agentOnline, agentLastSeen, nextJob, completeJob } from '../services/ekassaAgent';
 import { parseFiscalId, getReceipt, matchItems, receiptTotals, recordStorePrices, readReceiptImage, readReceiptPdf, PortalUnreachable, type ReceiptData } from '../services/ekassa';
 
 const router = Router();
@@ -36,7 +37,7 @@ router.post('/receipts/scan', receiptLimiter, adminAuth, async (req: AuthRequest
     } catch (e: any) {
       if (e instanceof PortalUnreachable) {
         // QR oxundu, amma portal xaricdən əlçatan deyil — çekin fotosu ilə davam (fiskal ID saxlanılır).
-        res.status(409).json({ success: false, code: 'PORTAL_DOWN', fiscalId, message: 'QR oxundu ✓ — indi çekin tam şəklini çəkin, məhsullar şəkildən oxunacaq.' });
+        res.status(409).json({ success: false, code: 'PORTAL_DOWN', fiscalId, message: 'QR oxundu ✓ — e-kassa portalı yalnız Azərbaycan IP-lərinə açıqdır və Bakı agenti hazırda qoşulu deyil. Çeki e-kassadan yükləyib seçin.' });
         return;
       }
       throw e;
@@ -71,6 +72,19 @@ router.post('/receipts/scan-photo', receiptLimiter, adminAuth, docUpload.single(
 });
 
 // Diaqnostika (açıq, sirr yoxdur): server e-kassa portalına çata bilirmi, AI açarı qoyulubmu.
+// ── Bakı agenti (tools/ekassa-agent) — long-poll ilə iş götürür, çek şəklini qaytarır ──
+router.get('/ekassa-agent/next', async (req, res: Response) => {
+  if (!agentKeyOk(req.headers['x-agent-key'])) { res.status(401).end(); return; }
+  const id = await nextJob();
+  if (id) res.json({ fiscalId: id }); else res.status(204).end();
+});
+router.post('/ekassa-agent/result/:fiscalId', express.raw({ type: () => true, limit: '10mb' }), (req, res: Response) => {
+  if (!agentKeyOk(req.headers['x-agent-key'])) { res.status(401).end(); return; }
+  const status = Number(req.headers['x-ekassa-status']) || 0;
+  const ok = completeJob(String(req.params.fiscalId), { status, type: String(req.headers['content-type'] || ''), body: Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0) });
+  res.json({ ok });
+});
+
 router.get('/receipts/diag', async (_req, res: Response) => {
   const started = Date.now();
   let portal: any = { ok: false };
@@ -80,7 +94,7 @@ router.get('/receipts/diag', async (_req, res: Response) => {
   } catch (e: any) {
     portal = { ok: false, error: e?.name, code: e?.cause?.code || null, message: String(e?.cause?.message || e?.message || '').slice(0, 160) };
   }
-  res.json({ portal: { ...portal, ms: Date.now() - started }, ai: { configured: !!process.env.ANTHROPIC_API_KEY }, node: process.version });
+  res.json({ portal: { ...portal, ms: Date.now() - started }, agent: { enabled: agentEnabled(), online: agentOnline(), lastSeen: agentLastSeen() ? new Date(agentLastSeen()).toISOString() : null }, ai: { configured: !!process.env.ANTHROPIC_API_KEY }, node: process.version });
 });
 
 // Çeklərim.
