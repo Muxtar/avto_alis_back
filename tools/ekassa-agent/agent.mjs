@@ -31,18 +31,19 @@ async function handle(id) {
 }
 
 log('e-kassa agenti işləyir →', API);
-let fails = 0;
+let fails = 0, connected = false;
 for (;;) {
   try {
     const r = await fetch(`${API}/ekassa-agent/next`, { headers: H, signal: AbortSignal.timeout(40000) });
-    if (r.status === 401) { log('Açar səhvdir (401) — AGENT_KEY Railway-dəki EKASSA_AGENT_KEY ilə eyni olmalıdır'); await sleep(60000); continue; }
+    if (r.status === 401) { log('Açar səhvdir (401) — AGENT_KEY Railway-dəki EKASSA_AGENT_KEY ilə eyni olmalıdır'); connected = false; await sleep(60000); continue; }
+    if (!connected) { connected = true; log('✓ serverə qoşuldu — çek gözlənilir'); }
     fails = 0;
     if (r.status === 200) {
       const { fiscalId } = await r.json();
       if (FISCAL_RE.test(fiscalId || '')) handle(fiscalId); // paralel — növbəti işi gözləmədən götür
     }
   } catch (e) {
-    fails++; log('serverə qoşulmaq alınmadı:', e?.cause?.code || e?.message);
+    fails++; connected = false; log('serverə qoşulmaq alınmadı:', e?.cause?.code || e?.message);
     await sleep(Math.min(30000, 1000 * 2 ** Math.min(fails, 5)));
   }
 }
