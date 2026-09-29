@@ -17,6 +17,7 @@ import { isValidMonths } from '../services/installment';
 import { visibilityOf } from '../services/listingVisibility';
 import { onProfileChanged } from '../services/proGroups';
 import { normalizeGtin } from '../services/gtin';
+import { deliverPendingInvites } from '../services/pendingInvites';
 import { SOCIAL_PLATFORMS as SOCIAL_PLATFORM_LIST, BIO_READABLE, validateSocialUrl, newVerifyCode, checkSocialCode, releaseSameHandle } from '../services/socialVerify';
 import fs from 'fs';
 import path from 'path';
@@ -1121,6 +1122,8 @@ router.post('/me/social', adminAuth, async (req: AuthRequest, res: Response) => 
 async function markSocialVerified(id: number, method: string) {
   const link = await prisma.socialLink.update({ where: { id }, data: { verified: true, verifyMethod: method, verifiedAt: new Date(), reviewRequestedAt: null, lastCheckNote: null } });
   await releaseSameHandle(link);
+  // Bu hesaba (chat axtarışında tapılıb) əvvəlcədən yazılmış mesajlar indi çatır.
+  await deliverPendingInvites(link.userId).catch((e) => console.error('[invites]', e?.message));
   return link;
 }
 

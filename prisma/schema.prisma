@@ -1599,8 +1599,13 @@ model Contact {
 model PendingInvite {
   id              Int       @id @default(autoincrement())
   senderId        Int
-  phone           String // göndərənin yazdığı format (göstəriş)
-  phoneKey        String // son 9 rəqəm — uyğunlaşdırma açarı
+  // Hədəf ya NÖMRƏ, ya da SOSİAL HESAB (chat axtarışında internetdə tapılan profil).
+  phone           String? // göndərənin yazdığı format (göstəriş)
+  phoneKey        String? // son 9 rəqəm — uyğunlaşdırma açarı
+  social          String? // «facebook:muxtar.bayramov» — həmin hesabı TƏSDİQLƏYƏN istifadəçiyə çatır
+  targetUrl       String?
+  targetName      String?
+  targetAvatar    String?
   kind            String    @default("MESSAGE") // MESSAGE | CONSULTATION
   content         String
   durationMinutes Int? // CONSULTATION: istənilən müddət
@@ -1610,6 +1615,7 @@ model PendingInvite {
   sender          User      @relation("PendingInvitesSent", fields: [senderId], references: [id], onDelete: Cascade)
 
   @@index([phoneKey, deliveredAt])
+  @@index([social, deliveredAt])
   @@index([senderId, phoneKey])
 }
 

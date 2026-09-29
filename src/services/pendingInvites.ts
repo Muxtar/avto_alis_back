@@ -5,6 +5,7 @@
 // ilkin yazılma vaxtı saxlanılır.
 import { PrismaClient } from '@prisma/client';
 import { emitToUser } from './callSignaling';
+import { handleOf } from './socialVerify';
 
 const prisma = new PrismaClient();
 
@@ -13,12 +14,37 @@ export const phoneKeyOf = (phone: string | null | undefined) => String(phone || 
 
 export const DEFAULT_CONSULT_MIN = 30;
 
+// Sosial hesab açarı: «facebook:muxtar.bayramov». Axtarış nəticəsi (x) və profil
+// linki (twitter) eyni platforma sayılır; post/qrup/səhifə linkləri qəbul edilmir.
+const SOCIAL_ALIASES: Record<string, string> = { x: 'twitter', fb: 'facebook', ig: 'instagram' };
+const SOCIAL_OK = new Set(['facebook', 'instagram', 'linkedin', 'twitter', 'tiktok', 'youtube', 'telegram']);
+const NOT_A_PROFILE = new Set(['p', 'reel', 'reels', 'tv', 'stories', 'explore', 'watch', 'groups', 'events', 'pages', 'photo', 'photos',
+  'video', 'videos', 'posts', 'status', 'share', 'permalink.php', 'profile.php', 'shorts', 'playlist', 'results', 'hashtag', 'search',
+  'jobs', 'feed', 'pulse', 'story', 'login', 'home', 'people', 'public']);
+export function socialKeyOf(platform: string, url: string): string | null {
+  const p = SOCIAL_ALIASES[String(platform || '').toLowerCase()] || String(platform || '').toLowerCase();
+  if (!SOCIAL_OK.has(p)) return null;
+  const h = handleOf(url);
+  if (!h || NOT_A_PROFILE.has(h) || !/^[a-z0-9._-]{2,80}$/.test(h)) return null;
+  return `${p}:${h}`;
+}
+
+/**
+ * Gözləyənləri çatdır: (1) istifadəçinin OTP ilə təsdiqlənmiş NÖMRƏSİNƏ yazılanlar,
+ * (2) onun TƏSDİQLƏNMİŞ sosial hesablarına (bio kodu / admin) yazılanlar.
+ * Profil tamamlananda və sosial hesab təsdiqlənəndə çağırılır; təkrar çağırış zərərsizdir.
+ */
 export async function deliverPendingInvites(userId: number): Promise<number> {
   const user = await prisma.user.findUnique({ where: { id: userId }, select: { id: true, name: true, phone: true, profileComplete: true } });
   if (!user?.profileComplete) return 0;
   const key = phoneKeyOf(user.phone);
-  if (key.length < 7) return 0;
-  const invites = await prisma.pendingInvite.findMany({ where: { phoneKey: key, deliveredAt: null }, orderBy: { id: 'asc' } });
+  const links = await prisma.socialLink.findMany({ where: { userId, verified: true }, select: { platform: true, url: true } });
+  const socialKeys = links.map((l) => socialKeyOf(l.platform, l.url)).filter((k): k is string => !!k);
+  const or: any[] = [];
+  if (key.length >= 7) or.push({ phoneKey: key });
+  if (socialKeys.length) or.push({ social: { in: socialKeys } });
+  if (!or.length) return 0;
+  const invites = await prisma.pendingInvite.findMany({ where: { deliveredAt: null, OR: or }, orderBy: { id: 'asc' } });
   if (!invites.length) return 0;
 
   const blocks = await prisma.blockedUser.findMany({

@@ -1,4 +1,5 @@
 import { releaseSameHandle } from '../services/socialVerify';
+import { deliverPendingInvites } from '../services/pendingInvites';
 import { Router, Response } from 'express';
 import { PrismaClient, Prisma, UserType } from '@prisma/client';
 import { approveReturn, finalizeReturnRefund, rejectReturn } from '../services/returnFlow';
@@ -2741,7 +2742,7 @@ router.post('/admin/social-links/:id/:action', requirePermission('social'), asyn
       body: link.verified ? `${link.platform} hesabınız profilinizdə təsdiqli görünür. Kodu biodan silə bilərsiniz.` : `${link.platform}: ${link.lastCheckNote}`,
       link: '/profile#social',
     } }).catch(() => {});
-    if (link.verified) await releaseSameHandle(link);
+    if (link.verified) { await releaseSameHandle(link); await deliverPendingInvites(link.userId).catch(() => {}); }
     pushLive(link.userId, { kind: 'social', id: link.id, status: link.verified ? 'VERIFIED' : 'REJECTED' });
     res.json({ success: true, link });
   } catch (error: any) {
