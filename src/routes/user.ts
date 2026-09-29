@@ -940,6 +940,9 @@ router.post('/me/listings/bulk', bulkLimiter, adminAuth, async (req: AuthRequest
     const expiresAt = new Date(Date.now() + 20 * 24 * 60 * 60 * 1000);
     const created: { index: number; id: number; externalId?: string }[] = [];
     const errors: { index: number; message: string; externalId?: string }[] = [];
+    // Barkod könüllüdür: səhvdirsə və ya təkrardırsa məhsul yenə yaradılır, barkodsuz — xəbərdarlıq qayıdır.
+    const warnings: { index: number; message: string; externalId?: string }[] = [];
+    const seenCodes = new Set<string>();
 
     for (let i = 0; i < items.length; i++) {
       const it = items[i];
@@ -947,6 +950,13 @@ router.post('/me/listings/bulk', bulkLimiter, adminAuth, async (req: AuthRequest
         if (!it?.title || !it?.price || !it?.category) {
           errors.push({ index: i, message: 'title, price, category tələb olunur', externalId: it?.externalId });
           continue;
+        }
+        let barcode: string | null = null;
+        if (it.type !== 'SERVICE' && it.barcode != null && String(it.barcode).trim()) {
+          const bc = await barcodeFor(it.barcode, req.adminId!);
+          if (!bc.ok) warnings.push({ index: i, message: bc.message, externalId: it.externalId });
+          else if (bc.value && seenCodes.has(bc.value)) warnings.push({ index: i, message: 'Bu ştrix-kod sorğuda təkrarlanır — barkodsuz yaradıldı', externalId: it.externalId });
+          else { barcode = bc.value; if (barcode) seenCodes.add(barcode); }
         }
         const listing = await prisma.listing.create({
           data: {
@@ -964,6 +974,7 @@ router.post('/me/listings/bulk', bulkLimiter, adminAuth, async (req: AuthRequest
             year: it.year ? parseInt(String(it.year)) : null,
             city: it.city ? String(it.city) : null,
             forVehicle: it.forVehicle ? String(it.forVehicle) : null,
+            barcode,
             businessId: bizId,
             businessObjectId: bizObjId,
             expiresAt,
@@ -976,7 +987,7 @@ router.post('/me/listings/bulk', bulkLimiter, adminAuth, async (req: AuthRequest
       }
     }
     if (created.length) pushAdmins('listing', { toast: `${created.length} yeni elan təsdiq gözləyir` });
-    res.json({ success: true, created, errors, total: items.length });
+    res.json({ success: true, created, errors, warnings, total: items.length });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }
