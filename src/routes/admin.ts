@@ -1,5 +1,14 @@
 import { releaseSameHandle } from '../services/socialVerify';
 import { deliverPendingInvites } from '../services/pendingInvites';
+
+// Admin xəbər verməli olduğu sosial profillərin sayı (gözləyən mesajı olan, sonuncu mesajdan sonra xəbər verilməyən).
+async function pendingSocialTargets(): Promise<number> {
+  const rows = await prisma.pendingInvite.groupBy({ by: ['social'], where: { social: { not: null }, deliveredAt: null }, _max: { createdAt: true } });
+  if (!rows.length) return 0;
+  const notices = await prisma.socialTargetNotice.findMany({ where: { social: { in: rows.map((r) => r.social!) } } });
+  const n = new Map(notices.map((x) => [x.social, x.notifiedAt]));
+  return rows.filter((r) => { const at = n.get(r.social!); return !at || at < r._max.createdAt!; }).length;
+}
 import { Router, Response } from 'express';
 import { PrismaClient, Prisma, UserType } from '@prisma/client';
 import { approveReturn, finalizeReturnRefund, rejectReturn } from '../services/returnFlow';
@@ -2790,6 +2799,8 @@ router.get('/admin/overview', requireAdmin, async (_req: AuthRequest, res: Respo
       businesses: pBusinesses, sellerApps: pSellerApps, identity: pIdentity,
       credentials: pCredentials, socialLinks: pSocial, complaints: pComplaints, returns: pReturns,
       listings: pListings,
+      // Sosial profillərə yazılıb, admin hələ xəbər verməyib (profil sayı).
+      socialInvites: await pendingSocialTargets().catch(() => 0),
     };
     const pendingTotal = Object.values(pending).reduce((a, b) => a + b, 0);
     res.json({

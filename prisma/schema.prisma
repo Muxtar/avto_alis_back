@@ -1622,6 +1622,18 @@ model PendingInvite {
   @@index([senderId, phoneKey])
 }
 
+// Admin həmin sosial profilə (saytın rəsmi sosial hesabından) xəbər veribmi.
+// Açar PendingInvite.social ilə eynidir: «instagram:ad». Hər xəbərdarlıq sayılır.
+model SocialTargetNotice {
+  social         String    @id
+  notifiedAt     DateTime?
+  notifiedById   Int?
+  notifiedByName String?
+  timesNotified  Int       @default(0)
+  note           String?
+  updatedAt      DateTime  @updatedAt
+}
+
 // İstifadəçi blokları — blocker blocked-ı bloklayıb (mesaj göndərə bilməz).
 model BlockedUser {
   id        Int      @id @default(autoincrement())
