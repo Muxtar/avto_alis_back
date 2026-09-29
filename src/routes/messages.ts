@@ -29,16 +29,19 @@ const msgInclude = {
 // Ona görə hər tərəfdaş üçün ƏN ÇOX İKİ söhbət sətri olur: "şəxsi" və "iş".
 // `isBusiness` açıq işarədir; köhnə mesajlarda o sahə yoxdur, ona görə kontekst
 // (məhsul/obyekt) da eyni nəticəni verir.
-type Segment = 'BUSINESS' | 'PERSONAL';
-const segOf = (m: { listingId?: number | null; businessObjectId?: number | null; isBusiness?: boolean }): Segment =>
-  m.isBusiness || m.businessObjectId || m.listingId ? 'BUSINESS' : 'PERSONAL';
+// PAID — «Rəy» konsultasiyası ilə yaranan (ödənişli) yazışma: həmişə öz sətrində.
+type Segment = 'BUSINESS' | 'PERSONAL' | 'PAID';
+const segOf = (m: { listingId?: number | null; businessObjectId?: number | null; isBusiness?: boolean; consultationId?: number | null }): Segment =>
+  m.consultationId ? 'PAID' : m.isBusiness || m.businessObjectId || m.listingId ? 'BUSINESS' : 'PERSONAL';
 
 // Seçilmiş seqment üçün Prisma filtri. Seqment verilməyibsə boş obyekt qayıdır
 // (köhnə çağırışlar — məs. dərin link — bütün mesajları görməyə davam edir).
 function segWhere(seg?: unknown): any {
   const s = String(seg || '').toUpperCase();
-  if (s === 'BUSINESS') return { OR: [{ isBusiness: true }, { businessObjectId: { not: null } }, { listingId: { not: null } }] };
-  if (s === 'PERSONAL') return { isBusiness: false, businessObjectId: null, listingId: null };
+  if (s === 'PAID') return { consultationId: { not: null } };
+  if (s === 'FREE') return { consultationId: null }; // «Ödənişsiz» — şəxsi + iş
+  if (s === 'BUSINESS') return { consultationId: null, OR: [{ isBusiness: true }, { businessObjectId: { not: null } }, { listingId: { not: null } }] };
+  if (s === 'PERSONAL') return { consultationId: null, isBusiness: false, businessObjectId: null, listingId: null };
   return {};
 }
 
@@ -67,8 +70,23 @@ async function businessCtx(userId: number, partnerId: number): Promise<{ listing
 // Media/kontakt/konum mesajları üçün seqment sahələri (mətn yolundan ayrı).
 // `isBusiness` həmişə yazılır — kontekst tapılmasa belə mesaj öz axınında qalır.
 async function segFields(senderId: number, receiver: number, body: any) {
+  if (String(body?.segment || '').toUpperCase() === 'PAID') return { consultationId: await activeConsultation(senderId, receiver) };
   if (String(body?.segment || '').toUpperCase() !== 'BUSINESS') return {};
   return { isBusiness: true, ...(await businessCtx(senderId, receiver)) };
+}
+
+// «Ödənişli» söhbətdə yazılan mesaj — iki tərəf arasındakı AKTİV (vaxtı qalan) Rəy seansına bağlanır.
+// Aktiv seans yoxdursa yazmaq olmaz (ödənişli vaxt bitib / başlamayıb).
+async function activeConsultation(a: number, b: number): Promise<number> {
+  const list = await prisma.consultationSession.findMany({
+    where: { status: 'ACTIVE', OR: [{ buyerId: a, professionalId: b }, { buyerId: b, professionalId: a }] },
+    orderBy: { id: 'desc' }, take: 5,
+  });
+  for (const s of list) {
+    const used = s.consumedSeconds + (s.runningSince ? Math.floor((Date.now() - new Date(s.runningSince).getTime()) / 1000) : 0);
+    if (s.durationSeconds - used > 0) return s.id;
+  }
+  throw new Error('Ödənişli söhbət aktiv deyil — peşəkar seansı başladandan sonra yaza bilərsiniz');
 }
 
 // Qrupun bütün üzv id-ləri.
@@ -133,7 +151,9 @@ router.post('/messages', messageLimiter, adminAuth, async (req: AuthRequest, res
 
     // Rəy konsultasiyası mesajı — yalnız seans AKTİV və vaxtı varsa göndərilə bilər.
     let consultId: number | null = null;
-    if (consultationId) {
+    if (!consultationId && String(req.body.segment || '').toUpperCase() === 'PAID') {
+      consultId = await activeConsultation(req.adminId!, parseInt(receiverId));
+    } else if (consultationId) {
       consultId = parseInt(String(consultationId));
       const s = await prisma.consultationSession.findUnique({ where: { id: consultId } });
       if (!s || (s.buyerId !== req.adminId && s.professionalId !== req.adminId)) {
@@ -453,7 +473,7 @@ router.delete('/messages/threads/all', adminAuth, async (req: AuthRequest, res: 
 
     // Qrup söhbətləri yalnız «hamısı» və ya «groups» seçimində və yalnız
     // ŞƏXSİ axın süzgəci olmayanda silinir (qrup mesajları seqmentə düşmür).
-    if ((scope === 'groups' || scope === 'all') && String(req.query.segment || '').toUpperCase() !== 'BUSINESS') {
+    if ((scope === 'groups' || scope === 'all') && !['BUSINESS', 'PAID'].includes(String(req.query.segment || '').toUpperCase())) {
       const memberships = await prisma.conversationMember.findMany({
         where: { userId },
         select: { conversationId: true },
@@ -652,6 +672,14 @@ router.get('/messages/conversations', adminAuth, async (req: AuthRequest, res: R
       }
     }
 
+    // Ödənişli (Rəy) sətirləri — son seansın vəziyyəti başlıqda görünsün.
+    const paid = Array.from(convMap.values()).filter((c) => c.segment === 'PAID');
+    if (paid.length) {
+      const ids = paid.map((c) => c.lastMessage.consultationId).filter(Boolean);
+      const sess = await prisma.consultationSession.findMany({ where: { id: { in: ids } }, select: { id: true, title: true, status: true, price: true, professionalId: true } });
+      const byId = new Map(sess.map((x) => [x.id, x]));
+      for (const c of paid) { const x = byId.get(c.lastMessage.consultationId); if (x) c.consultation = { ...x, role: x.professionalId === userId ? 'professional' : 'buyer' }; }
+    }
     res.json({ conversations: Array.from(convMap.values()) });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });

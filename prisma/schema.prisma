@@ -237,6 +237,7 @@ model User {
   guestBookings Booking[]      @relation("GuestBookings")
   hostBookings  Booking[]      @relation("HostBookings")
   contacts      Contact[]      @relation("OwnContacts")
+  pendingInvites PendingInvite[] @relation("PendingInvitesSent")
   blockedUsers  BlockedUser[]  @relation("Blocker") // mənim bloklağım
   blockedBy     BlockedUser[]  @relation("Blocked") // məni bloklayanlar
   notifications Notification[]
@@ -1591,6 +1592,25 @@ model Contact {
 
   @@unique([ownerId, phoneDigits])
   @@index([ownerId])
+}
+
+// Qeydiyyatsız NÖMRƏYƏ yazılan mesaj / Rəy sorğusu — həmin nömrə ilə qeydiyyat
+// tamamlananda (profil doldurulanda) əsl mesaja / konsultasiya sorğusuna çevrilir.
+model PendingInvite {
+  id              Int       @id @default(autoincrement())
+  senderId        Int
+  phone           String // göndərənin yazdığı format (göstəriş)
+  phoneKey        String // son 9 rəqəm — uyğunlaşdırma açarı
+  kind            String    @default("MESSAGE") // MESSAGE | CONSULTATION
+  content         String
+  durationMinutes Int? // CONSULTATION: istənilən müddət
+  createdAt       DateTime  @default(now())
+  deliveredAt     DateTime?
+  deliveredToId   Int?
+  sender          User      @relation("PendingInvitesSent", fields: [senderId], references: [id], onDelete: Cascade)
+
+  @@index([phoneKey, deliveredAt])
+  @@index([senderId, phoneKey])
 }
 
 // İstifadəçi blokları — blocker blocked-ı bloklayıb (mesaj göndərə bilməz).

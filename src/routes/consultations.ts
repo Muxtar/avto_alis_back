@@ -36,6 +36,7 @@ function publicSession(s: ConsultationSession, meId: number) {
     blockSeconds: s.blockSeconds, remainingSeconds: remainingSeconds(s),
     running: s.status === 'ACTIVE', role: s.professionalId === meId ? 'professional' : 'buyer',
     rated: s.rated, ratingStars: s.ratingStars, ratingLike: s.ratingLike,
+    needsPrice: !s.offerId && !(s.price > 0), // nömrəyə göndərilmiş sorğu — qiyməti peşəkar yazır
     createdAt: s.createdAt, startedAt: s.startedAt, endedAt: s.endedAt,
   };
 }
@@ -200,9 +201,18 @@ router.post('/consultations/:id/accept', adminAuth, async (req: AuthRequest, res
     const s = await prisma.consultationSession.findUnique({ where: { id } });
     if (!s || s.professionalId !== req.adminId) { res.status(404).json({ success: false, message: 'Tapılmadı' }); return; }
     if (s.status !== 'REQUESTED') { res.status(400).json({ success: false, message: 'Yalnız yeni sorğunu qəbul etmək olar' }); return; }
-    const upd = await prisma.consultationSession.update({ where: { id }, data: { status: 'ACCEPTED' } });
-    await prisma.notification.create({ data: { userId: s.buyerId, type: 'CONSULTATION', title: 'Rəy sorğusu qəbul edildi ✓', body: `Peşəkar sorğunuzu qəbul etdi — ${s.price} AZN ödəyib başlaya bilərsiniz.`, link: `/consultations/${id}` } }).catch(() => {});
-    res.json({ success: true, session: publicSession(upd, req.adminId!) });
+    // Qeydiyyatdan əvvəl nömrəyə göndərilmiş sorğu (təklifsiz, qiymət 0) — qiyməti peşəkar indi yazır.
+    const data: any = { status: 'ACCEPTED' };
+    if (!s.offerId && !(s.price > 0)) {
+      const price = Math.round((parseFloat(String(req.body?.price)) || 0) * 100) / 100;
+      if (!(price >= 1 && price <= 100000)) { res.status(400).json({ success: false, message: 'Qəbul etmək üçün qiyməti yazın (AZN)' }); return; }
+      const min = parseInt(String(req.body?.durationMinutes)) || Math.round(s.durationSeconds / 60);
+      const sec = Math.max(5, Math.min(600, min)) * 60;
+      Object.assign(data, { price, durationSeconds: sec, blockSeconds: sec });
+    }
+    const upd = await prisma.consultationSession.update({ where: { id }, data });
+    await prisma.notification.create({ data: { userId: s.buyerId, type: 'CONSULTATION', title: 'Rəy sorğusu qəbul edildi ✓', body: `Peşəkar sorğunuzu qəbul etdi — ${upd.price} AZN ödəyib başlaya bilərsiniz.`, link: `/consultations/${id}` } }).catch(() => {});
+    res.json({ success: true, session: publicSession(upd, req.adminId!), needsVoen: !(await hasApprovedBusiness(s.professionalId)) });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
 

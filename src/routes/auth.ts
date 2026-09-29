@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { PrismaClient, UserType } from '@prisma/client';
 import { syncProGroups } from '../services/proGroups';
+import { deliverPendingInvites } from '../services/pendingInvites';
 import bcrypt from 'bcryptjs';
 import { upload } from '../middleware/upload';
 import { generateToken, createSession, adminAuth, AuthRequest } from '../middleware/auth';
@@ -204,6 +205,8 @@ router.post('/register/complete', adminAuth, passportPairUpload, async (req: Aut
 
     // Peşə qrupu: «şəhər · ixtisas» — qeydiyyatda avtomatik qoşulma.
     await syncProGroups(userId, 'AUTO').catch(() => {});
+    // Qeydiyyatdan əvvəl bu nömrəyə yazılmış mesajlar / Rəy sorğuları.
+    await deliverPendingInvites(userId).catch((e) => console.error('[invites]', e?.message));
     res.json({ success: true, user });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
@@ -329,6 +332,8 @@ router.post('/register/complete-json', adminAuth, async (req: AuthRequest, res: 
     });
     // Peşə qrupu: «şəhər · ixtisas» — qeydiyyatda avtomatik qoşulma.
     await syncProGroups(userId, 'AUTO').catch(() => {});
+    // Qeydiyyatdan əvvəl bu nömrəyə yazılmış mesajlar / Rəy sorğuları.
+    await deliverPendingInvites(userId).catch((e) => console.error('[invites]', e?.message));
     res.json({ success: true, user });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
@@ -403,6 +408,8 @@ router.post('/register/complete-id', adminAuth, idPairUpload, processImages, asy
     });
     // Peşə qrupu: «şəhər · ixtisas» — qeydiyyatda avtomatik qoşulma.
     await syncProGroups(userId, 'AUTO').catch(() => {});
+    // Qeydiyyatdan əvvəl bu nömrəyə yazılmış mesajlar / Rəy sorğuları.
+    await deliverPendingInvites(userId).catch((e) => console.error('[invites]', e?.message));
     res.json({ success: true, user });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
