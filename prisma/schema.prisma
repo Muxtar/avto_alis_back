@@ -1609,6 +1609,9 @@ model PendingInvite {
   kind            String    @default("MESSAGE") // MESSAGE | CONSULTATION
   content         String
   durationMinutes Int? // CONSULTATION: istənilən müddət
+  // Mesajın növü və media sahələri (şəkil/səs/video/fayl/konum/kontakt) — çatdırılanda
+  // Message-ə olduğu kimi yazılır: { type, mediaUrl, mediaName, mediaMime, mediaSize, … }
+  payload         Json?
   createdAt       DateTime  @default(now())
   deliveredAt     DateTime?
   deliveredToId   Int?

@@ -3,6 +3,7 @@ import { Prisma, PrismaClient } from '@prisma/client';
 import { adminAuth, AuthRequest } from '../middleware/auth';
 import { messageLimiter } from '../middleware/rateLimiter';
 import { emitToUser, isUserOnline } from '../services/callSignaling';
+import { createPending } from './invites';
 import { markReadForChat } from '../services/notificationRead';
 import { chatUpload } from '../middleware/upload';
 
@@ -87,6 +88,20 @@ async function activeConsultation(a: number, b: number): Promise<number> {
     if (s.durationSeconds - used > 0) return s.id;
   }
   throw new Error('Ödənişli söhbət aktiv deyil — peşəkar seansı başladandan sonra yaza bilərsiniz');
+}
+
+// Platformada OLMAYAN şəxsə (nömrə / sosial hesab) media, konum, kontakt — gözləmədə
+// saxlanır və o qoşulanda adi mesaj kimi çatır. Çat pəncərəsi eyni endpointlərə
+// `pending` sahəsi ilə göndərir (multipart-da JSON mətn).
+async function sendPendingIfAny(req: AuthRequest, res: Response, data: Record<string, any>): Promise<boolean> {
+  const raw = req.body?.pending;
+  if (!raw) return false;
+  let target: any;
+  try { target = typeof raw === 'string' ? JSON.parse(raw) : raw; } catch { res.status(400).json({ success: false, message: 'Hədəf yanlışdır' }); return true; }
+  const { content, replyToId: _r, ...payload } = data;
+  const r = await createPending(req.adminId!, { ...target, kind: 'MESSAGE', content }, payload);
+  res.status(r.status).json(r.body);
+  return true;
 }
 
 // Qrupun bütün üzv id-ləri.
@@ -558,6 +573,7 @@ router.post('/messages/media', messageLimiter, adminAuth, chatUpload.single('med
       mediaDuration: duration > 0 ? duration : null,
       replyToId: req.body.replyToId ? parseInt(String(req.body.replyToId)) : null,
     };
+    if (await sendPendingIfAny(req, res, data)) return;
     const conversationId = req.body.conversationId ? parseInt(String(req.body.conversationId)) : 0;
     if (conversationId) {
       if (!(await assertMember(conversationId, req.adminId!))) { res.status(403).json({ success: false, message: 'Bu qrupun üzvü deyilsiniz' }); return; }
@@ -587,6 +603,7 @@ router.post('/messages/contact', messageLimiter, adminAuth, async (req: AuthRequ
       contactUserId: req.body.contactUserId ? parseInt(String(req.body.contactUserId)) : null,
       replyToId: req.body.replyToId ? parseInt(String(req.body.replyToId)) : null,
     };
+    if (await sendPendingIfAny(req, res, data)) return;
     const conversationId = req.body.conversationId ? parseInt(String(req.body.conversationId)) : 0;
     if (conversationId) {
       if (!(await assertMember(conversationId, req.adminId!))) { res.status(403).json({ success: false, message: 'Bu qrupun üzvü deyilsiniz' }); return; }
@@ -617,6 +634,7 @@ router.post('/messages/location', messageLimiter, adminAuth, async (req: AuthReq
       longitude,
       replyToId: req.body.replyToId ? parseInt(String(req.body.replyToId)) : null,
     };
+    if (await sendPendingIfAny(req, res, data)) return;
     const conversationId = req.body.conversationId ? parseInt(String(req.body.conversationId)) : 0;
     if (conversationId) {
       if (!(await assertMember(conversationId, req.adminId!))) { res.status(403).json({ success: false, message: 'Bu qrupun üzvü deyilsiniz' }); return; }

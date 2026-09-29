@@ -81,58 +81,77 @@ router.get('/me/invites/social', adminAuth, (req: AuthRequest, res: Response) =>
 // :key = nömrə və ya «facebook:ad».
 router.get('/me/invites/:key', adminAuth, (req: AuthRequest, res: Response) => threadOf(req, res, targetOfKey(String(req.params.key))));
 
-// Yaz: { phone } və ya { social: { platform, url, name?, avatar? } };
-//      kind = MESSAGE (content) | CONSULTATION (content = qeyd, durationMinutes).
+/**
+ * Gözləyən mesaj yarat. b = { phone } və ya { social: { platform, url, name?, avatar? } },
+ * kind = MESSAGE | CONSULTATION. payload — media/konum/kontakt mesajlarının sahələri
+ * (çat pəncərəsindən adi mesaj kimi göndərilir, routes/messages.ts).
+ */
+export async function createPending(senderId: number, b: any, payload?: Record<string, any>): Promise<{ status: number; body: any }> {
+  const kind = b.kind === 'CONSULTATION' ? 'CONSULTATION' : 'MESSAGE';
+  const content = String(b.content || '').trim().slice(0, 2000);
+  if (kind === 'MESSAGE' && !content && !payload) { return { status: 400, body: { success: false, message: 'Mesaj boş ola bilməz' } }; }
+
+  let target: Target;
+  const data: any = {};
+  if (b.social) {
+    const sp = b.social;
+    const url = String(sp.url || '').trim().slice(0, 500);
+    if (!/^https:\/\//i.test(url)) { return { status: 400, body: { success: false, message: 'Profil linki yanlışdır' } }; }
+    const social = socialKeyOf(String(sp.platform || ''), url);
+    if (!social) { return { status: 400, body: { success: false, message: 'Bu link şəxsi profil deyil (paylaşım/qrup/səhifə linkinə yazmaq olmaz)' } }; }
+    target = { social };
+    Object.assign(data, {
+      social, targetUrl: url,
+      targetName: String(sp.name || '').trim().slice(0, 120) || social.split(':')[1],
+      targetAvatar: sp.avatar ? String(sp.avatar).slice(0, 500) : null,
+    });
+    const mine = await prisma.socialLink.findMany({ where: { userId: senderId }, select: { platform: true, url: true } });
+    if (mine.some((l) => socialKeyOf(l.platform, l.url) === social)) { return { status: 400, body: { success: false, message: 'Bu sizin öz hesabınızdır' } }; }
+    // Yeni (əvvəl yazılmamış) sosial hədəflər — gündə limit.
+    const already = await prisma.pendingInvite.count({ where: { senderId: senderId, social } });
+    if (!already) {
+      const since = new Date(Date.now() - 864e5);
+      const recent = await prisma.pendingInvite.findMany({ where: { senderId: senderId, social: { not: null }, createdAt: { gte: since } }, select: { social: true }, distinct: ['social'] });
+      if (recent.length >= MAX_SOCIAL_TARGETS_PER_DAY) { return { status: 429, body: { success: false, message: `Gündə ən çox ${MAX_SOCIAL_TARGETS_PER_DAY} yeni sosial profilə yazmaq olar` } }; }
+    }
+  } else {
+    const phone = String(b.phone || '').trim().slice(0, 30);
+    const phoneKey = phoneKeyOf(phone);
+    if (phoneKey.length < 7) { return { status: 400, body: { success: false, message: 'Düzgün nömrə yazın' } }; }
+    const me = await prisma.user.findUnique({ where: { id: senderId }, select: { phone: true } });
+    if (phoneKeyOf(me?.phone) === phoneKey) { return { status: 400, body: { success: false, message: 'Özünüzə yaza bilməzsiniz' } }; }
+    target = { phoneKey };
+    Object.assign(data, { phone, phoneKey });
+  }
+
+  // Artıq platformadadırsa — adi söhbət/Rəy yolu (frontend həmin istifadəçini açır).
+  const u = await registeredFor(target);
+  if (u) { return { status: 409, body: { success: false, code: 'REGISTERED', user: u, message: 'Bu şəxs artıq platformadadır' } }; }
+  const pending = await prisma.pendingInvite.count({ where: { senderId: senderId, deliveredAt: null, ...target } });
+  if (pending >= MAX_PENDING_PER_TARGET) { return { status: 429, body: { success: false, message: `Bu şəxsə ${MAX_PENDING_PER_TARGET} gözləyən mesaj həddi dolub` } }; }
+  if (kind === 'CONSULTATION' && await prisma.pendingInvite.count({ where: { senderId: senderId, kind, deliveredAt: null, ...target } })) {
+    return { status: 400, body: { success: false, message: 'Bu şəxsə artıq Rəy sorğusu göndərmisiniz — platformaya qoşulanda çatacaq' } };
+  }
+  const durationMinutes = kind === 'CONSULTATION' ? Math.max(5, Math.min(600, parseInt(String(b.durationMinutes)) || DEFAULT_CONSULT_MIN)) : null;
+  const item = await prisma.pendingInvite.create({ data: { senderId, kind, content, durationMinutes, ...data, ...(payload ? { payload } : {}) } });
+  return { status: 201, body: { success: true, item } };
+}
+
+// Yaz (mətn / Rəy sorğusu).
 router.post('/me/invites', inviteLimiter, adminAuth, async (req: AuthRequest, res: Response) => {
   try {
-    const kind = req.body.kind === 'CONSULTATION' ? 'CONSULTATION' : 'MESSAGE';
-    const content = String(req.body.content || '').trim().slice(0, 2000);
-    if (kind === 'MESSAGE' && !content) { res.status(400).json({ success: false, message: 'Mesaj boş ola bilməz' }); return; }
+    const r = await createPending(req.adminId!, req.body);
+    res.status(r.status).json(r.body);
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
 
-    let target: Target;
-    const data: any = {};
-    if (req.body.social) {
-      const sp = req.body.social;
-      const url = String(sp.url || '').trim().slice(0, 500);
-      if (!/^https:\/\//i.test(url)) { res.status(400).json({ success: false, message: 'Profil linki yanlışdır' }); return; }
-      const social = socialKeyOf(String(sp.platform || ''), url);
-      if (!social) { res.status(400).json({ success: false, message: 'Bu link şəxsi profil deyil (paylaşım/qrup/səhifə linkinə yazmaq olmaz)' }); return; }
-      target = { social };
-      Object.assign(data, {
-        social, targetUrl: url,
-        targetName: String(sp.name || '').trim().slice(0, 120) || social.split(':')[1],
-        targetAvatar: sp.avatar ? String(sp.avatar).slice(0, 500) : null,
-      });
-      const mine = await prisma.socialLink.findMany({ where: { userId: req.adminId! }, select: { platform: true, url: true } });
-      if (mine.some((l) => socialKeyOf(l.platform, l.url) === social)) { res.status(400).json({ success: false, message: 'Bu sizin öz hesabınızdır' }); return; }
-      // Yeni (əvvəl yazılmamış) sosial hədəflər — gündə limit.
-      const already = await prisma.pendingInvite.count({ where: { senderId: req.adminId!, social } });
-      if (!already) {
-        const since = new Date(Date.now() - 864e5);
-        const recent = await prisma.pendingInvite.findMany({ where: { senderId: req.adminId!, social: { not: null }, createdAt: { gte: since } }, select: { social: true }, distinct: ['social'] });
-        if (recent.length >= MAX_SOCIAL_TARGETS_PER_DAY) { res.status(429).json({ success: false, message: `Gündə ən çox ${MAX_SOCIAL_TARGETS_PER_DAY} yeni sosial profilə yazmaq olar` }); return; }
-      }
-    } else {
-      const phone = String(req.body.phone || '').trim().slice(0, 30);
-      const phoneKey = phoneKeyOf(phone);
-      if (phoneKey.length < 7) { res.status(400).json({ success: false, message: 'Düzgün nömrə yazın' }); return; }
-      const me = await prisma.user.findUnique({ where: { id: req.adminId! }, select: { phone: true } });
-      if (phoneKeyOf(me?.phone) === phoneKey) { res.status(400).json({ success: false, message: 'Özünüzə yaza bilməzsiniz' }); return; }
-      target = { phoneKey };
-      Object.assign(data, { phone, phoneKey });
-    }
-
-    // Artıq platformadadırsa — adi söhbət/Rəy yolu (frontend həmin istifadəçini açır).
-    const u = await registeredFor(target);
-    if (u) { res.status(409).json({ success: false, code: 'REGISTERED', user: u, message: 'Bu şəxs artıq platformadadır' }); return; }
-    const pending = await prisma.pendingInvite.count({ where: { senderId: req.adminId!, deliveredAt: null, ...target } });
-    if (pending >= MAX_PENDING_PER_TARGET) { res.status(429).json({ success: false, message: `Bu şəxsə ${MAX_PENDING_PER_TARGET} gözləyən mesaj həddi dolub` }); return; }
-    if (kind === 'CONSULTATION' && await prisma.pendingInvite.count({ where: { senderId: req.adminId!, kind, deliveredAt: null, ...target } })) {
-      res.status(400).json({ success: false, message: 'Bu şəxsə artıq Rəy sorğusu göndərmisiniz — platformaya qoşulanda çatacaq' }); return;
-    }
-    const durationMinutes = kind === 'CONSULTATION' ? Math.max(5, Math.min(600, parseInt(String(req.body.durationMinutes)) || DEFAULT_CONSULT_MIN)) : null;
-    const item = await prisma.pendingInvite.create({ data: { senderId: req.adminId!, kind, content, durationMinutes, ...data } });
-    res.status(201).json({ success: true, item });
+// Hədəfə yazılmış bütün çatdırılmamış mesajları sil (söhbəti sil).
+router.delete('/me/invites/thread/:key', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const t = targetOfKey(String(req.params.key));
+    if (!t) { res.status(400).json({ success: false, message: 'Hədəf düzgün deyil' }); return; }
+    const r = await prisma.pendingInvite.deleteMany({ where: { senderId: req.adminId!, deliveredAt: null, ...t } });
+    res.json({ success: true, deleted: r.count });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
 

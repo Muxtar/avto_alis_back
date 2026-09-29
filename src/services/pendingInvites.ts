@@ -14,6 +14,17 @@ export const phoneKeyOf = (phone: string | null | undefined) => String(phone || 
 
 export const DEFAULT_CONSULT_MIN = 30;
 
+// Gözləyən mesajın media/növ sahələri — yalnız icazəli açarlar Message-ə keçir.
+const PAYLOAD_KEYS = ['type', 'mediaUrl', 'mediaName', 'mediaMime', 'mediaSize', 'mediaDuration', 'contactPhone', 'contactUserId', 'latitude', 'longitude'] as const;
+const MSG_TYPES = new Set(['TEXT', 'IMAGE', 'FILE', 'AUDIO', 'VIDEO', 'CONTACT', 'LOCATION']);
+export function pickPayload(raw: unknown): Record<string, any> {
+  if (!raw || typeof raw !== 'object') return {};
+  const out: Record<string, any> = {};
+  for (const k of PAYLOAD_KEYS) { const v = (raw as any)[k]; if (v !== undefined && v !== null) out[k] = v; }
+  if (out.type && !MSG_TYPES.has(out.type)) delete out.type;
+  return out;
+}
+
 // Sosial hesab açarı: «facebook:muxtar.bayramov». Axtarış nəticəsi (x) və profil
 // linki (twitter) eyni platforma sayılır; post/qrup/səhifə linkləri qəbul edilmir.
 const SOCIAL_ALIASES: Record<string, string> = { x: 'twitter', fb: 'facebook', ig: 'instagram' };
@@ -79,7 +90,8 @@ export async function deliverPendingInvites(userId: number): Promise<number> {
         });
         await tx.notification.create({ data: { userId, type: 'CONSULTATION', title: 'Sizdən Rəy istəyirlər', body: 'Qeydiyyatdan əvvəl sizə Rəy sorğusu göndərilib — qiymət yazıb qəbul edə bilərsiniz.', link: `/consultations/${s.id}` } });
       } else {
-        await tx.message.create({ data: { senderId: inv.senderId, receiverId: userId, content: inv.content, createdAt: inv.createdAt } });
+        const extra = pickPayload(inv.payload);
+        await tx.message.create({ data: { senderId: inv.senderId, receiverId: userId, content: inv.content, createdAt: inv.createdAt, ...extra } });
       }
       await tx.pendingInvite.update({ where: { id: inv.id }, data: { deliveredAt: new Date(), deliveredToId: userId } });
     });
