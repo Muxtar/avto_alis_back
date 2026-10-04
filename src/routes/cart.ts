@@ -13,6 +13,7 @@ import { recordSettlement, recordSettlementMany, sellerBalance } from '../servic
 import { markOrdersAwaitingConfirm, getDeliveryDeadlineHours } from '../services/orderExpiry';
 import { checkPrice as yangoCheckPrice, isYangoConfigured, YANGO_MAX_WEIGHT_KG, yangoDead } from '../services/yangoDelivery';
 import { notifySellersNewOrder } from '../services/orderNotify';
+import { notifyOrderStatus } from '../services/orderMessages';
 import { dispatchOrderToYango, cancelActiveYangoClaim } from './yango';
 import { pushLive, pushAdmins } from '../services/live';
 import { upload } from '../middleware/upload';
@@ -1055,8 +1056,16 @@ router.post('/cart/checkout', requireType(BUYER_TYPES), async (req: AuthRequest,
               userId: sellerId,
               type: 'ORDER',
               title: 'Yeni sifariş',
-              body: `Sifariş #${order.id} — ${total.toFixed(2)} AZN (${paymentMethod === 'WALLET' ? 'balansdan ödənildi' : 'nağd'}).`,
+              body: `Sifariş #${order.id} — ${total.toFixed(2)} AZN (${paymentMethod === 'WALLET' ? 'balansdan ödənilib' : 'nağd ödəniş'}). Təsdiqinizi gözləyir.`,
               link: '/orders?tab=selling',
+            },
+          });
+          // Alıcıya təsdiq — sifarişin qeydə alındığını bilsin.
+          await tx.notification.create({
+            data: {
+              userId: req.adminId!, type: 'ORDER', title: `Sifariş #${order.id} qəbul olundu`,
+              body: `${total.toFixed(2)} AZN — ${paymentMethod === 'WALLET' ? 'balansdan ödənildi' : 'ödəniş təhvil zamanı nağd'}. Satıcının təsdiqi gözlənilir.`,
+              link: '/orders',
             },
           });
         }
@@ -1510,46 +1519,17 @@ router.put('/orders/:id/status', adminAuth, async (req: AuthRequest, res: Respon
     // Satıcı hesablaşması — status/ödəniş dəyişdi (DELIVERED→AVAILABLE, CANCELLED/REFUND→REVERSED).
     await recordSettlement(id).catch(() => {});
 
-    // Aliciya bildirim
-    const statusLabels: Record<string, string> = {
-      CONFIRMED: 'qəbul edildi',
-      SHIPPED: 'yola çıxdı',
-      DELIVERED: 'çatdırıldı',
-      CANCELLED: 'rədd/ləğv edildi',
-    };
-    // Təhvil alındı — alıcıya rəy xatırlatması. Rəy yazmaq üçün məhsulu
-    // axtarmağa ehtiyac yoxdur: «Sifarişlər» səhifəsində hər məhsulun
-    // yanında «Rəy yaz» düyməsi var.
-    if (next === 'DELIVERED') {
-      await prisma.notification.create({
-        data: {
-          userId: order.buyerId, type: 'ORDER', title: `Sifariş #${order.id}`,
-          body: 'Sifarişiniz tamamlandı ✓ Məhsula və satıcıya rəy yazmağınız digər alıcılara kömək edir.',
-          link: '/orders',
-        },
-      }).catch(() => {});
-    }
-
-    const label = statusLabels[next];
-    if (label) {
-      // Statusu satıcı dəyişibsə alıcıya, alıcı dəyişibsə (təhvil aldım/ləğv) satıcıya bildir.
-      await prisma.notification.create({
-        data: {
-          userId: isBuyer ? order.sellerId : order.buyerId,
-          type: 'ORDER',
-          title: `Sifariş #${order.id}`,
-          body: isBuyer && next === 'DELIVERED' ? 'Alıcı sifarişi təhvil aldı.' : `Sifariş ${label}.`,
-          link: '/orders',
-        },
-      });
-    }
-    // Hər iki tərəfin açıq Sifarişlər səhifəsi yeniləmədən dəyişsin; qarşı
-    // tərəfə isə hansı səhifədə olsa da qısa xəbər.
-    pushLive(isBuyer ? order.sellerId : order.buyerId, {
-      kind: 'order', id: order.id, status: next,
-      ...(label ? { toast: `Sifariş #${order.id}: ${isBuyer && next === 'DELIVERED' ? 'alıcı təhvil aldı' : label}`, tone: next === 'CANCELLED' ? 'error' as const : 'info' as const } : {}),
+    // Bildirişlər — mətnlər bir yerdədir (services/orderMessages). Mağazadan
+    // götürmədə alıcıya «hazırdır / götürdünüz?» mətnini pickupFlow göndərir,
+    // ona görə burada həmin tərəf təkrar yazılmır.
+    const pk = isPickup(order);
+    await notifyOrderStatus(order, next, isBuyer ? 'BUYER' : 'SELLER', {
+      refundOk: next === 'CANCELLED' ? !refundFailed : null,
+      quiet: {
+        buyer: pk && !isBuyer && (next === 'CONFIRMED' || next === 'SHIPPED'),
+        seller: pk && isBuyer && next === 'DELIVERED',
+      },
     });
-    pushLive(isBuyer ? order.buyerId : order.sellerId, { kind: 'order', id: order.id, status: next });
 
     // Ləğv baş tutdu, amma pul qaytarıla bilmədisə bunu GİZLƏTMİRİK — həm
     // satıcı/alıcı bilməlidir, həm də admin panelinə düşür və təkrar cəhd olunur.

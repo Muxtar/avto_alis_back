@@ -21,7 +21,7 @@
 
 import { PrismaClient } from '@prisma/client';
 import { refundOrder as gatewayRefundOrder, activeProvider } from './paymentGateway';
-import { pushAdmins } from './live';
+import { pushAdmins, pushLive } from './live';
 
 const prisma = new PrismaClient();
 
@@ -251,9 +251,10 @@ export async function commitOrCancelForStock(orderId: number): Promise<boolean> 
   const r = await refundOrderSafe(orderId, 'CANCELLED');
   const why = `«${sc.missing}» stokda qalmadığı üçün sifariş #${orderId} ləğv edildi`;
   await prisma.notification.createMany({ data: [
-    { userId: o.buyerId, type: 'ORDER', title: `Sifariş #${orderId} ləğv edildi`, body: `${why}.${r.ok ? ' Pulunuz geri qaytarılır.' : ''}`, link: '/orders' },
-    { userId: o.sellerId, type: 'ORDER', title: `Sifariş #${orderId} ləğv edildi`, body: `${why} — stokunuzu yeniləyin.`, link: '/orders' },
+    { userId: o.buyerId, type: 'ORDER', title: `Sifariş #${orderId} ləğv edildi`, body: `${why}. ${r.ok ? 'Ödənişiniz geri qaytarılır.' : 'Ödənişin qaytarılması emal olunur — qısa müddətdə hesabınıza qayıdacaq.'}`, link: '/orders' },
+    { userId: o.sellerId, type: 'ORDER', title: `Sifariş #${orderId} ləğv edildi`, body: `${why} — stokunuzu yeniləyin.`, link: '/orders?tab=selling' },
   ] }).catch(() => {});
+  pushLive([o.buyerId, o.sellerId], { kind: 'order', id: orderId, status: 'CANCELLED', toast: `Sifariş #${orderId} ləğv edildi — stok qalmayıb`, tone: 'error' });
   console.warn(`[stock] ${why}`);
   return false;
 }

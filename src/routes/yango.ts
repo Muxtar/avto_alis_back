@@ -58,8 +58,11 @@ const FAILED_BEFORE_PICKUP: Record<string, string> = {
 const MSG_RETURNING = 'Alıcı məhsulu qəbul etmədi — kuryer məhsulu satıcıya qaytarır.';
 const MSG_ITEMS_ON_HANDS = 'Çatdırılma ləğv olundu, məhsul KURYERDƏDİR — Yango dəstəyi ilə əlaqə saxlayın.';
 
-const notify = (userId: number, orderId: number, body: string, link = '/orders') =>
-  prisma.notification.create({ data: { userId, type: 'ORDER', title: `Sifariş #${orderId}`, body, link } }).catch(() => {});
+const notify = (userId: number, orderId: number, body: string, link = '/orders') => {
+  // Açıq səhifədə də dərhal görünsün (əvvəl yalnız bildiriş siyahısına düşürdü).
+  pushLive(userId, { kind: 'order', id: orderId, toast: `Sifariş #${orderId}: çatdırılma yeniləndi`, tone: 'info' });
+  return prisma.notification.create({ data: { userId, type: 'ORDER', title: `Sifariş #${orderId}`, body, link } }).catch(() => {});
+};
 
 /** yangoError-u bir dəfə yazır; ilk dəfə yazıldısa true (bildiriş göndərmək üçün). */
 async function markOnce(orderId: number, msg: string): Promise<boolean> {

@@ -1,6 +1,7 @@
 // Satıcı təsdiqi axını — kartla ödənilmiş sifariş satıcı təsdiqini gözləyir.
 // Satıcı müəyyən müddət ərzində təsdiqləməzsə pul AVTOMATİK alıcıya qaytarılır.
 import { expireOffers as expireConsultOffers } from './consultOffers';
+import { pushLive } from './live';
 import { PrismaClient } from '@prisma/client';
 import { refundOrderSafe, retryFailedRefunds, unstickPendingRefunds, restoreStockForOrder, syncCommittedStock } from './refunds';
 import { recordSettlement, releaseHeldLedgers } from './settlement';
@@ -138,12 +139,14 @@ export async function expireUnconfirmedOrders(): Promise<number> {
         // Alıcıya yalnız BAŞ TUTAN qaytarma barədə "pulunuz qaytarıldı" deyilir.
         // Uğursuz halda bildirişi qaytarma servisi (admin xəbərdarlığı) idarə edir —
         // olmayan qaytarma barədə alıcıya yalan məlumat verilməməlidir.
-        if (r.ok) {
-          await prisma.notification.create({ data: { userId: order.buyerId, type: 'ORDER', title: `Sifariş #${order.id}`, body: 'Satıcı vaxtında təsdiqləmədiyi üçün ödənişiniz avtomatik geri qaytarıldı.', link: '/orders' } }).catch(() => {});
-        } else {
-          await prisma.notification.create({ data: { userId: order.buyerId, type: 'ORDER', title: `Sifariş #${order.id}`, body: 'Sifariş ləğv edildi. Ödənişin qaytarılması emal olunur — qısa müddətdə hesabınıza qayıdacaq.', link: '/orders' } }).catch(() => {});
-        }
-        await prisma.notification.create({ data: { userId: order.sellerId, type: 'ORDER', title: `Sifariş #${order.id}`, body: 'Vaxtında təsdiqlənmədiyi üçün sifariş ləğv edildi və ödəniş alıcıya qaytarıldı.', link: '/orders?tab=selling' } }).catch(() => {});
+        const tTitle = `Sifariş #${order.id} ləğv edildi`;
+        await prisma.notification.create({ data: { userId: order.buyerId, type: 'ORDER', title: tTitle, body: r.ok
+          ? 'Satıcı sifarişi vaxtında təsdiqləmədi — sifariş ləğv edildi və ödənişiniz geri qaytarılır.'
+          : 'Satıcı sifarişi vaxtında təsdiqləmədi — sifariş ləğv edildi. Ödənişin qaytarılması emal olunur, qısa müddətdə hesabınıza qayıdacaq.', link: '/orders' } }).catch(() => {});
+        // Satıcıya olmayan qaytarma barədə «qaytarıldı» deyilmir.
+        await prisma.notification.create({ data: { userId: order.sellerId, type: 'ORDER', title: tTitle, body: `Sifarişi vaxtında təsdiqləmədiyiniz üçün avtomatik ləğv edildi${r.ok ? ' və ödəniş alıcıya qaytarıldı' : '; ödəniş alıcıya qaytarılır'}.`, link: '/orders?tab=selling' } }).catch(() => {});
+        pushLive(order.buyerId, { kind: 'order', id: order.id, status: 'CANCELLED', toast: tTitle, tone: 'error' });
+        pushLive(order.sellerId, { kind: 'order', id: order.id, status: 'CANCELLED', toast: `${tTitle} — vaxtında təsdiqlənmədi`, tone: 'error' });
         done++;
       } catch (e) {
         console.error(`[orderExpiry] sifariş #${order.id} refund alınmadı:`, (e as any)?.message);
@@ -203,20 +206,21 @@ export async function expireUndeliveredOrders(): Promise<number> {
         await recordSettlement(order.id).catch(() => {});
         await prisma.notification.create({
           data: {
-            userId: order.buyerId, type: 'ORDER', title: `Sifariş #${order.id}`,
+            userId: order.buyerId, type: 'ORDER', title: `Sifariş #${order.id} ləğv edildi`,
             body: r.ok
-              ? 'Sifariş vaxtında göndərilmədiyi üçün ləğv edildi və ödənişiniz geri qaytarıldı.'
-              : 'Sifariş vaxtında göndərilmədiyi üçün ləğv edildi. Ödənişin qaytarılması emal olunur.',
+              ? 'Satıcı sifarişi vaxtında göndərmədi — sifariş ləğv edildi və ödənişiniz geri qaytarılır.'
+              : 'Satıcı sifarişi vaxtında göndərmədi — sifariş ləğv edildi. Ödənişin qaytarılması emal olunur.',
             link: '/orders',
           },
         }).catch(() => {});
         await prisma.notification.create({
           data: {
-            userId: order.sellerId, type: 'ORDER', title: `Sifariş #${order.id}`,
-            body: 'Sifariş vaxtında göndərilmədiyi üçün avtomatik ləğv edildi və ödəniş alıcıya qaytarıldı.',
+            userId: order.sellerId, type: 'ORDER', title: `Sifariş #${order.id} ləğv edildi`,
+            body: `Sifariş vaxtında göndərilmədiyi üçün avtomatik ləğv edildi${r.ok ? ' və ödəniş alıcıya qaytarıldı' : '; ödəniş alıcıya qaytarılır'}. Məhsulu göndərməyin.`,
             link: '/orders?tab=selling',
           },
         }).catch(() => {});
+        pushLive([order.buyerId, order.sellerId], { kind: 'order', id: order.id, status: 'CANCELLED', toast: `Sifariş #${order.id} ləğv edildi — vaxtında göndərilmədi`, tone: 'error' });
         cancelled++;
       } catch (e) {
         console.error(`[orderExpiry] ilişmiş sifariş #${order.id}:`, (e as any)?.message);

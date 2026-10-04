@@ -24,6 +24,7 @@ import { createOtp } from '../services/otp';
 import { listFlags, setFlag, listNumbers, setNumber } from '../services/settings';
 import { checkAllServices } from '../services/serviceHealth';
 import { pushLive, pushPublicListings } from '../services/live';
+import { notifyOrderStatus } from '../services/orderMessages';
 import { runWebSearchTest } from '../services/webSearchAI';
 import { runAgent } from '../services/aiAgent';
 import { getCommissionPercent, setCommissionPercent, createPayout, sellerBalance, getPayoutHoldDays, setPayoutHoldDays } from '../services/settlement';
@@ -2426,14 +2427,16 @@ router.put('/admin/orders/:id/status', requirePermission('orders'), async (req: 
       data: { status, ...(status === 'DELIVERED' && !order.deliveredAt ? { deliveredAt: new Date() } : {}) },
     });
     await recordSettlement(orderId).catch(() => {});   // satıcı ledger yenilə
-    // Alıcıya bildiriş
-    try {
+    // Alıcı VƏ satıcı xəbərdar olunur (əvvəl yalnız alıcıya, xam status kodu ilə gedirdi).
+    if (status !== order.status) await notifyOrderStatus(order, status, 'ADMIN', { refundOk: status === 'CANCELLED' ? !refundFailed : null });
+    else pushLive([order.buyerId, order.sellerId], { kind: 'order', id: order.id, status });
+    // Ləğvdə referal komissiyası da ləğv olunur — referal satıcı bilməlidir.
+    if (status === 'CANCELLED' && order.status !== 'CANCELLED' && order.referrerId && !order.referralVoided) {
+      await prisma.order.update({ where: { id: orderId }, data: { referralVoided: true } }).catch(() => {});
       await prisma.notification.create({
-        data: { userId: order.buyerId, type: 'ORDER', title: 'Sifariş statusu yeniləndi', body: `Sifariş #${order.id}: ${status}`, link: `/orders/${order.id}` },
-      });
-    } catch { /* ignore */ }
-    pushLive(order.buyerId, { kind: 'order', id: order.id, status, toast: `Sifariş #${order.id} statusu yeniləndi`, tone: status === 'CANCELLED' ? 'error' : 'info' });
-    pushLive([order.sellerId, ...(order.courierId ? [order.courierId] : [])], { kind: 'order', id: order.id, status });
+        data: { userId: order.referrerId, type: 'REFERRAL', title: 'Referal komissiyası ləğv edildi', body: `Sifariş #${order.id} ləğv edildiyi üçün komissiya ləğv olundu.`, link: '/referral-earnings' },
+      }).catch(() => {});
+    }
     res.json({
       success: true, order: updated,
       ...(refundFailed ? { refundPending: true, refundError: refundFailed, message: 'Sifariş ləğv edildi, lakin ödənişin qaytarılması alınmadı — avtomatik təkrar cəhd ediləcək.' } : {}),

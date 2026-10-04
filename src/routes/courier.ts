@@ -3,6 +3,7 @@ import { PrismaClient, UserType } from '@prisma/client';
 import { adminAuth, AuthRequest } from '../middleware/auth';
 import { recordSettlement } from '../services/settlement';
 import { pushLive } from '../services/live';
+import { notifyOrderStatus } from '../services/orderMessages';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -105,14 +106,9 @@ router.put('/courier/orders/:id/status', adminAuth, async (req: AuthRequest, res
     if (status === 'DELIVERED') {
       // Satıcının uçot sətri yazılsın (saxlama pəncərəsi buradan başlayır).
       await recordSettlement(order.id).catch(() => {});
-      await prisma.notification.createMany({
-        data: [
-          { userId: order.buyerId, type: 'ORDER', title: `Sifariş #${order.id}`, body: 'Sifarişiniz çatdırıldı. Problem varsa 14 gün ərzində iadə sorğusu göndərə bilərsiniz.', link: '/orders' },
-          { userId: order.sellerId, type: 'ORDER', title: `Sifariş #${order.id}`, body: 'Sifariş kuryer tərəfindən çatdırıldı.', link: '/orders' },
-        ],
-      }).catch(() => {});
     }
-    pushLive([order.buyerId, order.sellerId], { kind: 'order', id: order.id, status });
+    // Alıcı və satıcı hər iki addımda xəbərdar olunur (əvvəl «yola çıxdı» heç kimə getmirdi).
+    if (status !== order.status) await notifyOrderStatus(order, status, 'COURIER');
     res.json({ success: true, order: updated });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
