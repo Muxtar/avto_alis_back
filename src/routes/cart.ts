@@ -53,7 +53,7 @@ router.get('/cart', adminAuth, async (req: AuthRequest, res: Response) => {
       include: {
         items: {
           include: {
-            listing: { include: { user: { select: { id: true, name: true, phone: true } }, priceTiers: { orderBy: { minQty: 'asc' } } } },
+            listing: { include: { user: { select: { id: true, name: true, phone: true } }, businessObject: { select: { id: true, name: true } }, business: { select: { id: true, name: true } }, priceTiers: { orderBy: { minQty: 'asc' } } } },
             groupBuy: { select: { id: true, code: true, status: true, expiresAt: true } },
           },
         },
@@ -62,7 +62,7 @@ router.get('/cart', adminAuth, async (req: AuthRequest, res: Response) => {
     if (!cart) {
       cart = await prisma.cart.create({
         data: { userId: req.adminId! },
-        include: { items: { include: { listing: { include: { user: { select: { id: true, name: true, phone: true } }, priceTiers: { orderBy: { minQty: 'asc' } } } }, groupBuy: { select: { id: true, code: true, status: true, expiresAt: true } } } } },
+        include: { items: { include: { listing: { include: { user: { select: { id: true, name: true, phone: true } }, businessObject: { select: { id: true, name: true } }, business: { select: { id: true, name: true } }, priceTiers: { orderBy: { minQty: 'asc' } } } }, groupBuy: { select: { id: true, code: true, status: true, expiresAt: true } } } } },
       });
     }
     // HƏR SƏTİRİN QİYMƏTİ elanın adi qiyməti DEYİL:
