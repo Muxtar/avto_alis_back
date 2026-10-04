@@ -107,6 +107,13 @@ export const FLAGS: FlagDef[] = [
     default: true,
   },
   {
+    key: 'ai_vehicle_passport',
+    section: 'ai',
+    label: 'Texniki pasport oxunuşu (Claude)',
+    description: 'Avtomobilin texniki pasportunun şəklindən marka, model, il, dövlət nişanı və ban (VIN) nömrəsini oxuyub formanı doldurur (Claude vision). Deaktiv edilsə sadə OCR işləyir, istifadəçi sahələri əl ilə yazır. İstifadə: profil → Avtomobillərim.',
+    default: true,
+  },
+  {
     key: 'ai_disputes',
     section: 'ai',
     label: 'Mübahisə qərarı (Claude)',

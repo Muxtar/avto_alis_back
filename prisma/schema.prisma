@@ -290,6 +290,7 @@ model Vehicle {
   ownershipType      String? // C.3 — Mülkiyyət növü (Fiziki şəxs / Hüquqi şəxs)
   validUntil         String? // H — Etibarlıdır
   cardSerial         String? // Kart üzərindəki seriya (məs: BB667834)
+  driverLicense      String? // Sürücülük vəsiqəsinin nömrəsi (istifadəçi yazır)
 
   // ===== Texniki pasportun arxa hissəsi =====
   vehicleType    String? // D.3 — Tip (məs: MİNİK, UNIVERSAL)

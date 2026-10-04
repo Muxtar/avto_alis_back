@@ -1289,7 +1289,7 @@ function pickPassportFile(
 // list. JSON save endpoint-ləri də bunu istifadə edir.
 const PASSPORT_FIELD_KEYS = [
   'registrationNumber', 'registrationDate', 'manufactureYear',
-  'ownerName', 'ownerAddress', 'ownershipType', 'validUntil', 'cardSerial',
+  'ownerName', 'ownerAddress', 'ownershipType', 'validUntil', 'cardSerial', 'driverLicense',
   'vehicleType', 'engineNumber', 'bodyNumber', 'chassisNumber', 'color',
   'maxMass', 'unloadedMass', 'seatCount', 'engineCapacity', 'issuedBy', 'specialMarks',
 ] as const;
@@ -1328,22 +1328,21 @@ router.post(
     try {
       const front = pickPassportFile(req.files, 'passportImageFront');
       const back = pickPassportFile(req.files, 'passportImageBack');
-      if (!front || !back) {
-        res.status(400).json({
-          success: false,
-          message: 'Texniki pasportun ön və arxa şəkilləri tələb olunur',
-        });
+      // Tək üz də qəbul olunur — AI olanı oxuyur, qalanını istifadəçi yazır.
+      if (!front && !back) {
+        res.status(400).json({ success: false, message: 'Texniki sənədin ən azı bir şəklini yükləyin' });
         return;
       }
 
-      const ai = await extractPassportFromFiles(front.path, back.path);
+      const ai = await extractPassportFromFiles(front?.path ?? null, back?.path ?? null);
       const f = ai.fields;
       res.json({
         success: true,
         ok: ai.ok,
         error: ai.error,
-        passportImageFront: front.filename,
-        passportImageBack: back.filename,
+        passportImageFront: front?.filename ?? null,
+        passportImageBack: back?.filename ?? null,
+        source: (ai.raw as any)?.source === 'claude' ? 'ai' : 'ocr',
         fields: {
           // marka/model/year-i ayrıca qaytarırıq ki, UI form-un əsas
           // sahələrinə də ön-doldurma edə bilsin.
@@ -1393,14 +1392,8 @@ router.post('/me/vehicles', adminAuth, async (req: AuthRequest, res: Response) =
       res.status(400).json({ success: false, message: 'Marka, model və il tələb olunur' });
       return;
     }
-    if (!front || !back) {
-      res.status(400).json({
-        success: false,
-        message: 'Texniki pasportun ön və arxa şəkilləri tələb olunur (əvvəlcə /extract çağırın)',
-      });
-      return;
-    }
-
+    // Texniki sənədin şəkli KÖNÜLLÜDÜR: marka, model, il, nömrə və ban nömrəsi
+    // əl ilə də yazıla bilər. Şəkil varsa saxlanır.
     const fields = pickPassportFields(body);
     const vehicle = await prisma.vehicle.create({
       data: {
@@ -1408,7 +1401,7 @@ router.post('/me/vehicles', adminAuth, async (req: AuthRequest, res: Response) =
         brand,
         model,
         year: parseInt(yearStr, 10),
-        passportImage: front,
+        passportImage: front || '',
         passportImageFront: front,
         passportImageBack: back,
         ...fields,
