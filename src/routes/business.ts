@@ -689,6 +689,31 @@ async function ownsObject(objectId: number, userId: number) {
   return o && o.business.userId === userId ? o : null;
 }
 
+// Obyektin BÜTÜN məhsulları (təsdiq gözləyən, arxivdə, müddəti bitən daxil) —
+// biznes kabinetində «biznes → obyekt → məhsullar» baxışı üçün. Sahib və ya
+// həmin obyektdə «məhsullar» icazəli işçi.
+router.get('/me/objects/:id/listings', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const id = parseInt(String(req.params.id));
+    if (!(await hasObjectPerm(req.adminId!, id, 'listings'))) { res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return; }
+    const listings = await prisma.listing.findMany({
+      where: { businessObjectId: id },
+      select: { id: true, title: true, price: true, stock: true, images: true, status: true, type: true, archivedAt: true, expiresAt: true, viewCount: true, createdAt: true },
+      orderBy: { createdAt: 'desc' },
+      take: 500,
+    });
+    const now = new Date();
+    res.json({
+      success: true,
+      listings: listings.map((l) => ({
+        ...l, image: l.images?.[0] || null, images: undefined,
+        // Saytda vəziyyəti — bir sözlə.
+        state: l.archivedAt ? 'ARCHIVED' : l.status !== 'APPROVED' ? l.status : (l.expiresAt && l.expiresAt < now) ? 'EXPIRED' : (l.type === 'PRODUCT' && l.stock <= 0) ? 'OUT' : 'LIVE',
+      })),
+    });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
 router.put('/me/objects/:id', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
     const id = parseInt(req.params.id);
