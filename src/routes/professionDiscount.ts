@@ -2,7 +2,7 @@
 import { Router, Request, Response } from 'express';
 import { PrismaClient } from '@prisma/client';
 import { adminAuth, AuthRequest, viewerIdFromReq } from '../middleware/auth';
-import { activeRules, listingProDiscountInfo, normProf, PRO_DISCOUNT_MAX, verifiedProfessions } from '../services/professionDiscount';
+import { activeRules, listingProDiscountInfo, normProf, PRO_DISCOUNT_MAX, verifiedProfessions, buyerProfessions, ruleApplies } from '../services/professionDiscount';
 import { getOrCreateProgram, eligibility, DOC_TYPES } from '../services/referral';
 
 const router = Router();
@@ -75,6 +75,7 @@ router.put('/me/objects/:id/pro-discounts', adminAuth, async (req: AuthRequest, 
         maxUnitsPerOrder: maxU && maxU > 0 ? Math.min(maxU, 999) : null,
         maxDiscountPerOrder: maxD && maxD > 0 ? maxD : null,
         active: r.active !== false,
+        requireDoc: r.requireDoc === true,
         validUntil: until && !isNaN(until.getTime()) ? until : null,
       });
     }
@@ -103,11 +104,11 @@ router.get('/me/objects/:id/profession-terms', adminAuth, async (req: AuthReques
       prisma.professionDiscount.findMany({ where: { businessObjectId: id } }),
       prisma.referralProgram.findUnique({ where: { objectId: id }, include: { rules: { orderBy: { id: 'asc' } } } }),
     ]);
-    const map = new Map<string, { profession: string; discountPercent: number | null; commissionPercent: number | null; requiredDoc: string }>();
-    for (const d of discounts) map.set(normProf(d.profession), { profession: d.profession, discountPercent: d.active ? d.percent : null, commissionPercent: null, requiredDoc: 'DIPLOMA' });
+    const map = new Map<string, { profession: string; discountPercent: number | null; discountRequiresDoc: boolean; commissionPercent: number | null; requiredDoc: string }>();
+    for (const d of discounts) map.set(normProf(d.profession), { profession: d.profession, discountPercent: d.active ? d.percent : null, discountRequiresDoc: d.requireDoc, commissionPercent: null, requiredDoc: 'DIPLOMA' });
     for (const r of program?.rules || []) {
       const k = normProf(r.profession);
-      const cur = map.get(k) || { profession: r.profession, discountPercent: null, commissionPercent: null, requiredDoc: 'DIPLOMA' };
+      const cur = map.get(k) || { profession: r.profession, discountPercent: null, discountRequiresDoc: false, commissionPercent: null, requiredDoc: 'DIPLOMA' };
       cur.commissionPercent = r.commissionPercent; cur.requiredDoc = r.requiredDoc;
       map.set(k, cur);
     }
@@ -129,7 +130,7 @@ router.put('/me/objects/:id/profession-terms', adminAuth, async (req: AuthReques
     if (raw.length > MAX_RULES) { res.status(400).json({ success: false, message: `Ən çox ${MAX_RULES} ixtisas` }); return; }
     const pct = (v: any) => (v === null || v === undefined || v === '' ? null : r2(parseFloat(String(v).replace(',', '.'))));
     const seen = new Set<string>();
-    const clean: { profession: string; discount: number | null; commission: number | null; requiredDoc: string }[] = [];
+    const clean: { profession: string; discount: number | null; discountDoc: boolean; commission: number | null; requiredDoc: string }[] = [];
     for (const t of raw) {
       const profession = String(t.profession || '').trim().replace(/\s+/g, ' ').slice(0, 80);
       if (!profession) { res.status(400).json({ success: false, message: 'Hər sətir üçün ixtisas seçin' }); return; }
@@ -140,7 +141,7 @@ router.put('/me/objects/:id/profession-terms', adminAuth, async (req: AuthReques
       if (discount != null && (!Number.isFinite(discount) || discount < 1 || discount > PRO_DISCOUNT_MAX)) { res.status(400).json({ success: false, message: `«${profession}»: alış endirimi 1–${PRO_DISCOUNT_MAX}% arası olmalıdır` }); return; }
       if (commission != null && (!Number.isFinite(commission) || commission <= 0 || commission > 90)) { res.status(400).json({ success: false, message: `«${profession}»: satış komissiyası 0-dan böyük, 90%-dən çox olmamalıdır` }); return; }
       if (discount == null && commission == null) { res.status(400).json({ success: false, message: `«${profession}»: endirim və ya komissiya faizindən ən azı birini yazın` }); return; }
-      clean.push({ profession, discount, commission, requiredDoc: DOC_TYPES.includes(t.requiredDoc) ? t.requiredDoc : 'DIPLOMA' });
+      clean.push({ profession, discount, discountDoc: t.discountRequiresDoc === true, commission, requiredDoc: DOC_TYPES.includes(t.requiredDoc) ? t.requiredDoc : 'DIPLOMA' });
     }
 
     // ALIŞ ENDİRİMİ: mövcud qaydanın əlavə ayarları (məhsul seçimi, limitlər,
@@ -151,8 +152,8 @@ router.put('/me/objects/:id/profession-terms', adminAuth, async (req: AuthReques
     for (const c of clean) {
       if (c.discount == null) continue;
       const old = existing.find((e) => normProf(e.profession) === normProf(c.profession));
-      if (old) { keep.add(old.id); ops.push(prisma.professionDiscount.update({ where: { id: old.id }, data: { percent: c.discount, active: true, profession: c.profession } })); }
-      else ops.push(prisma.professionDiscount.create({ data: { businessObjectId: id, profession: c.profession, percent: c.discount } }));
+      if (old) { keep.add(old.id); ops.push(prisma.professionDiscount.update({ where: { id: old.id }, data: { percent: c.discount, active: true, profession: c.profession, requireDoc: c.discountDoc } })); }
+      else ops.push(prisma.professionDiscount.create({ data: { businessObjectId: id, profession: c.profession, percent: c.discount, requireDoc: c.discountDoc } }));
     }
     const drop = existing.filter((e) => !keep.has(e.id)).map((e) => e.id);
     if (drop.length) ops.unshift(prisma.professionDiscount.deleteMany({ where: { id: { in: drop } } }));
@@ -176,6 +177,22 @@ router.put('/me/objects/:id/profession-terms', adminAuth, async (req: AuthReques
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
 
+// Elan kartlarında «sizin üçün» qiyməti göstərmək üçün: mənə şamil olunan bütün
+// aktiv qaydalar (obyekt → faiz). Bir sorğu, bütün siyahılar üçün.
+router.get('/me/pro-discounts', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const bp = await buyerProfessions(req.adminId!);
+    if (!bp.declared.size && !bp.verified.size) { res.json({ success: true, rules: [] }); return; }
+    const now = new Date();
+    const all = await prisma.professionDiscount.findMany({
+      where: { active: true, OR: [{ validUntil: null }, { validUntil: { gt: now } }], object: { isActive: true, deletedAt: null, business: { userId: { not: req.adminId! } } } },
+      select: { businessObjectId: true, profession: true, percent: true, scope: true, listingIds: true, requireDoc: true },
+      take: 3000,
+    });
+    res.json({ success: true, rules: all.filter((r) => ruleApplies(r, bp)).map((r) => ({ objectId: r.businessObjectId, profession: r.profession, percent: r.percent, listingIds: r.scope === 'SELECTED' ? r.listingIds : null })) });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
 // ── MƏNƏ GÜZƏŞT VERƏN OBYEKTLƏR ─────────────────────────────────────────────
 // İxtisas sahibi üçün: hansı mağazalar onun ixtisasına ALANDA endirim, SATANDA
 // (referal) komissiya verir. Hər güzəşt üçün «indi istifadə edə bilərəmmi» və
@@ -194,7 +211,7 @@ router.get('/me/profession-benefits', adminAuth, async (req: AuthRequest, res: R
     const [discounts, programs] = await Promise.all([
       prisma.professionDiscount.findMany({
         where: { active: true, OR: [{ validUntil: null }, { validUntil: { gt: now } }], object: liveObject },
-        select: { businessObjectId: true, profession: true, percent: true, scope: true, listingIds: true },
+        select: { businessObjectId: true, profession: true, percent: true, scope: true, listingIds: true, requireDoc: true },
         take: 2000,
       }),
       prisma.referralProgram.findMany({
@@ -219,7 +236,8 @@ router.get('/me/profession-benefits', adminAuth, async (req: AuthRequest, res: R
       const r = rowOf(d.businessObjectId, d.profession);
       r.discountPercent = d.percent;
       r.discountProducts = d.scope === 'SELECTED' ? d.listingIds.length : null;
-      r.discountReady = verified.has(normProf(d.profession));   // endirim yalnız təsdiqli sənədlə
+      // Standart: ixtisas profildə olan kimi aktivdir; mağaza sənəd tələb edibsə — təsdiqli sənədlə.
+      r.discountReady = verified.has(normProf(d.profession)) || (!d.requireDoc && declared.map(normProf).includes(normProf(d.profession)));
     }
     for (const p of programs) {
       const rules = p.rules.filter((x) => mine.has(normProf(x.profession)));
@@ -270,10 +288,10 @@ router.get('/objects/:id/pro-discounts', async (req: Request, res: Response) => 
     const id = parseInt(String(req.params.id));
     const rules = (await activeRules([id])).sort((a, b) => b.percent - a.percent);
     const viewer = await viewerIdFromReq(req);
-    const verified = viewer ? await verifiedProfessions(viewer) : new Set<string>();
+    const bp = viewer ? await buyerProfessions(viewer) : { declared: new Set<string>(), verified: new Set<string>() };
     res.json({
       success: true,
-      rules: rules.map((r) => ({ profession: r.profession, percent: r.percent, scope: r.scope, productCount: r.scope === 'SELECTED' ? r.listingIds.length : null, mine: verified.has(normProf(r.profession)) })),
+      rules: rules.map((r) => ({ profession: r.profession, percent: r.percent, scope: r.scope, productCount: r.scope === 'SELECTED' ? r.listingIds.length : null, requireDoc: r.requireDoc, mine: ruleApplies(r, bp) })),
     });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });

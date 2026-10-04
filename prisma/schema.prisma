@@ -2100,6 +2100,9 @@ model ProfessionDiscount {
   listingIds          Int[]          @default([])
   maxDiscountPerOrder Float? // bir sifarişdə bu qaydadan maks. endirim (₼)
   maxUnitsPerOrder    Int? // bir sifarişdə endirimli maks. ədəd (hər məhsul üçün)
+  // true → endirim yalnız ixtisası ADMİN TƏSDİQLİ SƏNƏDLƏ sübut etmiş alıcıya;
+  // false (standart) → profilində həmin ixtisası olan hər alıcıya.
+  requireDoc          Boolean        @default(false)
   active              Boolean        @default(true)
   validUntil          DateTime?
   createdAt           DateTime       @default(now())

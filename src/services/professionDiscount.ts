@@ -1,8 +1,13 @@
 // İXTİSAS ENDİRİMİ + TƏSDİQLİ İXTİSAS.
 //
-// 1) Təsdiqli ixtisas: istifadəçinin profildə YAZDIĞI ixtisas heç nəyi sübut
-//    etmir. Sübut — admin tərəfindən APPROVED edilmiş, HƏMİN ixtisasa bağlı
-//    (ProfessionDocument.profession) və müddəti keçməmiş sənəddir.
+// KİMƏ ENDİRİM: standart olaraq profilində həmin ixtisası OLAN hər alıcıya
+// (istifadəçi ixtisası əlavə edən kimi endirimli qiyməti görür və alır).
+// Mağaza qaydada «sənəd tələb et» (requireDoc) seçibsə — yalnız ixtisası admin
+// təsdiqli sənədlə sübut etmiş alıcıya. Əvvəl sənəd HƏMİŞƏ məcburi idi və
+// ixtisası olan alıcı məhsulu yenə tam qiymətə görürdü.
+//
+// 1) Təsdiqli ixtisas: sübut — admin tərəfindən APPROVED edilmiş, HƏMİN ixtisasa
+//    bağlı (ProfessionDocument.profession) və müddəti keçməmiş sənəddir.
 //    Köhnə sənədlər (ixtisas sahəsi olmadan təsdiqlənib): AI yükləmə anında
 //    sənədi əsas ixtisasla uyğun bilmişdisə (professionMatch) — əsas ixtisası sübut edir.
 //
@@ -39,11 +44,24 @@ export async function verifiedProfessions(userId: number): Promise<Set<string>> 
   return out;
 }
 
+/** Alıcının ixtisasları: profildə yazdıqları (declared) və sənədlə sübut etdikləri (verified). */
+export async function buyerProfessions(userId: number): Promise<{ declared: Set<string>; verified: Set<string> }> {
+  const [u, verified] = await Promise.all([
+    prisma.user.findUnique({ where: { id: userId }, select: { profession: true, professions: true } }),
+    verifiedProfessions(userId),
+  ]);
+  const declared = new Set([u?.profession, ...(u?.professions || [])].map(normProf).filter(Boolean));
+  return { declared, verified };
+}
+/** Qayda bu alıcıya şamil olunurmu. */
+export const ruleApplies = (r: { profession: string; requireDoc?: boolean }, bp: { declared: Set<string>; verified: Set<string> }) =>
+  bp.verified.has(normProf(r.profession)) || (!r.requireDoc && bp.declared.has(normProf(r.profession)));
+
 export async function hasVerifiedProfession(userId: number, profession: string): Promise<boolean> {
   return (await verifiedProfessions(userId)).has(normProf(profession));
 }
 
-export interface ProRule { id: number; businessObjectId: number; profession: string; percent: number; scope: string; listingIds: number[]; maxDiscountPerOrder: number | null; maxUnitsPerOrder: number | null }
+export interface ProRule { id: number; businessObjectId: number; profession: string; percent: number; scope: string; listingIds: number[]; maxDiscountPerOrder: number | null; maxUnitsPerOrder: number | null; requireDoc: boolean }
 
 /** Obyektlərin HAZIRDA aktiv qaydaları. */
 export async function activeRules(objectIds: number[]): Promise<ProRule[]> {
@@ -51,7 +69,7 @@ export async function activeRules(objectIds: number[]): Promise<ProRule[]> {
   const now = new Date();
   return prisma.professionDiscount.findMany({
     where: { businessObjectId: { in: objectIds }, active: true, OR: [{ validUntil: null }, { validUntil: { gt: now } }] },
-    select: { id: true, businessObjectId: true, profession: true, percent: true, scope: true, listingIds: true, maxDiscountPerOrder: true, maxUnitsPerOrder: true },
+    select: { id: true, businessObjectId: true, profession: true, percent: true, scope: true, listingIds: true, maxDiscountPerOrder: true, maxUnitsPerOrder: true, requireDoc: true },
   });
 }
 
@@ -68,12 +86,12 @@ export async function bestRulesForBuyer(buyerId: number | null | undefined, list
   if (!objIds.length) return out;
   const rules = await activeRules(objIds);
   if (!rules.length) return out;
-  const mine = await verifiedProfessions(buyerId);
-  if (!mine.size) return out;
+  const mine = await buyerProfessions(buyerId);
+  if (!mine.declared.size && !mine.verified.size) return out;
   for (const l of listings) {
     if (!l.businessObjectId || l.userId === buyerId) continue;
     const best = rules
-      .filter((r) => r.businessObjectId === l.businessObjectId && mine.has(normProf(r.profession)) && ruleCovers(r, l.id))
+      .filter((r) => r.businessObjectId === l.businessObjectId && ruleApplies(r, mine) && ruleCovers(r, l.id))
       .sort((a, b) => b.percent - a.percent)[0];
     if (best) out.set(l.id, best);
   }
@@ -114,14 +132,12 @@ export async function listingProDiscountInfo(listing: { id: number; businessObje
   let mine: { percent: number; profession: string } | null = null;
   let missingDoc: string[] = [];
   if (viewerId && viewerId !== listing.userId && rules.length) {
-    const verified = await verifiedProfessions(viewerId);
-    const hit = rules.find((r) => verified.has(normProf(r.profession)));
+    const bp = await buyerProfessions(viewerId);
+    const hit = rules.find((r) => ruleApplies(r, bp));   // rules faizə görə azalan sırada — ən yaxşısı
     if (hit) mine = { percent: hit.percent, profession: hit.profession };
     else {
-      // Profildə yazılıb, amma sənədlə təsdiqlənməyib — istifadəçiyə nə etməli olduğunu deyirik.
-      const u = await prisma.user.findUnique({ where: { id: viewerId }, select: { profession: true, professions: true } });
-      const claimed = new Set([u?.profession, ...(u?.professions || [])].map(normProf).filter(Boolean));
-      missingDoc = rules.filter((r) => claimed.has(normProf(r.profession))).map((r) => r.profession);
+      // Mağaza sənəd tələb edir, alıcı isə ixtisası yalnız profildə yazıb — nə etməli olduğunu deyirik.
+      missingDoc = rules.filter((r) => bp.declared.has(normProf(r.profession))).map((r) => r.profession);
     }
   }
   return {
