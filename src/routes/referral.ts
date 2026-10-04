@@ -390,7 +390,7 @@ router.post('/referral/cart', referralLimiter, adminAuth, async (req: AuthReques
     const rawItems = Array.isArray(req.body.items) ? req.body.items.slice(0, 30) : [];
     const ids = rawItems.map((i: any) => parseInt(String(i.listingId))).filter((n: number) => Number.isFinite(n));
     if (!ids.length) { res.status(400).json({ success: false, message: 'Ən azı bir məhsul seçin' }); return; }
-    const listings = await prisma.listing.findMany({ where: { id: { in: ids } }, select: { id: true, userId: true, businessObjectId: true, businessId: true, referralMode: true, referralPercent: true, status: true, title: true } });
+    const listings = await prisma.listing.findMany({ where: { id: { in: ids } }, select: { id: true, userId: true, businessObjectId: true, businessId: true, referralMode: true, referralPercent: true, status: true, price: true, title: true } });
     const first = listings[0];
     if (!first) { res.status(404).json({ success: false, message: 'Məhsul tapılmadı' }); return; }
     const p = await programForListing(first);
@@ -399,13 +399,18 @@ router.post('/referral/cart', referralLimiter, adminAuth, async (req: AuthReques
     if (!el.ok) { res.status(403).json({ success: false, message: el.reason }); return; }
     const items: { listingId: number; quantity: number }[] = [];
     const pcts: number[] = [];
+    let goodsTotal = 0, commission = 0;   // link yaradana göstərmək üçün (təxmini — sifarişdə yenidən hesablanır)
     for (const it of rawItems) {
       const l = listings.find((x) => x.id === parseInt(String(it.listingId)));
       if (!l || l.status !== 'APPROVED') continue;
       const same = p.objectId ? l.businessObjectId === p.objectId : (l.userId === p.sellerId && !l.businessObjectId);
       if (!same || !listingIncluded(p, l)) continue;
-      items.push({ listingId: l.id, quantity: Math.max(1, Math.min(999, parseInt(String(it.quantity)) || 1)) });
-      pcts.push(percentFor(p, l, el));
+      const qty = Math.max(1, Math.min(999, parseInt(String(it.quantity)) || 1));
+      const pct = percentFor(p, l, el);
+      items.push({ listingId: l.id, quantity: qty });
+      pcts.push(pct);
+      goodsTotal += l.price * qty;
+      commission += l.price * qty * pct / 100;
     }
     if (!items.length) { res.status(400).json({ success: false, message: 'Seçilən məhsullar bu satıcının referal proqramına daxil deyil' }); return; }
     const token = crypto.randomBytes(8).toString('hex');
@@ -416,7 +421,10 @@ router.post('/referral/cart', referralLimiter, adminAuth, async (req: AuthReques
         expiresAt: new Date(Date.now() + p.linkDays * 24 * 3600 * 1000),
       },
     });
-    res.json({ success: true, token, percent: link.percent, expiresAt: link.expiresAt });
+    res.json({
+      success: true, token, percent: link.percent, expiresAt: link.expiresAt,
+      summary: { goodsTotal: Math.round(goodsTotal * 100) / 100, commission: Math.round(commission * 100) / 100 },
+    });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
 

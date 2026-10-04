@@ -17,7 +17,7 @@ import { bestRulesForBuyer, applyProDiscounts } from './professionDiscount';
 import { unitPriceFor, type Tier } from './tierPricing';
 import { groupBuyEnabled } from './groupBuy';
 import { checkPrice as yangoCheckPrice, isYangoConfigured, YANGO_MAX_WEIGHT_KG } from './yangoDelivery';
-import { programForListing, listingIncluded, eligibility } from './referral';
+import { programForListing, listingIncluded, eligibility, percentFor } from './referral';
 import crypto from 'crypto';
 
 const prisma = new PrismaClient();
@@ -124,15 +124,18 @@ export async function validateSharedItems(items: SharedItemInput[], delivery: De
  * Paylaşan referal ola bilərsə (məs. həkim mağazanın referal proqramındadır)
  * həmin məhsullar üçün referal linki yaradılır — alış olanda komissiya ona yazılır.
  */
-export async function attachReferral(sharerId: number, items: SharedItemInput[]): Promise<SharedItemInput[]> {
+export async function attachReferral(sharerId: number, items: SharedItemInput[], percents?: Map<number, number>): Promise<SharedItemInput[]> {
   const out: SharedItemInput[] = [];
   const linkByProgram = new Map<number, number>();
   for (const it of items) {
-    const l = await prisma.listing.findUnique({ where: { id: it.listingId }, select: { id: true, userId: true, businessObjectId: true, businessId: true, referralMode: true, status: true } });
+    const l = await prisma.listing.findUnique({ where: { id: it.listingId }, select: { id: true, userId: true, businessObjectId: true, businessId: true, referralMode: true, referralPercent: true, status: true } });
     let refId: number | null = null;
     if (l && l.status === 'APPROVED') {
       const p = await programForListing(l);
-      if (p && listingIncluded(p, l) && (await eligibility(p, sharerId)).ok) {
+      const el = p && listingIncluded(p, l) ? await eligibility(p, sharerId) : null;
+      if (p && el?.ok) {
+        // Paylaşana göstərmək üçün: bu məhsuldan neçə faiz komissiya qazanacaq.
+        percents?.set(l.id, percentFor(p, l, el));
         if (!linkByProgram.has(p.id)) {
           const link = await prisma.referralCart.create({
             data: {

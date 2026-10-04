@@ -210,12 +210,35 @@ router.post('/cart/share', adminAuth, async (req: AuthRequest, res: Response) =>
       if (!loc.phone) { res.status(400).json({ success: false, message: 'Əlaqə telefonunu yazın (kuryer/satıcı zəng edə bilsin)' }); return; }
       delivery = { deliveryType: dType, deliveryMethod: dMethod as any, latitude: loc.latitude, longitude: loc.longitude };
     }
-    const v = await validateSharedItems(items, delivery, { card: deliveryMode === 'SENDER', buyerId: recipientUserId || req.adminId });
+    // KİM ALIR — ixtisas endirimi yalnız ALANIN öz ixtisasına görə verilir:
+    //   • SENDER («başqası ödəsin»): mal paylaşana (və ya seçdiyi dosta) gedir — alan odur;
+    //   • RECIPIENT / paket: linki açan öz səbətinə atıb özü alır — alan odur.
+    // Əvvəl RECIPIENT linkində qiymət PAYLAŞANIN (məs. həkimin) endirimi ilə
+    // göstərilirdi; açan şəxs isə tam qiymət ödəyirdi. Həkim məhsulu başqasına
+    // yönləndirəndə endirim ötürülmür — o, komissiya qazanır.
+    const buyerForPrice = deliveryMode === 'SENDER' ? (recipientUserId || me) : (recipientUserId || null);
+    const v = await validateSharedItems(items, delivery, { card: deliveryMode === 'SENDER', buyerId: buyerForPrice });
     if (!v.ok) { res.status(400).json({ success: false, message: v.message }); return; }
 
     // Qiymət surəti (ödəyən qiymət dəyişibsə xəbərdar olsun) + referal (paylaşan uyğundursa).
     const snap = items.map((i) => ({ ...i, price: v.lines.find((l) => l.listingId === i.listingId)?.unit }));
-    const withRef = await attachReferral(me, snap);
+    // Paylaşan özü alırsa (mal ona gedir) referal YOXDUR — öz alışından komissiya olmur.
+    const selfBuy = buyerForPrice === me;
+    const pcts = new Map<number, number>();
+    const withRef = selfBuy ? snap.map((i) => ({ ...i, referralCartId: null })) : await attachReferral(me, snap, pcts);
+
+    // Paylaşana xülasə: alan nə qədər ödəyəcək, o özü nə qədər qazanacaq / qənaət edəcək.
+    const r2s = (n: number) => Math.round(n * 100) / 100;
+    const goodsTotal = r2s(v.lines.reduce((a, l) => a + l.lineTotal, 0));
+    const deliveryFee = r2s(Array.from(v.feeBySeller.values()).reduce((a, b) => a + b, 0));
+    const commission = r2s(v.lines.reduce((a, l) => a + (pcts.has(l.listingId) ? l.lineTotal * pcts.get(l.listingId)! / 100 : 0), 0));
+    const proDiscount = r2s(v.lines.reduce((a, l) => a + (l.proDiscountAmount || 0), 0));
+    const summary = {
+      goodsTotal, deliveryFee, payerTotal: r2s(goodsTotal + deliveryFee),
+      commission, commissionItems: v.lines.filter((l) => pcts.has(l.listingId)).length,
+      proDiscount, proDiscountProfession: v.lines.find((l) => l.proDiscountProfession)?.proDiscountProfession || null,
+      selfBuy,
+    };
 
     let token = shareToken();
     for (let i = 0; i < 5; i++) {
@@ -246,7 +269,7 @@ router.post('/cart/share', adminAuth, async (req: AuthRequest, res: Response) =>
     if (req.body?.removeFromCart === true && chosenCartItemIds.length) {
       await prisma.cartItem.deleteMany({ where: { id: { in: chosenCartItemIds }, cart: { userId: me } } }).catch(() => {});
     }
-    res.json({ success: true, token, expiresAt: new Date(Date.now() + SHARE_LINK_DAYS * 24 * 3600 * 1000), referral: withRef.some((i) => i.referralCartId) });
+    res.json({ success: true, token, expiresAt: new Date(Date.now() + SHARE_LINK_DAYS * 24 * 3600 * 1000), referral: withRef.some((i) => i.referralCartId), summary });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
 
