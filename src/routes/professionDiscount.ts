@@ -3,7 +3,7 @@ import { Router, Request, Response } from 'express';
 import { PrismaClient } from '@prisma/client';
 import { adminAuth, AuthRequest, viewerIdFromReq } from '../middleware/auth';
 import { activeRules, listingProDiscountInfo, normProf, PRO_DISCOUNT_MAX, verifiedProfessions } from '../services/professionDiscount';
-import { getOrCreateProgram, DOC_TYPES } from '../services/referral';
+import { getOrCreateProgram, eligibility, DOC_TYPES } from '../services/referral';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -173,6 +173,84 @@ router.put('/me/objects/:id/profession-terms', adminAuth, async (req: AuthReques
     }
     await prisma.$transaction(ops);
     res.json({ success: true, count: clean.length });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
+// ── MƏNƏ GÜZƏŞT VERƏN OBYEKTLƏR ─────────────────────────────────────────────
+// İxtisas sahibi üçün: hansı mağazalar onun ixtisasına ALANDA endirim, SATANDA
+// (referal) komissiya verir. Hər güzəşt üçün «indi istifadə edə bilərəmmi» və
+// yoxdursa nə çatışmır (təsdiqli sənəd, CV və s.) göstərilir.
+router.get('/me/profession-benefits', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const me = req.adminId!;
+    const u = await prisma.user.findUnique({ where: { id: me }, select: { profession: true, professions: true } });
+    const declared = Array.from(new Set([u?.profession, ...(u?.professions || [])].map((x) => (x || '').trim()).filter(Boolean)));
+    const verified = await verifiedProfessions(me);
+    const mine = new Set([...declared.map(normProf), ...verified]);
+    if (!mine.size) { res.json({ success: true, professions: declared, verified: [], objects: [] }); return; }
+
+    const liveObject = { isActive: true, deletedAt: null, business: { status: 'APPROVED' as const, isActive: true, deletedAt: null, userId: { not: me } } };
+    const now = new Date();
+    const [discounts, programs] = await Promise.all([
+      prisma.professionDiscount.findMany({
+        where: { active: true, OR: [{ validUntil: null }, { validUntil: { gt: now } }], object: liveObject },
+        select: { businessObjectId: true, profession: true, percent: true, scope: true, listingIds: true },
+        take: 2000,
+      }),
+      prisma.referralProgram.findMany({
+        where: { enabled: true, objectId: { not: null }, sellerId: { not: me }, rules: { some: {} } },
+        include: { rules: true },
+        take: 500,
+      }),
+    ]);
+
+    type Row = { profession: string; discountPercent: number | null; discountProducts: number | null; discountReady: boolean; commissionPercent: number | null; requiredDoc: string | null; commissionReady: boolean; commissionReason: string | null };
+    const byObj = new Map<number, Map<string, Row>>();
+    const rowOf = (objId: number, profession: string) => {
+      const m = byObj.get(objId) || new Map<string, Row>();
+      byObj.set(objId, m);
+      const k = normProf(profession);
+      const r = m.get(k) || { profession, discountPercent: null, discountProducts: null, discountReady: false, commissionPercent: null, requiredDoc: null, commissionReady: false, commissionReason: null };
+      m.set(k, r);
+      return r;
+    };
+    for (const d of discounts) {
+      if (!mine.has(normProf(d.profession))) continue;
+      const r = rowOf(d.businessObjectId, d.profession);
+      r.discountPercent = d.percent;
+      r.discountProducts = d.scope === 'SELECTED' ? d.listingIds.length : null;
+      r.discountReady = verified.has(normProf(d.profession));   // endirim yalnız təsdiqli sənədlə
+    }
+    for (const p of programs) {
+      const rules = p.rules.filter((x) => mine.has(normProf(x.profession)));
+      if (!rules.length) continue;
+      const el = await eligibility(p, me);
+      for (const x of rules) {
+        const r = rowOf(p.objectId!, x.profession);
+        r.commissionPercent = x.commissionPercent;
+        r.requiredDoc = x.requiredDoc;
+        r.commissionReady = el.ok;
+        r.commissionReason = el.ok ? null : el.reason;
+      }
+    }
+
+    const ids = Array.from(byObj.keys());
+    const [objs, counts] = await Promise.all([
+      prisma.businessObject.findMany({ where: { id: { in: ids }, ...liveObject }, select: { id: true, name: true, city: true, address: true, business: { select: { name: true } } } }),
+      prisma.listing.groupBy({ by: ['businessObjectId'], where: { businessObjectId: { in: ids }, status: 'APPROVED', archivedAt: null }, _count: { _all: true } }),
+    ]);
+    const objects = objs.map((o) => {
+      const benefits = Array.from(byObj.get(o.id)!.values());
+      return {
+        id: o.id, name: o.name, city: o.city, address: o.address, businessName: o.business?.name || null,
+        listingCount: counts.find((c) => c.businessObjectId === o.id)?._count._all || 0,
+        benefits,
+        ready: benefits.some((b) => b.discountReady || b.commissionReady),
+      };
+    }).filter((o) => o.listingCount > 0)
+      .sort((a, b) => Number(b.ready) - Number(a.ready) || b.listingCount - a.listingCount);
+
+    res.json({ success: true, professions: declared, verified: declared.filter((d) => verified.has(normProf(d))), objects });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
 
