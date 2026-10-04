@@ -1515,6 +1515,11 @@ model ConsultationSession {
   durationSeconds Int // ümumi alınan vaxt (saniyə) — top-up ilə artır
   consumedSeconds Int                @default(0)
   runningSince    DateTime? // ACTIVE olduqda dolu; pauza/bitmədə null
+  // AVTOMATİK SAYĞAC: vaxt yalnız QARŞILIQLI yazışma zamanı işləyir. Tərəflərdən
+  // biri müəyyən müddət yazmasa sayğac özü dayanır (PAUSED), hər ikisi yenidən
+  // yazanda davam edir. Bax: services/consultClock.ts.
+  lastBuyerMsgAt  DateTime?
+  lastProMsgAt    DateTime?
   status          ConsultationStatus @default(REQUESTED)
   paymentStatus   String             @default("UNPAID") // UNPAID/PAID
   gatewayProvider String?

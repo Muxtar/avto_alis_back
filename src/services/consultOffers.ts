@@ -14,6 +14,9 @@
 // Pulu almaq (qəbul / qarşı təklif) üçün peşəkarın təsdiqlənmiş VÖEN-li biznesi olmalıdır.
 import { PrismaClient, ConsultationSession, ConsultationPayment } from '@prisma/client';
 import { hasVoenAccount } from './proAccount';
+import { startClockData, CONSULT_IDLE_SECONDS } from './consultClock';
+
+const IDLE_MIN = Math.round(CONSULT_IDLE_SECONDS / 60);
 import { createPayment as createGatewayPayment, refundOrder } from './paymentGateway';
 import { emitToUser } from './callSignaling';
 
@@ -178,9 +181,11 @@ export async function acceptOffer(id: number, proId: number) {
   need(s.professionalId === proId, 'Tapılmadı');
   need(s.status === 'OFFERED' && s.paymentStatus === 'PAID', 'Bu təklif artıq qəbul edilə bilməz');
   need(await hasApprovedBusiness(proId), 'Ödənişi almaq üçün əvvəlcə VÖEN hesabınızı yazın (Profil → Rəy konsultasiyası). Təklif o vaxta qədər gözləyir.', 'NEEDS_VOEN');
-  const up = await prisma.consultationSession.update({ where: { id }, data: { status: 'ACTIVE', runningSince: new Date(), startedAt: new Date() } });
-  await chatMsg(up, false, '✅ Təklif qəbul edildi — söhbət açıldı.');
-  await notify(up.buyerId, 'Təklifiniz qəbul edildi ✓', 'Söhbət açıldı, vaxt işləyir.', id);
+  // Növbə / vaxt təyini yoxdur: qəbul edən kimi vaxt axmağa başlayır.
+  const up = await prisma.consultationSession.update({ where: { id }, data: { ...startClockData(), startedAt: new Date() } });
+  await chatMsg(up, false, '✅ Sorğu qəbul edildi — söhbət açıldı, vaxt başladı.');
+  await notify(up.buyerId, 'Sorğunuz qəbul edildi ✓', `Daxil olun və rəy almağa başlayın. Vaxt yalnız qarşılıqlı yazışma zamanı işləyir — ${IDLE_MIN} dəqiqə yazılmasa özü dayanır.`, id);
+  emitToUser(up.buyerId, 'live:update', { kind: 'consultation', id, status: 'ACTIVE', toast: 'Rəy sorğunuz qəbul edildi — daxil olun ✓', tone: 'success', at: Date.now() });
   return up;
 }
 
@@ -226,12 +231,12 @@ async function applyCounter(id: number) {
   const up = await prisma.consultationSession.update({
     where: { id },
     data: {
-      price: s.counterPrice, durationSeconds: sec, blockSeconds: sec, status: 'ACTIVE', runningSince: new Date(), startedAt: new Date(),
+      price: s.counterPrice, durationSeconds: sec, blockSeconds: sec, ...startClockData(), startedAt: new Date(),
       counterPrice: null, counterMinutes: null, counterMessage: null, pendingTopUp: null,
     },
   });
   await chatMsg(up, true, `✅ Qarşı təklif qəbul edildi (${offerLine(s.counterMinutes, s.counterPrice)}) — söhbət açıldı.`);
-  await notify(up.professionalId, 'Qarşı təklifiniz qəbul edildi ✓', 'Söhbət açıldı, vaxt işləyir.', id);
+  await notify(up.professionalId, 'Qarşı təklifiniz qəbul edildi ✓', `Söhbət açıldı, vaxt başladı. Vaxt yalnız qarşılıqlı yazışma zamanı işləyir (${IDLE_MIN} dəq yazılmasa dayanır).`, id);
 }
 
 /** Alıcı qarşı təklifə razıdır. Baha çıxıbsa fərqi ödəməlidir (needsPayment), ucuzdursa artıq qaytarılır. */

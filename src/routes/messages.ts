@@ -3,6 +3,7 @@ import { Prisma, PrismaClient } from '@prisma/client';
 import { adminAuth, AuthRequest } from '../middleware/auth';
 import { messageLimiter } from '../middleware/rateLimiter';
 import { emitToUser, isUserOnline } from '../services/callSignaling';
+import { remainingOf, touchClock } from '../services/consultClock';
 import { createPending } from './invites';
 import { markReadForChat } from '../services/notificationRead';
 import { chatUpload } from '../middleware/upload';
@@ -80,14 +81,12 @@ async function segFields(senderId: number, receiver: number, body: any) {
 // Aktiv seans yoxdursa yazmaq olmaz (ödənişli vaxt bitib / başlamayıb).
 async function activeConsultation(a: number, b: number): Promise<number> {
   const list = await prisma.consultationSession.findMany({
-    where: { status: 'ACTIVE', OR: [{ buyerId: a, professionalId: b }, { buyerId: b, professionalId: a }] },
+    // PAUSED da daxildir: sayğac yazışma kəsiləndə dayanır, yazışma ilə davam edir.
+    where: { status: { in: ['ACTIVE', 'PAUSED', 'PAID'] }, OR: [{ buyerId: a, professionalId: b }, { buyerId: b, professionalId: a }] },
     orderBy: { id: 'desc' }, take: 5,
   });
-  for (const s of list) {
-    const used = s.consumedSeconds + (s.runningSince ? Math.floor((Date.now() - new Date(s.runningSince).getTime()) / 1000) : 0);
-    if (s.durationSeconds - used > 0) return s.id;
-  }
-  throw new Error('Ödənişli söhbət aktiv deyil — peşəkar seansı başladandan sonra yaza bilərsiniz');
+  for (const s of list) if (remainingOf(s) > 0) return s.id;
+  throw new Error('Ödənişli söhbət aktiv deyil — sorğu qəbul edilməyib və ya vaxt bitib');
 }
 
 // Platformada OLMAYAN şəxsə (nömrə / sosial hesab) media, konum, kontakt — gözləmədə
@@ -174,10 +173,9 @@ router.post('/messages', messageLimiter, adminAuth, async (req: AuthRequest, res
       if (!s || (s.buyerId !== req.adminId && s.professionalId !== req.adminId)) {
         res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return;
       }
-      const used = s.consumedSeconds + (s.status === 'ACTIVE' && s.runningSince ? Math.floor((Date.now() - new Date(s.runningSince).getTime()) / 1000) : 0);
-      const remaining = s.durationSeconds - used;
-      if (s.status !== 'ACTIVE' || remaining <= 0) {
-        res.status(403).json({ success: false, message: 'Konsultasiya aktiv deyil — vaxt bitib və ya başlanmayıb' }); return;
+      // Sayğac dayanıbsa (PAUSED) yenə yazmaq olar — məhz yazışma onu davam etdirir.
+      if (!['ACTIVE', 'PAUSED', 'PAID'].includes(s.status) || remainingOf(s) <= 0) {
+        res.status(403).json({ success: false, message: 'Konsultasiya aktiv deyil — sorğu qəbul edilməyib və ya vaxt bitib' }); return;
       }
     }
 
@@ -249,6 +247,8 @@ router.post('/messages', messageLimiter, adminAuth, async (req: AuthRequest, res
     emitToUser(receiver, 'chat:message', message);
     emitToUser(req.adminId!, 'chat:message', message);
     if (online) emitToUser(req.adminId!, 'chat:delivered', { ids: [message.id], deliveredAt: message.deliveredAt });
+    // Rəy konsultasiyası: mesaj = fəallıq. Sayğac qarşılıqlı yazışmaya görə işləyir / dayanır.
+    if (consultId) await touchClock(consultId, req.adminId!);
 
     res.status(201).json({ success: true, message });
   } catch (error: any) {

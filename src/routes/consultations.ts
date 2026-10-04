@@ -2,6 +2,8 @@ import { Router, Response } from 'express';
 import { PrismaClient, ConsultationSession } from '@prisma/client';
 import { adminAuth, AuthRequest } from '../middleware/auth';
 import { hasVoenAccount, voenAccount, normVoen, normIban, isVoen, isAzIban } from '../services/proAccount';
+import { remainingOf, usedSeconds, syncClock, touchClock, waitingFor, mutualUntil, startClockData, tickConsultClocks, CONSULT_IDLE_SECONDS } from '../services/consultClock';
+import { emitToUser } from '../services/callSignaling';
 import { createPayment as createGatewayPayment } from '../services/paymentGateway';
 import { Prisma } from '@prisma/client';
 import {
@@ -16,23 +18,14 @@ const prisma = new PrismaClient();
 const PUBLIC_BACKEND_URL = process.env.PUBLIC_BACKEND_URL || `http://localhost:${process.env.PORT || 5001}`;
 
 // Qalan saniyə — ACTIVE olduqda runningSince-dən keçən vaxt da çıxılır.
+// Sayğac avtomatikdir (services/consultClock): yalnız qarşılıqlı yazışma sayılır.
 function remainingSeconds(s: ConsultationSession): number {
-  let used = s.consumedSeconds;
-  if (s.status === 'ACTIVE' && s.runningSince) {
-    used += Math.floor((Date.now() - new Date(s.runningSince).getTime()) / 1000);
-  }
-  return Math.max(0, s.durationSeconds - used);
+  return remainingOf(s);
 }
 
 // Oxunarkən vaxtı bitmiş ACTIVE seansı avtomatik ENDED et.
 async function refreshSession(s: ConsultationSession): Promise<ConsultationSession> {
-  if (s.status === 'ACTIVE' && remainingSeconds(s) <= 0) {
-    return prisma.consultationSession.update({
-      where: { id: s.id },
-      data: { status: 'ENDED', consumedSeconds: s.durationSeconds, runningSince: null, endedAt: new Date() },
-    });
-  }
-  return s;
+  return syncClock(s);   // vaxt bitibsə ENDED, yazışma kəsilibsə PAUSED
 }
 
 function publicSession(s: ConsultationSession, meId: number) {
@@ -42,6 +35,11 @@ function publicSession(s: ConsultationSession, meId: number) {
     durationSeconds: s.durationSeconds, consumedSeconds: s.consumedSeconds,
     blockSeconds: s.blockSeconds, remainingSeconds: remainingSeconds(s),
     running: s.status === 'ACTIVE', role: s.professionalId === meId ? 'professional' : 'buyer',
+    // Avtomatik sayğac: neçə saniyə yazılmasa dayanır; dayanıbsa kim gözlənilir;
+    // işləyirsə nə vaxta qədər sayılacaq (o vaxta qədər heç kim yazmasa dayanır).
+    idleSeconds: CONSULT_IDLE_SECONDS, waitingFor: waitingFor(s),
+    runsUntil: s.status === 'ACTIVE' && s.runningSince ? new Date(mutualUntil(s)).toISOString() : null,
+    canChat: ['ACTIVE', 'PAUSED', 'PAID'].includes(s.status) && remainingOf(s) > 0,
     rated: s.rated, ratingStars: s.ratingStars, ratingLike: s.ratingLike,
     needsPrice: s.flow !== 'OFFER' && !s.offerId && !(s.price > 0), // nömrəyə göndərilmiş köhnə sorğu — qiyməti peşəkar yazır
     createdAt: s.createdAt, startedAt: s.startedAt, endedAt: s.endedAt,
@@ -358,36 +356,31 @@ router.post('/consultations/:id/pay', consultationLimiter, adminAuth, async (req
 });
 
 // Başlat / Davam et (peşəkar) — sayğacı işə salır.
+// «Başlat» və «Dayandır» artıq əl ilə idarə DEYİL — sayğac avtomatikdir. Bu iki
+// ünvan köhnə tətbiqlər (iOS) üçün saxlanılır: «start» = peşəkar buradadır
+// (yazışma kimi sayılır), «pause» = sayğacı indi dayandır (növbəti qarşılıqlı
+// yazışmada özü davam edəcək).
 router.post('/consultations/:id/start', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
     const id = parseInt(String(req.params.id));
     const s0 = await prisma.consultationSession.findUnique({ where: { id } });
     if (!s0 || s0.professionalId !== req.adminId) { res.status(404).json({ success: false, message: 'Tapılmadı' }); return; }
-    const s = await refreshSession(s0);
-    if (!['PAID', 'REFUND_PENDING'].includes(s.paymentStatus)) { res.status(400).json({ success: false, message: 'Ödəniş tamamlanmayıb' }); return; }
+    if (!['PAID', 'REFUND_PENDING'].includes(s0.paymentStatus)) { res.status(400).json({ success: false, message: 'Ödəniş tamamlanmayıb' }); return; }
+    await touchClock(id, req.adminId!);
+    const s = await refreshSession((await prisma.consultationSession.findUnique({ where: { id } }))!);
     if (s.status === 'ENDED' || remainingSeconds(s) <= 0) { res.status(400).json({ success: false, message: 'Vaxt bitib — alıcı yenidən ödəməlidir' }); return; }
-    if (s.status === 'ACTIVE') { res.json({ success: true, session: publicSession(s, req.adminId!) }); return; }
-    const updated = await prisma.consultationSession.update({
-      where: { id }, data: { status: 'ACTIVE', runningSince: new Date(), startedAt: s.startedAt || new Date() },
-    });
-    res.json({ success: true, session: publicSession(updated, req.adminId!) });
+    res.json({ success: true, session: publicSession(s, req.adminId!) });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
 
-// Dayandır / Pauza (peşəkar) — sayğacı saxlayır, vaxt qorunur.
 router.post('/consultations/:id/pause', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
     const id = parseInt(String(req.params.id));
-    const s = await prisma.consultationSession.findUnique({ where: { id } });
-    if (!s || s.professionalId !== req.adminId) { res.status(404).json({ success: false, message: 'Tapılmadı' }); return; }
+    const s0 = await prisma.consultationSession.findUnique({ where: { id } });
+    if (!s0 || s0.professionalId !== req.adminId) { res.status(404).json({ success: false, message: 'Tapılmadı' }); return; }
+    const s = await refreshSession(s0);
     if (s.status !== 'ACTIVE') { res.json({ success: true, session: publicSession(s, req.adminId!) }); return; }
-    const elapsed = s.runningSince ? Math.floor((Date.now() - new Date(s.runningSince).getTime()) / 1000) : 0;
-    const consumed = Math.min(s.durationSeconds, s.consumedSeconds + elapsed);
-    const ended = consumed >= s.durationSeconds;
-    const updated = await prisma.consultationSession.update({
-      where: { id },
-      data: { consumedSeconds: consumed, runningSince: null, status: ended ? 'ENDED' : 'PAUSED', endedAt: ended ? new Date() : null },
-    });
+    const updated = await prisma.consultationSession.update({ where: { id }, data: { consumedSeconds: usedSeconds(s), runningSince: null, status: 'PAUSED', lastProMsgAt: null } });
     res.json({ success: true, session: publicSession(updated, req.adminId!) });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
@@ -398,11 +391,20 @@ router.post('/consultations/:id/end', adminAuth, async (req: AuthRequest, res: R
     const id = parseInt(String(req.params.id));
     const s = await prisma.consultationSession.findUnique({ where: { id } });
     if (!s || (s.buyerId !== req.adminId && s.professionalId !== req.adminId)) { res.status(404).json({ success: false, message: 'Tapılmadı' }); return; }
-    const elapsed = s.status === 'ACTIVE' && s.runningSince ? Math.floor((Date.now() - new Date(s.runningSince).getTime()) / 1000) : 0;
+    if (s.status === 'ENDED') { res.json({ success: true, session: publicSession(s, req.adminId!) }); return; }
     const updated = await prisma.consultationSession.update({
       where: { id },
-      data: { status: 'ENDED', consumedSeconds: Math.min(s.durationSeconds, s.consumedSeconds + elapsed), runningSince: null, endedAt: new Date() },
+      data: { status: 'ENDED', consumedSeconds: usedSeconds(s), runningSince: null, endedAt: new Date() },
     });
+    // Qarşı tərəfə xəbər — alıcı rəy bildirə və ya şikayət edə bilər.
+    const other = s.buyerId === req.adminId ? s.professionalId : s.buyerId;
+    await prisma.notification.createMany({
+      data: [
+        ...(other ? [{ userId: other, type: 'CONSULTATION' as const, title: 'Konsultasiya bitirildi', body: other === s.buyerId ? 'Peşəkar seansı bitirdi. Rəy bildirə və ya şikayət edə bilərsiniz.' : 'Alıcı seansı bitirdi.', link: `/consultations/${id}` }] : []),
+        ...(req.adminId === s.buyerId ? [] : []),
+      ],
+    }).catch(() => {});
+    for (const uid of [s.buyerId, s.professionalId]) if (uid) emitToUser(uid, 'live:update', { kind: 'consultation', id, status: 'ENDED', at: Date.now() });
     res.json({ success: true, session: publicSession(updated, req.adminId!) });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
@@ -456,7 +458,9 @@ export async function settleConsultation(where: { gatewayOrderId?: number | null
       where: { id: s.id },
       data: {
         paymentStatus: 'PAID',
-        status: 'PAID',
+        // Peşəkar artıq qəbul edib — ödəniş keçən kimi vaxt başlayır (əl ilə «Başlat» yoxdur).
+        ...startClockData(),
+        startedAt: s.startedAt || new Date(),
         durationSeconds: s.durationSeconds + addBlock,
         endedAt: null,
         settledRefs: { push: ref },
@@ -479,32 +483,6 @@ export async function settleConsultation(where: { gatewayOrderId?: number | null
  * tərəfə bildiriş göndərir.
  */
 export async function endExpiredConsultations(): Promise<number> {
-  try {
-    const active = await prisma.consultationSession.findMany({
-      where: { status: 'ACTIVE', runningSince: { not: null } },
-      select: { id: true, buyerId: true, professionalId: true, durationSeconds: true, consumedSeconds: true, runningSince: true },
-    });
-    let closed = 0;
-    for (const s of active) {
-      const elapsed = Math.floor((Date.now() - new Date(s.runningSince!).getTime()) / 1000);
-      if (s.consumedSeconds + elapsed < s.durationSeconds) continue;   // vaxt hələ var
-      await prisma.consultationSession.update({
-        where: { id: s.id },
-        data: { status: 'ENDED', consumedSeconds: s.durationSeconds, runningSince: null, endedAt: new Date() },
-      });
-      closed++;
-      // Hər iki tərəfə bildiriş — alıcı rəy/şikayət üçün geri dönsün.
-      await prisma.notification.createMany({
-        data: [
-          { userId: s.buyerId, type: 'CONSULTATION', title: 'Konsultasiya bitdi', body: 'Vaxt tamamlandı. Rəy bildirə və ya şikayət edə bilərsiniz.', link: `/consultations/${s.id}` },
-          ...(s.professionalId ? [{ userId: s.professionalId, type: 'CONSULTATION', title: 'Konsultasiya bitdi', body: 'Seansın vaxtı tamamlandı.', link: `/consultations/${s.id}` }] : []),
-        ],
-      }).catch(() => {});
-    }
-    if (closed > 0) console.log(`[consultations] vaxtı bitən ${closed} seans bağlandı`);
-    return closed;
-  } catch (e) {
-    console.error('[consultations] endExpiredConsultations xəta:', (e as any)?.message);
-    return 0;
-  }
+  // Bitən seanslar bağlanır, qarşılıqlı yazışması kəsilənlərin sayğacı dayanır.
+  return tickConsultClocks();
 }
