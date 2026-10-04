@@ -7,6 +7,7 @@ import { upload } from '../middleware/upload';
 import { processImages } from '../middleware/imageProcess';
 import { pushLive, pushAdmins } from '../services/live';
 import { hasObjectPerm, staffObjectIds } from '../services/bizAccess';
+import { notifyStaff, logStaffActivity, objectOfOrder, objectOfListing, onSuccess } from '../services/staffWork';
 import { createSellerComplaint, SELLER_COMPLAINT_CATEGORIES } from '../services/sellerReputation';
 
 const router = Router();
@@ -100,6 +101,10 @@ router.post('/complaints', complaintLimiter, adminAuth, upload.array('images', M
       }
       // Alış yoxdursa — elan haqqında bildiriş (admin moderasiyası, reytinqə təsir etmir).
       const complaint = await createSellerComplaint({ complainantId: req.adminId!, targetUserId, orderId: oid, listingId, category, description, images });
+      // «Şikayətlərə cavab» icazəli mağaza işçiləri də xəbər tutsun.
+      (oid ? objectOfOrder(oid) : listingId ? objectOfListing(listingId) : Promise.resolve({ objectId: null, businessId: null }))
+        .then((at) => notifyStaff(at, 'complaints', { type: 'COMPLAINT', title: `Yeni şikayət${oid ? ` — sifariş #${oid}` : ''}`, body: String(description || '').slice(0, 160), link: '/complaints', kind: 'complaint', id: complaint.id }))
+        .catch(() => {});
       res.json({ success: true, complaint, affectsRating: !!oid });
       return;
     }
@@ -138,6 +143,7 @@ router.post('/complaints/:id/respond', complaintLimiter, adminAuth, upload.array
     // Hədəf satıcı və ya şikayətin aid olduğu mağazada «şikayətlərə cavab» icazəli işçi.
     if (!c || (c.targetUserId !== req.adminId && !(await staffCanAnswer(c, req.adminId!)))) { res.status(404).json({ success: false, message: 'Şikayət tapılmadı' }); return; }
     if (c.status === 'RESOLVED' || c.status === 'REJECTED') { res.status(400).json({ success: false, message: 'Şikayət bağlanıb' }); return; }
+    onSuccess(res, () => { (c.orderId ? objectOfOrder(c.orderId) : c.listingId ? objectOfListing(c.listingId) : Promise.resolve({ objectId: null, businessId: null })).then((at) => logStaffActivity(at, req.adminId!, { action: 'complaint.responded', targetType: 'complaint', targetId: c.id, summary: `Şikayət #${c.id}-ə cavab yazdı` })); });
     const response = String(req.body?.response || '').trim();
     if (response.length < 10) { res.status(400).json({ success: false, message: 'Cavabınızı ətraflı yazın (ən azı 10 simvol)' }); return; }
     const images = ((req.files as Express.Multer.File[] | undefined) || []).map((f) => f.filename);

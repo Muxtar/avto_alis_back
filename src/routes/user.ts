@@ -12,6 +12,7 @@ import { resolveFlag } from '../services/settings';
 import { emitToAdmins } from '../services/callSignaling';
 import { pushAdmins, pushLive } from '../services/live';
 import { canManageListing, sellableObjects, canSellAtObject } from '../services/bizAccess';
+import { logStaffActivity } from '../services/staffWork';
 import { validateTiers } from '../services/tierPricing';
 import { MIN_WINDOW_DAYS, MAX_WINDOW_DAYS, RETURN_WINDOW_DAYS } from '../services/groupBuy';
 import { isValidMonths } from '../services/installment';
@@ -752,6 +753,7 @@ router.post('/me/listings', listingWriteLimiter, adminAuth, upload.array('images
 
     // Moderasiya növbəsinə düşdü — admin paneli dərhal görsün.
     pushAdmins('listing', { id: listing.id, toast: `Yeni elan təsdiq gözləyir: ${listing.title}` });
+    logStaffActivity({ businessId: listing.businessId, objectId: listing.businessObjectId }, req.adminId!, { action: 'listing.created', targetType: 'listing', targetId: listing.id, summary: `Məhsul əlavə etdi: «${listing.title}»` });
     res.status(201).json({ success: true, listing });
   } catch (error: any) {
     console.error('[POST /me/listings] error:', error.message, error.code, error);
@@ -915,6 +917,7 @@ router.put('/me/listings/:id', adminAuth, upload.array('images', 5), processImag
         });
       }
     }
+    logStaffActivity({ businessId: listing.businessId, objectId: listing.businessObjectId }, req.adminId!, { action: 'listing.updated', targetType: 'listing', targetId: listing.id, summary: `Məhsulu dəyişdi: «${listing.title}» (qiymət ${listing.price}, stok ${listing.stock})` });
     res.json({ success: true, listing });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
@@ -1053,6 +1056,7 @@ router.delete('/me/listings/:id', adminAuth, async (req: AuthRequest, res: Respo
     if (existing.images) for (const img of existing.images) fs.unlink(path.join(__dirname, "../../uploads", img), () => {});
 
     await prisma.listing.delete({ where: { id: existing.id } });
+    logStaffActivity({ businessId: existing.businessId, objectId: existing.businessObjectId }, req.adminId!, { action: 'listing.deleted', targetType: 'listing', targetId: existing.id, summary: `Məhsulu sildi: «${existing.title}»` });
     res.json({ success: true });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });

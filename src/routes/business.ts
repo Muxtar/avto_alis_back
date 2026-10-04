@@ -15,7 +15,8 @@ import fs from 'fs';
 import path from 'path';
 import { archiveBusinessPayee } from '../services/payoutArchive';
 import { pushLive, pushAdmins, pushPublicListings } from '../services/live';
-import { STAFF_PERMS, STAFF_ROLES, STAFF_PERM_LABEL, effectivePerms, permsToData, hasObjectPerm, hasBusinessPerm } from '../services/bizAccess';
+import { STAFF_PERMS, STAFF_ROLES, STAFF_PERM_LABEL, effectivePerms, permsToData, hasObjectPerm, hasBusinessPerm, canManageOrderAsSeller } from '../services/bizAccess';
+import { staffWithPerm, objectOfOrder, logStaffActivity } from '../services/staffWork';
 
 const PUBLIC_BACKEND_URL = process.env.PUBLIC_BACKEND_URL || `http://localhost:${process.env.PORT || 5001}`;
 
@@ -1052,6 +1053,80 @@ router.get('/me/businesses/:id/orders', adminAuth, async (req: AuthRequest, res:
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }
+});
+
+// ── İŞ BÖLGÜSÜ: sifarişi işçiyə təyin et ──
+// Sahib istənilən «sifarişlər» icazəli işçiyə təyin edir; işçi özü «üzərimə
+// götürürəm» deyə bilər (və ya buraxa bilər). userId = null → təyinat silinir.
+router.put('/orders/:id/assign', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const id = parseInt(String(req.params.id));
+    const order = await prisma.order.findUnique({ where: { id }, select: { id: true, sellerId: true, status: true, assignedStaffId: true } });
+    if (!order) { res.status(404).json({ success: false, message: 'Sifariş tapılmadı' }); return; }
+    if (!(await canManageOrderAsSeller(id, order.sellerId, req.adminId!, 'orders'))) { res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return; }
+    const at = await objectOfOrder(id);
+    if (!at.businessId) { res.status(400).json({ success: false, message: 'Bu sifariş mağazaya aid deyil' }); return; }
+    const biz = await prisma.business.findUnique({ where: { id: at.businessId }, select: { userId: true } });
+    const isOwner = biz?.userId === req.adminId;
+    const raw = req.body?.userId;
+    const target = raw === null || raw === '' || raw === undefined ? null : parseInt(String(raw));
+    if (target !== null) {
+      // İşçi yalnız ÖZÜNÜ təyin edə bilər; başqasını yalnız sahib.
+      if (!isOwner && target !== req.adminId) { res.status(403).json({ success: false, message: 'Başqa işçiyə yalnız biznes sahibi təyin edə bilər' }); return; }
+      const ok = target === biz?.userId || (await staffWithPerm(at.businessId, at.objectId, 'orders')).includes(target);
+      if (!ok) { res.status(400).json({ success: false, message: 'Bu şəxsin həmin mağazada sifariş icazəsi yoxdur' }); return; }
+    } else if (!isOwner && order.assignedStaffId && order.assignedStaffId !== req.adminId) {
+      res.status(403).json({ success: false, message: 'Başqasının təyinatını yalnız biznes sahibi silə bilər' }); return;
+    }
+    const name = target ? (await prisma.user.findUnique({ where: { id: target }, select: { name: true } }))?.name || `#${target}` : null;
+    const updated = await prisma.order.update({ where: { id }, data: { assignedStaffId: target, assignedStaffName: name }, select: { id: true, assignedStaffId: true, assignedStaffName: true } });
+    if (target && target !== req.adminId) {
+      await prisma.notification.create({ data: { userId: target, type: 'ORDER', title: `Sifariş #${id} sizə təyin olundu`, body: 'Bu sifarişlə siz məşğul olursunuz.', link: '/business/sales' } }).catch(() => {});
+      pushLive(target, { kind: 'order', id, toast: `Sifariş #${id} sizə təyin olundu`, tone: 'info' });
+    }
+    logStaffActivity(at, req.adminId!, { action: target ? 'order.assigned' : 'order.unassigned', targetType: 'order', targetId: id, summary: target ? `Sifariş #${id}: ${target === req.adminId ? 'üzərinə götürdü' : `${name}-ə təyin etdi`}` : `Sifariş #${id}: təyinatı sildi` });
+    pushLive(order.sellerId, { kind: 'order', id });
+    res.json({ success: true, order: updated });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
+// Sifarişi təyin etmək üçün: bu mağazada «sifarişlər» icazəli şəxslər.
+router.get('/me/businesses/:id/order-staff', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const businessId = parseInt(String(req.params.id));
+    const objectId = req.query.objectId ? parseInt(String(req.query.objectId)) : null;
+    const biz = await prisma.business.findUnique({ where: { id: businessId }, select: { userId: true } });
+    if (!biz) { res.status(404).json({ success: false, message: 'Biznes tapılmadı' }); return; }
+    const allowed = biz.userId === req.adminId || (objectId ? await hasObjectPerm(req.adminId!, objectId, 'orders') : await hasBusinessPerm(req.adminId!, businessId, 'orders'));
+    if (!allowed) { res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return; }
+    const ids = [biz.userId, ...(await staffWithPerm(businessId, objectId, 'orders'))];
+    const users = await prisma.user.findMany({ where: { id: { in: ids } }, select: { id: true, name: true } });
+    res.json({ success: true, isOwner: biz.userId === req.adminId, me: req.adminId, staff: ids.map((id) => ({ id, name: users.find((u) => u.id === id)?.name || `#${id}`, owner: id === biz.userId })) });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
+// ── ƏMƏLİYYAT JURNALI + İŞÇİ HESABATI (yalnız biznes sahibi) ──
+router.get('/me/businesses/:id/activity', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const businessId = parseInt(String(req.params.id));
+    if (!(await ownsBiz(businessId, req.adminId!))) { res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return; }
+    const days = Math.max(1, Math.min(90, parseInt(String(req.query.days || '30')) || 30));
+    const since = new Date(Date.now() - days * 24 * 3600 * 1000);
+    const userId = req.query.userId ? parseInt(String(req.query.userId)) : null;
+    const [recent, grouped] = await Promise.all([
+      prisma.staffActivity.findMany({ where: { businessId, ...(userId ? { userId } : {}) }, orderBy: { createdAt: 'desc' }, take: 100 }),
+      prisma.staffActivity.groupBy({ by: ['userId', 'userName', 'targetType'], where: { businessId, createdAt: { gte: since } }, _count: { _all: true } }),
+    ]);
+    // İşçi üzrə hesabat: son N gündə neçə sifariş / məhsul / rəy / iadə / şikayət əməliyyatı.
+    const report = new Map<number, { userId: number; name: string; total: number; byType: Record<string, number> }>();
+    for (const g of grouped) {
+      const r = report.get(g.userId) || { userId: g.userId, name: g.userName, total: 0, byType: {} };
+      r.total += g._count._all;
+      r.byType[g.targetType || 'other'] = (r.byType[g.targetType || 'other'] || 0) + g._count._all;
+      report.set(g.userId, r);
+    }
+    res.json({ success: true, days, activity: recent, report: Array.from(report.values()).sort((a, b) => b.total - a.total) });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
 
 // Biznes sifarişinin statusu: routes/cart.ts → PUT /orders/:id/status (eyni kod

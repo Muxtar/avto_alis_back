@@ -11,6 +11,7 @@ import { normalizeGtin, isRestrictedGtin } from '../services/gtin';
 import { searchWords } from '../services/searchTerms';
 import { pushAdmins } from '../services/live';
 import { canManageListing } from '../services/bizAccess';
+import { notifyStaffNewReview } from '../services/staffWork';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -526,6 +527,7 @@ router.post('/listings/:id/comments', adminAuth, async (req: AuthRequest, res: R
     });
     pushAdmins('comment');   // admin paneli özü yenilənsin
     alertNegativeReview(comment.id);
+    notifyStaffNewReview(comment.id);
     res.status(201).json({ success: true, comment });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });

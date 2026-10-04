@@ -10,6 +10,7 @@
 import { PrismaClient } from '@prisma/client';
 import { emitToUser } from './callSignaling';
 import { pushLive, pushAdmins } from './live';
+import { notifyStaffNewOrders } from './staffWork';
 
 const prisma = new PrismaClient();
 
@@ -83,6 +84,8 @@ export async function notifySellersNewOrder(orderIds: number[]): Promise<void> {
       pushLive(o.buyerId, { kind: 'order', id: o.id });
     }
     if (claimed.length) pushAdmins('order');
+    // «Sifarişlər» icazəli mağaza işçiləri də xəbər tutsun.
+    await notifyStaffNewOrders(claimed.map((o) => o.id)).catch(() => {});
   } catch (e) {
     console.error('[orderNotify] notifySellersNewOrder:', (e as any)?.message);
   }

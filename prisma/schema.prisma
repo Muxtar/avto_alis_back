@@ -727,6 +727,9 @@ model Order {
   id                  Int             @id @default(autoincrement())
   buyerId             Int
   sellerId            Int
+  // Sifarişlə məşğul olan mağaza işçisi (iş bölgüsü). Boşdursa heç kimə təyin olunmayıb.
+  assignedStaffId     Int?
+  assignedStaffName   String?
   courierId           Int?
   status              OrderStatus     @default(PENDING)
   total               Float
@@ -2146,4 +2149,25 @@ model StorePrice {
   @@unique([receiptId, nameKey])
   @@index([barcode])
   @@index([nameKey])
+}
+
+// ── MAĞAZA ƏMƏLİYYAT JURNALI ──
+// Kim (sahib və ya işçi), nə vaxt, mağazada nə etdi: sifarişi təsdiqlədi / ləğv
+// etdi, məhsul əlavə etdi / dəyişdi, rəyə cavab yazdı, iadəni qəbul etdi və s.
+// Sahib biznes səhifəsində görür; işçi üzrə hesabat da buradan çıxır.
+model StaffActivity {
+  id         Int      @id @default(autoincrement())
+  businessId Int
+  objectId   Int?
+  userId     Int
+  userName   String
+  isOwner    Boolean  @default(false)
+  action     String // order.confirmed, order.cancelled, listing.created, review.replied ...
+  targetType String? // order | listing | review | return | complaint
+  targetId   Int?
+  summary    String
+  createdAt  DateTime @default(now())
+
+  @@index([businessId, createdAt])
+  @@index([businessId, userId, createdAt])
 }

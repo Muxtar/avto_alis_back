@@ -15,6 +15,7 @@ import { checkPrice as yangoCheckPrice, isYangoConfigured, YANGO_MAX_WEIGHT_KG, 
 import { notifySellersNewOrder } from '../services/orderNotify';
 import { notifyOrderStatus } from '../services/orderMessages';
 import { canManageOrderAsSeller, staffObjectIds } from '../services/bizAccess';
+import { notifyStaff, notifyStaffNewOrders, logStaffActivity, objectOfOrder, onSuccess } from '../services/staffWork';
 import { dispatchOrderToYango, cancelActiveYangoClaim } from './yango';
 import { pushLive, pushAdmins } from '../services/live';
 import { upload } from '../middleware/upload';
@@ -1155,6 +1156,9 @@ router.post('/cart/checkout', requireType(BUYER_TYPES), async (req: AuthRequest,
     // görə hesablanır (services/groupBuy → settleDueGroups). Bu, saxta qrup
     // yığıb sonra məhsulu qaytarmaqla endirim qoparmağın qarşısını alır.
 
+    // Nağd / balans sifarişi artıq həqiqidir — «sifarişlər» icazəli işçilərə də xəbər.
+    if (paymentMethod !== 'CARD') notifyStaffNewOrders(orders.map((o) => o.id)).catch(() => {});
+
     // KART ÖDƏNİŞİ: transaction commit olandan SONRA (xarici API çağırışı
     // tranzaksiya içində olmamalıdır) Kapital-də bir ödəniş yaradılır və
     // checkout-dakı bütün order-lər həmin gatewayOrderId ilə bağlanır.
@@ -1553,6 +1557,12 @@ router.put(['/orders/:id/status', '/me/business-orders/:id/status'], adminAuth, 
     // Satıcı hesablaşması — status/ödəniş dəyişdi (DELIVERED→AVAILABLE, CANCELLED/REFUND→REVERSED).
     await recordSettlement(id).catch(() => {});
 
+    // Əməliyyat jurnalı — satıcı tərəfində kim nə etdi (sahib və ya işçi).
+    if (isSeller) {
+      const what: Record<string, string> = { CONFIRMED: 'təsdiqlədi', SHIPPED: 'yola saldı / təhvil verdi', DELIVERED: 'çatdırıldı kimi qeyd etdi', CANCELLED: 'ləğv etdi' };
+      logStaffActivity(await objectOfOrder(order.id), req.adminId!, { action: `order.${next.toLowerCase()}`, targetType: 'order', targetId: order.id, summary: `Sifariş #${order.id}-i ${what[next] || next}` });
+    }
+
     // Bildirişlər — mətnlər bir yerdədir (services/orderMessages). Mağazadan
     // götürmədə alıcıya «hazırdır / götürdünüz?» mətnini pickupFlow göndərir,
     // ona görə burada həmin tərəf təkrar yazılmır.
@@ -1757,6 +1767,10 @@ router.post('/returns', adminAuth, upload.array('images', 6), processImages, asy
       },
     }).catch(() => {});
     pushLive(order.sellerId, { kind: 'return', id: returnReq.id, status: returnReq.status, toast: `Sifariş #${order.id} üçün iadə sorğusu gəldi`, tone: 'info' });
+    notifyStaff(await objectOfOrder(order.id), 'returns', {
+      type: 'ORDER', title: `İadə sorğusu — sifariş #${order.id}`, body: `Alıcı ${returnQuantity} ədəd üçün iadə istəyir (${refundAmount.toFixed(2)} AZN).`,
+      link: '/iadeler?tab=selling', kind: 'return', id: returnReq.id,
+    }).catch(() => {});
     pushAdmins('return', { id: returnReq.id });
     res.status(201).json({ success: true, returnRequest: returnReq });
   } catch (error: any) {
@@ -1871,6 +1885,9 @@ router.put('/returns/:id/approve', adminAuth, async (req: AuthRequest, res: Resp
     const ret = await prisma.returnRequest.findUnique({ where: { id: parseInt(req.params.id) } });
     // Satıcı (biznes sahibi) və ya həmin mağazada «iadələr» icazəli işçi.
     if (!ret || !(await canManageOrderAsSeller(ret.orderId, ret.sellerId, req.adminId!, 'returns'))) { res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return; }
+    { const retId = ret.id, ordId = ret.orderId, act = String(req.path.split('/').pop() || 'update');
+      const RET_ACT: Record<string, string> = { approve: 'qəbul etdi', reject: 'rədd etdi', receive: 'qaytarılan məhsulu təhvil aldı', 'receive-problem': 'qaytarılan məhsulda problem bildirdi', refund: 'pulu qaytardı' };
+      onSuccess(res, () => { objectOfOrder(ordId).then((at) => logStaffActivity(at, req.adminId!, { action: `return.${act}`, targetType: 'return', targetId: retId, summary: `İadə #${retId} (sifariş #${ordId}): ${RET_ACT[act] || act}` })); }); }
     if (ret.status !== 'REQUESTED') { res.status(400).json({ success: false, message: 'Bu sorğu artıq cavablandırılıb' }); return; }
     // Satıcı məbləği dəyişə bilər: 0-dan böyük, sifarişin qalığından çox olmamaqla.
     const ord0 = await prisma.order.findUnique({ where: { id: ret.orderId }, select: { total: true, refundedAmount: true } });
@@ -1900,6 +1917,9 @@ router.put('/returns/:id/reject', adminAuth, upload.array('images', 4), processI
     const ret = await prisma.returnRequest.findUnique({ where: { id: parseInt(req.params.id) } });
     // Satıcı (biznes sahibi) və ya həmin mağazada «iadələr» icazəli işçi.
     if (!ret || !(await canManageOrderAsSeller(ret.orderId, ret.sellerId, req.adminId!, 'returns'))) { res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return; }
+    { const retId = ret.id, ordId = ret.orderId, act = String(req.path.split('/').pop() || 'update');
+      const RET_ACT: Record<string, string> = { approve: 'qəbul etdi', reject: 'rədd etdi', receive: 'qaytarılan məhsulu təhvil aldı', 'receive-problem': 'qaytarılan məhsulda problem bildirdi', refund: 'pulu qaytardı' };
+      onSuccess(res, () => { objectOfOrder(ordId).then((at) => logStaffActivity(at, req.adminId!, { action: `return.${act}`, targetType: 'return', targetId: retId, summary: `İadə #${retId} (sifariş #${ordId}): ${RET_ACT[act] || act}` })); }); }
     if (ret.status !== 'REQUESTED') { res.status(400).json({ success: false, message: 'Bu sorğu artıq cavablandırılıb' }); return; }
     const note = String(req.body?.sellerNote || '').trim();
     if (note.length < 10) { res.status(400).json({ success: false, message: 'Rədd səbəbini ətraflı yazın (ən azı 10 simvol) — alıcı və sistem bunu görəcək' }); return; }
@@ -1948,6 +1968,9 @@ router.put('/returns/:id/receive', adminAuth, async (req: AuthRequest, res: Resp
     const ret = await prisma.returnRequest.findUnique({ where: { id: parseInt(req.params.id) } });
     // Satıcı (biznes sahibi) və ya həmin mağazada «iadələr» icazəli işçi.
     if (!ret || !(await canManageOrderAsSeller(ret.orderId, ret.sellerId, req.adminId!, 'returns'))) { res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return; }
+    { const retId = ret.id, ordId = ret.orderId, act = String(req.path.split('/').pop() || 'update');
+      const RET_ACT: Record<string, string> = { approve: 'qəbul etdi', reject: 'rədd etdi', receive: 'qaytarılan məhsulu təhvil aldı', 'receive-problem': 'qaytarılan məhsulda problem bildirdi', refund: 'pulu qaytardı' };
+      onSuccess(res, () => { objectOfOrder(ordId).then((at) => logStaffActivity(at, req.adminId!, { action: `return.${act}`, targetType: 'return', targetId: retId, summary: `İadə #${retId} (sifariş #${ordId}): ${RET_ACT[act] || act}` })); }); }
     if (ret.status !== 'RETURN_SHIPPED') { res.status(400).json({ success: false, message: 'Məhsul hələ göndərilməyib' }); return; }
     const updated = await prisma.returnRequest.update({
       where: { id: ret.id },
@@ -1974,6 +1997,9 @@ router.post('/returns/:id/receive-problem', complaintLimiter, adminAuth, upload.
     const ret = await prisma.returnRequest.findUnique({ where: { id: parseInt(String(req.params.id)) } });
     // Satıcı (biznes sahibi) və ya həmin mağazada «iadələr» icazəli işçi.
     if (!ret || !(await canManageOrderAsSeller(ret.orderId, ret.sellerId, req.adminId!, 'returns'))) { res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return; }
+    { const retId = ret.id, ordId = ret.orderId, act = String(req.path.split('/').pop() || 'update');
+      const RET_ACT: Record<string, string> = { approve: 'qəbul etdi', reject: 'rədd etdi', receive: 'qaytarılan məhsulu təhvil aldı', 'receive-problem': 'qaytarılan məhsulda problem bildirdi', refund: 'pulu qaytardı' };
+      onSuccess(res, () => { objectOfOrder(ordId).then((at) => logStaffActivity(at, req.adminId!, { action: `return.${act}`, targetType: 'return', targetId: retId, summary: `İadə #${retId} (sifariş #${ordId}): ${RET_ACT[act] || act}` })); }); }
     if (ret.status !== 'RETURN_SHIPPED' && ret.status !== 'RETURN_RECEIVED') { res.status(400).json({ success: false, message: 'Bu mərhələdə problem bildirmək olmaz' }); return; }
     const description = String(req.body?.description || '').trim();
     const imgs = uploadedNames(req);
@@ -2004,6 +2030,9 @@ router.put('/returns/:id/refund', adminAuth, async (req: AuthRequest, res: Respo
     const ret = await prisma.returnRequest.findUnique({ where: { id: parseInt(req.params.id) } });
     // Satıcı (biznes sahibi) və ya həmin mağazada «iadələr» icazəli işçi.
     if (!ret || !(await canManageOrderAsSeller(ret.orderId, ret.sellerId, req.adminId!, 'returns'))) { res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return; }
+    { const retId = ret.id, ordId = ret.orderId, act = String(req.path.split('/').pop() || 'update');
+      const RET_ACT: Record<string, string> = { approve: 'qəbul etdi', reject: 'rədd etdi', receive: 'qaytarılan məhsulu təhvil aldı', 'receive-problem': 'qaytarılan məhsulda problem bildirdi', refund: 'pulu qaytardı' };
+      onSuccess(res, () => { objectOfOrder(ordId).then((at) => logStaffActivity(at, req.adminId!, { action: `return.${act}`, targetType: 'return', targetId: retId, summary: `İadə #${retId} (sifariş #${ordId}): ${RET_ACT[act] || act}` })); }); }
     if (ret.status !== 'RETURN_RECEIVED') { res.status(400).json({ success: false, message: 'Məhsul hələ qəbul edilməyib' }); return; }
     const r = await finalizeReturnRefund(ret.id, 'SELLER', req.adminId!);
     if (!r.ok) { res.status(r.retrying ? 502 : 400).json({ success: false, message: r.error, retrying: r.retrying }); return; }

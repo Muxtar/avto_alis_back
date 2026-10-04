@@ -4,6 +4,7 @@ import { adminAuth, AuthRequest } from '../middleware/auth';
 import { alertNegativeReview, reviewTargetOwner, NEGATIVE_MAX } from '../services/reviewAlerts';
 import { pushLive, pushAdmins } from '../services/live';
 import { hasObjectPerm, staffObjectIds } from '../services/bizAccess';
+import { notifyStaffNewReview, logStaffActivity, objectOfListing } from '../services/staffWork';
 import { purchasedFromObject, consultedProfessional, deliveredOrderCountFromObject, consultationCount, reviewStats } from '../services/reviewGating';
 
 const router = Router();
@@ -54,6 +55,7 @@ router.post('/objects/:id/comments', adminAuth, async (req: AuthRequest, res: Re
     });
     pushAdmins('comment');   // admin paneli özü yenilənsin
     alertNegativeReview(comment.id);
+    notifyStaffNewReview(comment.id);
     res.status(201).json({ success: true, comment });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
@@ -109,6 +111,7 @@ router.post('/professionals/:id/comments', adminAuth, async (req: AuthRequest, r
     });
     pushAdmins('comment');   // admin paneli özü yenilənsin
     alertNegativeReview(comment.id);
+    notifyStaffNewReview(comment.id);
     res.status(201).json({ success: true, comment });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
@@ -153,6 +156,12 @@ router.post('/comments/:id/reply', adminAuth, async (req: AuthRequest, res: Resp
     const reply = typeof req.body.reply === 'string' ? req.body.reply.trim() : '';
     if (!reply || reply.length > 1000) { res.status(400).json({ success: false, message: 'Cavab mətni tələb olunur (maks 1000 simvol)' }); return; }
     const updated = await prisma.comment.update({ where: { id: c.id }, data: { sellerReply: reply, sellerReplyAt: new Date(), sellerReplyByName: staffName } });
+    {
+      const at = c.objectId
+        ? { objectId: c.objectId, businessId: (await prisma.businessObject.findUnique({ where: { id: c.objectId }, select: { businessId: true } }))?.businessId ?? null }
+        : c.listingId ? await objectOfListing(c.listingId) : { objectId: null, businessId: null };
+      logStaffActivity(at, req.adminId!, { action: 'review.replied', targetType: 'review', targetId: c.id, summary: `Rəyə cavab yazdı: «${reply.slice(0, 80)}»` });
+    }
     if (!c.sellerReply) {
       await prisma.notification.create({
         data: { userId: c.userId, type: 'LISTING', title: 'Rəyinizə cavab gəldi', body: `Satıcı ${t.label} haqqındakı rəyinizə cavab yazdı: "${reply.slice(0, 140)}"`, link: t.link },
