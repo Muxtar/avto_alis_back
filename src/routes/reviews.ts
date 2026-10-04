@@ -3,6 +3,7 @@ import { PrismaClient } from '@prisma/client';
 import { adminAuth, AuthRequest } from '../middleware/auth';
 import { alertNegativeReview, reviewTargetOwner, NEGATIVE_MAX } from '../services/reviewAlerts';
 import { pushLive, pushAdmins } from '../services/live';
+import { hasObjectPerm, staffObjectIds } from '../services/bizAccess';
 import { purchasedFromObject, consultedProfessional, deliveredOrderCountFromObject, consultationCount, reviewStats } from '../services/reviewGating';
 
 const router = Router();
@@ -130,6 +131,13 @@ router.get('/professionals/:id/reviews', async (req: Request, res: Response) => 
   }
 });
 
+/** Rəyin aid olduğu mağazada (obyekt rəyi və ya obyektin məhsuluna rəy) «rəylərə cavab» icazəsi. */
+async function staffCanReply(c: { listingId: number | null; objectId: number | null }, userId: number): Promise<boolean> {
+  let objectId = c.objectId;
+  if (!objectId && c.listingId) objectId = (await prisma.listing.findUnique({ where: { id: c.listingId }, select: { businessObjectId: true } }))?.businessObjectId ?? null;
+  return objectId ? hasObjectPerm(userId, objectId, 'reviews') : false;
+}
+
 // ── Rəyə satıcı cavabı ──
 // Hədəfin sahibi (elan sahibi / obyektin biznes sahibi / peşəkar) rəyə İCTİMAİ
 // cavab yazır — məsələn mənfi rəydə problemi izah edir və ya həll təklif edir.
@@ -138,10 +146,13 @@ router.post('/comments/:id/reply', adminAuth, async (req: AuthRequest, res: Resp
     const c = await prisma.comment.findUnique({ where: { id: parseInt(String(req.params.id)) } });
     if (!c) { res.status(404).json({ success: false, message: 'Rəy tapılmadı' }); return; }
     const t = await reviewTargetOwner(c);
-    if (!t || t.ownerId !== req.adminId) { res.status(403).json({ success: false, message: 'Yalnız elanın/obyektin sahibi cavab yaza bilər' }); return; }
+    // Sahib və ya həmin mağazada «rəylərə cavab» icazəli işçi (mağaza adından yazır).
+    const asStaff = !!t && t.ownerId !== req.adminId && (await staffCanReply(c, req.adminId!));
+    if (!t || (t.ownerId !== req.adminId && !asStaff)) { res.status(403).json({ success: false, message: 'Yalnız elanın/obyektin sahibi və ya icazəli işçisi cavab yaza bilər' }); return; }
+    const staffName = asStaff ? (await prisma.user.findUnique({ where: { id: req.adminId! }, select: { name: true } }))?.name || null : null;
     const reply = typeof req.body.reply === 'string' ? req.body.reply.trim() : '';
     if (!reply || reply.length > 1000) { res.status(400).json({ success: false, message: 'Cavab mətni tələb olunur (maks 1000 simvol)' }); return; }
-    const updated = await prisma.comment.update({ where: { id: c.id }, data: { sellerReply: reply, sellerReplyAt: new Date() } });
+    const updated = await prisma.comment.update({ where: { id: c.id }, data: { sellerReply: reply, sellerReplyAt: new Date(), sellerReplyByName: staffName } });
     if (!c.sellerReply) {
       await prisma.notification.create({
         data: { userId: c.userId, type: 'LISTING', title: 'Rəyinizə cavab gəldi', body: `Satıcı ${t.label} haqqındakı rəyinizə cavab yazdı: "${reply.slice(0, 140)}"`, link: t.link },
@@ -159,8 +170,8 @@ router.delete('/comments/:id/reply', adminAuth, async (req: AuthRequest, res: Re
     const c = await prisma.comment.findUnique({ where: { id: parseInt(String(req.params.id)) } });
     if (!c) { res.status(404).json({ success: false, message: 'Rəy tapılmadı' }); return; }
     const t = await reviewTargetOwner(c);
-    if (!t || t.ownerId !== req.adminId) { res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return; }
-    const updated = await prisma.comment.update({ where: { id: c.id }, data: { sellerReply: null, sellerReplyAt: null } });
+    if (!t || (t.ownerId !== req.adminId && !(await staffCanReply(c, req.adminId!)))) { res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return; }
+    const updated = await prisma.comment.update({ where: { id: c.id }, data: { sellerReply: null, sellerReplyAt: null, sellerReplyByName: null } });
     res.json({ success: true, comment: updated });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
@@ -175,10 +186,13 @@ router.get('/me/reviews-received', adminAuth, async (req: AuthRequest, res: Resp
     const me = req.adminId!;
     const negative = String(req.query.filter || '') === 'negative';
     const unanswered = String(req.query.filter || '') === 'unanswered';
+    // İşçi kimi «rəylərə cavab» icazəm olan mağazaların rəyləri də buradadır.
+    const staffObjs = await staffObjectIds(me, 'reviews');
     const comments = await prisma.comment.findMany({
       where: {
         AND: [
-          { OR: [{ listing: { userId: me } }, { object: { business: { userId: me } } }, { professionalUserId: me }] },
+          { OR: [{ listing: { userId: me } }, { object: { business: { userId: me } } }, { professionalUserId: me },
+            ...(staffObjs.length ? [{ objectId: { in: staffObjs } }, { listing: { businessObjectId: { in: staffObjs } } }] : [])] },
           { userId: { not: me } },
           ...(negative ? [{ rating: { lte: NEGATIVE_MAX } }] : []),
           ...(unanswered ? [{ sellerReply: null }] : []),

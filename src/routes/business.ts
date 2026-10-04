@@ -15,6 +15,7 @@ import fs from 'fs';
 import path from 'path';
 import { archiveBusinessPayee } from '../services/payoutArchive';
 import { pushLive, pushAdmins, pushPublicListings } from '../services/live';
+import { STAFF_PERMS, STAFF_ROLES, STAFF_PERM_LABEL, effectivePerms, permsToData, hasObjectPerm, hasBusinessPerm } from '../services/bizAccess';
 
 const PUBLIC_BACKEND_URL = process.env.PUBLIC_BACKEND_URL || `http://localhost:${process.env.PORT || 5001}`;
 
@@ -768,25 +769,40 @@ router.post('/me/businesses/:id/members', adminAuth, async (req: AuthRequest, re
       if (!o || o.businessId !== businessId) { res.status(400).json({ success: false, message: 'Obyekt bu biznesə aid deyil' }); return; }
       objId = parseInt(String(objectId));
     }
-    // Eyni biznesdə mövcud üzvlük/sorğu varsa təkrar yaratma.
-    const existing = await prisma.businessMember.findFirst({ where: { businessId, userId: target.id } });
-    if (existing) { res.status(400).json({ success: false, message: 'Bu istifadəçi ilə artıq üzvlük/sorğu mövcuddur' }); return; }
+    // Eyni işçi BİR NEÇƏ obyektə bağlana bilər («2 mağazada işləyir, 3-cüdə yox»).
+    // Artıq rəsmi işçidirsə əlavə obyekt dəvətsiz, dərhal aktiv olur.
+    const existingRows = await prisma.businessMember.findMany({ where: { businessId, userId: target.id } });
+    if (existingRows.some((e) => e.objectId === objId)) { res.status(400).json({ success: false, message: objId ? 'Bu işçi artıq həmin obyektə bağlıdır' : 'Bu istifadəçi ilə artıq üzvlük/sorğu mövcuddur' }); return; }
+    if (existingRows.some((e) => e.objectId === null)) { res.status(400).json({ success: false, message: 'Bu işçi artıq bütün biznesə bağlıdır — obyekti onun sətrindən dəyişin' }); return; }
+    if (existingRows.length && !objId) { res.status(400).json({ success: false, message: 'Bu işçi artıq obyektə bağlıdır — «bütün biznes» üçün mövcud sətri dəyişin' }); return; }
+    if (existingRows.length && !existingRows.some((e) => e.status === 'ACTIVE')) { res.status(400).json({ success: false, message: 'Bu istifadəçi ilə gözləyən sorğu/dəvət var — əvvəl o tamamlanmalıdır' }); return; }
+    const alreadyStaff = existingRows.some((e) => e.status === 'ACTIVE');
+    // İcazələr: açıq siyahı → rol şablonu → köhnə bayraqlar (canSell/canBuy).
+    const roleKey = typeof req.body.role === 'string' && STAFF_ROLES[req.body.role] ? req.body.role : null;
+    const permData = permsToData(
+      Array.isArray(req.body.permissions) ? req.body.permissions
+        : roleKey ? STAFF_ROLES[roleKey].perms
+          : effectivePerms({ permissions: [], canSell: req.body.canSell === undefined ? true : !!req.body.canSell, canBuy: !!req.body.canBuy }),
+    );
 
     const biz = await prisma.business.findUnique({ where: { id: businessId }, select: { name: true } });
     // Dəvət — istifadəçi qəbul edənə qədər PENDING_USER statusunda qalır.
     const member = await prisma.businessMember.create({
       data: {
         businessId, userId: target.id, objectId: objId,
-        status: 'PENDING_USER',
-        canSell: req.body.canSell === undefined ? true : !!req.body.canSell,
-        canBuy: !!req.body.canBuy,
+        status: alreadyStaff ? 'ACTIVE' : 'PENDING_USER',
+        ...permData, role: roleKey,
       },
       include: { user: { select: { id: true, name: true, publicId: true } }, object: { select: { id: true, name: true } } },
     });
-    await prisma.notification.create({
-      data: { userId: target.id, type: 'SYSTEM', title: 'İşçi dəvəti', body: `«${biz?.name || 'Biznes'}» sizi işçi kimi əlavə etmək istəyir. Profilinizdən qəbul edin.`, link: '/profile' },
-    }).catch(() => {});
-    pushLive(target.id, { kind: 'business', toast: `«${biz?.name || 'Biznes'}» sizi işçi kimi dəvət edir`, tone: 'info' });
+    if (alreadyStaff) {
+      pushLive(target.id, { kind: 'business', toast: `«${biz?.name || 'Biznes'}»: sizə yeni obyekt həvalə olundu`, tone: 'info' });
+    } else {
+      await prisma.notification.create({
+        data: { userId: target.id, type: 'SYSTEM', title: 'İşçi dəvəti', body: `«${biz?.name || 'Biznes'}» sizi işçi kimi əlavə etmək istəyir. Profilinizdən qəbul edin.`, link: '/profile' },
+      }).catch(() => {});
+      pushLive(target.id, { kind: 'business', toast: `«${biz?.name || 'Biznes'}» sizi işçi kimi dəvət edir`, tone: 'info' });
+    }
     res.status(201).json({ success: true, member });
   } catch (error: any) {
     if (error?.code === 'P2002') { res.status(400).json({ success: false, message: 'Bu istifadəçi artıq əlavə edilib' }); return; }
@@ -871,9 +887,19 @@ router.put('/me/businesses/:id/members/:memberId', adminAuth, async (req: AuthRe
         data: { userId: m.userId, type: 'SYSTEM', title: 'İşçi sorğusu qəbul edildi', body: `«${m.business.name}» sizi rəsmi işçi kimi təsdiqlədi.`, link: '/profile' },
       }).catch(() => {});
     }
-    // Səlahiyyət dəyişiklikləri (yalnız sahib):
-    if (req.body.canSell !== undefined) data.canSell = !!req.body.canSell;
-    if (req.body.canBuy !== undefined) data.canBuy = !!req.body.canBuy;
+    // İcazə dəyişiklikləri (yalnız sahib). Yeni: açıq icazə siyahısı və ya rol
+    // şablonu. Köhnə canSell/canBuy açarları da qəbul olunur (iOS / köhnə səhifə).
+    if (Array.isArray(req.body.permissions) || (typeof req.body.role === 'string' && STAFF_ROLES[req.body.role])) {
+      const roleKey = typeof req.body.role === 'string' && STAFF_ROLES[req.body.role] ? req.body.role : null;
+      Object.assign(data, permsToData(Array.isArray(req.body.permissions) ? req.body.permissions : STAFF_ROLES[roleKey!].perms));
+      data.role = roleKey;
+    } else if (req.body.canSell !== undefined || req.body.canBuy !== undefined) {
+      const cur = new Set(effectivePerms(m));
+      if (req.body.canSell !== undefined) for (const k of ['listings', 'orders']) { if (req.body.canSell) cur.add(k); else cur.delete(k); }
+      if (req.body.canBuy !== undefined) { if (req.body.canBuy) cur.add('buy'); else cur.delete('buy'); }
+      Object.assign(data, permsToData(Array.from(cur)));
+      data.role = null;
+    }
     if (req.body.objectId !== undefined) {
       if (req.body.objectId === null || req.body.objectId === '') data.objectId = null;
       else {
@@ -894,6 +920,15 @@ router.put('/me/businesses/:id/members/:memberId', adminAuth, async (req: AuthRe
       : { kind: 'business' });
     res.json({ success: true, member: updated });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
+// İcazələrin və rol şablonlarının siyahısı — biznes səhifəsindəki redaktor üçün.
+router.get('/staff-permissions', (_req, res: Response) => {
+  res.json({
+    success: true,
+    permissions: STAFF_PERMS.map((k) => ({ key: k, label: STAFF_PERM_LABEL[k] })),
+    roles: Object.entries(STAFF_ROLES).map(([key, r]) => ({ key, label: r.label, permissions: r.perms })),
+  });
 });
 
 // İstifadəçi: mənim işçiliklərim (bütün statuslar).
@@ -968,15 +1003,14 @@ router.delete('/me/members/:id', adminAuth, async (req: AuthRequest, res: Respon
 router.get('/me/managed', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
     const memberships = await prisma.businessMember.findMany({
-      // Yalnız SATIŞ səlahiyyəti olan üzvlüklər — əks halda işçi satış pəncərəsində
-      // mağazanı görür, açanda isə «İcazə yoxdur» alırdı.
-      where: { userId: req.adminId, status: 'ACTIVE', canSell: true, business: { deletedAt: null } },
+      where: { userId: req.adminId, status: 'ACTIVE', business: { deletedAt: null } },
       include: {
         business: { select: { id: true, name: true, isActive: true, status: true } },
         object: { select: { id: true, name: true } },
       },
     });
-    res.json({ success: true, memberships });
+    // Satış pəncərəsi üçün: yalnız SİFARİŞ icazəsi olan üzvlüklər.
+    res.json({ success: true, memberships: memberships.filter((m) => effectivePerms(m).includes('orders')).map((m) => ({ ...m, permissions: effectivePerms(m) })) });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }
@@ -992,13 +1026,8 @@ router.get('/me/businesses/:id/orders', adminAuth, async (req: AuthRequest, res:
     if (!biz) { res.status(404).json({ success: false, message: 'Biznes tapılmadı' }); return; }
 
     // İcazə: sahibi, ya da bu biznes/obyekt üçün üzv.
-    let allowed = biz.userId === req.adminId;
-    if (!allowed) {
-      const mem = await prisma.businessMember.findFirst({
-        where: { businessId, userId: req.adminId, status: 'ACTIVE', canSell: true, OR: [{ objectId: null }, ...(objectId ? [{ objectId }] : [])] },
-      });
-      allowed = !!mem;
-    }
+    const allowed = biz.userId === req.adminId
+      || (objectId ? await hasObjectPerm(req.adminId!, objectId, 'orders') : await hasBusinessPerm(req.adminId!, businessId, 'orders'));
     if (!allowed) { res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return; }
 
     // Sifarişlər = içində bu biznesə/obyektə aid elan olan order-lər.

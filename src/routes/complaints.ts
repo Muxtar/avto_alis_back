@@ -6,10 +6,33 @@ import { refundOrder } from '../services/paymentGateway';
 import { upload } from '../middleware/upload';
 import { processImages } from '../middleware/imageProcess';
 import { pushLive, pushAdmins } from '../services/live';
+import { hasObjectPerm, staffObjectIds } from '../services/bizAccess';
 import { createSellerComplaint, SELLER_COMPLAINT_CATEGORIES } from '../services/sellerReputation';
 
 const router = Router();
 const prisma = new PrismaClient();
+
+/** Şikayətlərin aid olduğu mağaza (obyekt): məhsuldan və ya sifarişin məhsulundan. */
+async function complaintObjects(list: { id: number; orderId: number | null; listingId: number | null }[]): Promise<Map<number, number>> {
+  const out = new Map<number, number>();
+  const lIds = list.map((c) => c.listingId).filter((x): x is number => !!x);
+  const oIds = list.map((c) => c.orderId).filter((x): x is number => !!x);
+  const [ls, its] = await Promise.all([
+    lIds.length ? prisma.listing.findMany({ where: { id: { in: lIds } }, select: { id: true, businessObjectId: true } }) : [],
+    oIds.length ? prisma.orderItem.findMany({ where: { orderId: { in: oIds } }, select: { orderId: true, listing: { select: { businessObjectId: true } } } }) : [],
+  ]);
+  for (const c of list) {
+    const viaListing = c.listingId ? ls.find((l) => l.id === c.listingId)?.businessObjectId : null;
+    const viaOrder = c.orderId ? its.find((i) => i.orderId === c.orderId && i.listing?.businessObjectId)?.listing?.businessObjectId : null;
+    const obj = viaListing || viaOrder;
+    if (obj) out.set(c.id, obj);
+  }
+  return out;
+}
+async function staffCanAnswer(c: { id: number; orderId: number | null; listingId: number | null }, userId: number): Promise<boolean> {
+  const obj = (await complaintObjects([c])).get(c.id);
+  return obj ? hasObjectPerm(userId, obj, 'complaints') : false;
+}
 
 // Şikayət növləri — şəxs/seans (əvvəlki) + eBay üslubu məhsul qüsuru növləri.
 const CATEGORIES = Object.keys(SELLER_COMPLAINT_CATEGORIES);
@@ -112,7 +135,8 @@ router.post('/complaints/:id/respond', complaintLimiter, adminAuth, upload.array
   try {
     const id = parseInt(String(req.params.id));
     const c = await prisma.complaint.findUnique({ where: { id } });
-    if (!c || c.targetUserId !== req.adminId) { res.status(404).json({ success: false, message: 'Şikayət tapılmadı' }); return; }
+    // Hədəf satıcı və ya şikayətin aid olduğu mağazada «şikayətlərə cavab» icazəli işçi.
+    if (!c || (c.targetUserId !== req.adminId && !(await staffCanAnswer(c, req.adminId!)))) { res.status(404).json({ success: false, message: 'Şikayət tapılmadı' }); return; }
     if (c.status === 'RESOLVED' || c.status === 'REJECTED') { res.status(400).json({ success: false, message: 'Şikayət bağlanıb' }); return; }
     const response = String(req.body?.response || '').trim();
     if (response.length < 10) { res.status(400).json({ success: false, message: 'Cavabınızı ətraflı yazın (ən azı 10 simvol)' }); return; }
@@ -152,11 +176,25 @@ router.post('/complaints/:id/withdraw', adminAuth, async (req: AuthRequest, res:
 // Mənə qarşı açılmış şikayətlər (satıcı cavab versin).
 router.get('/me/complaints/against', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
-    const complaints = await prisma.complaint.findMany({
+    const mine = await prisma.complaint.findMany({
       where: { targetUserId: req.adminId!, consultationId: null },
       orderBy: { createdAt: 'desc' },
       include: { complainant: { select: { id: true, name: true } } },
     });
+    // İşçi kimi «şikayətlərə cavab» icazəm olan mağazalara aid şikayətlər.
+    const staffObjs = await staffObjectIds(req.adminId!, 'complaints');
+    let staff: typeof mine = [];
+    if (staffObjs.length) {
+      const owners = (await prisma.businessObject.findMany({ where: { id: { in: staffObjs } }, select: { business: { select: { userId: true } } } })).map((o) => o.business.userId);
+      const cand = await prisma.complaint.findMany({
+        where: { targetUserId: { in: Array.from(new Set(owners)).filter((id) => id !== req.adminId) }, consultationId: null },
+        orderBy: { createdAt: 'desc' }, take: 300,
+        include: { complainant: { select: { id: true, name: true } } },
+      });
+      const objOf = await complaintObjects(cand);
+      staff = cand.filter((c) => { const o = objOf.get(c.id); return !!o && staffObjs.includes(o); });
+    }
+    const complaints = [...mine, ...staff.map((c) => ({ ...c, staff: true }))].sort((a, b) => +b.createdAt - +a.createdAt);
     res.json({ success: true, complaints });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });

@@ -11,7 +11,7 @@ import { sendVerificationCode } from '../services/mailer';
 import { resolveFlag } from '../services/settings';
 import { emitToAdmins } from '../services/callSignaling';
 import { pushAdmins, pushLive } from '../services/live';
-import { canManageListing, sellableObjects } from '../services/bizAccess';
+import { canManageListing, sellableObjects, canSellAtObject } from '../services/bizAccess';
 import { validateTiers } from '../services/tierPricing';
 import { MIN_WINDOW_DAYS, MAX_WINDOW_DAYS, RETURN_WINDOW_DAYS } from '../services/groupBuy';
 import { isValidMonths } from '../services/installment';
@@ -383,14 +383,7 @@ async function resolveObjectForSelling(businessObjectId: any, userId: number): P
     include: { business: true },
   });
   if (!obj) return { error: 'Seçilmiş obyekt tapılmadı', code: 403 };
-  let allowed = obj.business.userId === userId;
-  if (!allowed) {
-    const mem = await prisma.businessMember.findFirst({
-      where: { businessId: obj.businessId, userId, status: 'ACTIVE', canSell: true, OR: [{ objectId: null }, { objectId: obj.id }] },
-      select: { id: true },
-    });
-    allowed = !!mem;
-  }
+  const allowed = obj.business.userId === userId || (await canSellAtObject(userId, obj.id));
   if (!allowed) return { error: 'Bu obyektdə satış səlahiyyətiniz yoxdur', code: 403 };
   // Yalnız statusa baxmaq AZDIR. Deaktiv və ya silinmiş biznes/obyektə YENİ
   // məhsul bağlana bilməməlidir — əks halda deaktiv biznes satışa məhsul

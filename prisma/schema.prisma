@@ -608,6 +608,7 @@ model Comment {
   // Satıcının/obyekt sahibinin ictimai cavabı (mənfi rəyə izah və s.).
   sellerReply        String?
   sellerReplyAt      DateTime?
+  sellerReplyByName String? // cavabı mağaza adından işçi yazıbsa — onun adı
   createdAt          DateTime        @default(now())
   user               User            @relation(fields: [userId], references: [id], onDelete: Cascade)
   listing            Listing?        @relation(fields: [listingId], references: [id], onDelete: Cascade)
@@ -1427,6 +1428,10 @@ model BusinessMember {
   // Sahibin işçiyə verdiyi səlahiyyətlər:
   canSell    Boolean         @default(true) // obyektin məhsullarını satmaq (elan + sifariş idarəsi)
   canBuy     Boolean         @default(false) // biznes adına məhsul almaq
+  // Ayrı icazələr (services/bizAccess → STAFF_PERMS): listings, orders, returns,
+  // reviews, complaints, buy. Boşdursa köhnə canSell/canBuy bayraqlarından çıxarılır.
+  permissions String[]       @default([])
+  role       String? // rol şablonu (MANAGER / SELLER / STOCK / SUPPORT / BUYER) — yalnız etiket
   createdAt  DateTime        @default(now())
   business   Business        @relation(fields: [businessId], references: [id], onDelete: Cascade)
   user       User            @relation("BusinessMemberships", fields: [userId], references: [id], onDelete: Cascade)

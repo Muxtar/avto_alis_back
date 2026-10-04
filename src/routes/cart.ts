@@ -14,7 +14,7 @@ import { markOrdersAwaitingConfirm, getDeliveryDeadlineHours } from '../services
 import { checkPrice as yangoCheckPrice, isYangoConfigured, YANGO_MAX_WEIGHT_KG, yangoDead } from '../services/yangoDelivery';
 import { notifySellersNewOrder } from '../services/orderNotify';
 import { notifyOrderStatus } from '../services/orderMessages';
-import { canManageOrderAsSeller } from '../services/bizAccess';
+import { canManageOrderAsSeller, staffObjectIds } from '../services/bizAccess';
 import { dispatchOrderToYango, cancelActiveYangoClaim } from './yango';
 import { pushLive, pushAdmins } from '../services/live';
 import { upload } from '../middleware/upload';
@@ -1781,8 +1781,12 @@ router.get('/returns/buying', adminAuth, async (req: AuthRequest, res: Response)
 // Get seller's return requests
 router.get('/returns/selling', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
+    // İşçi kimi «iadələr» icazəm olan mağazaların iadələri də buradadır.
+    const staffObjs = await staffObjectIds(req.adminId!, 'returns');
     const returns = await prisma.returnRequest.findMany({
-      where: { sellerId: req.adminId! },
+      where: staffObjs.length
+        ? { OR: [{ sellerId: req.adminId! }, { order: { items: { some: { listing: { businessObjectId: { in: staffObjs } } } } } }] }
+        : { sellerId: req.adminId! },
       include: { ...returnInclude, buyer: { select: { id: true, name: true, phone: true } } },
       orderBy: { createdAt: 'desc' },
     });
@@ -1803,7 +1807,7 @@ router.get('/returns/:id', adminAuth, async (req: AuthRequest, res: Response) =>
         seller: { select: { id: true, name: true } },
       },
     });
-    if (!ret || (ret.buyerId !== req.adminId && ret.sellerId !== req.adminId)) { res.status(404).json({ success: false, message: 'İadə tapılmadı' }); return; }
+    if (!ret || (ret.buyerId !== req.adminId && !(await canManageOrderAsSeller(ret.orderId, ret.sellerId, req.adminId!, 'returns')))) { res.status(404).json({ success: false, message: 'İadə tapılmadı' }); return; }
     const dispute = ret.disputeId ? await prisma.complaint.findUnique({
       where: { id: ret.disputeId },
       select: { id: true, status: true, category: true, description: true, images: true, sellerResponse: true, sellerImages: true, respondBy: true, decision: true, decisionBy: true, decisionReason: true, decidedAt: true, appealed: true, complainantId: true, targetUserId: true },
@@ -1865,7 +1869,8 @@ router.put('/returns/:id/ship', adminAuth, async (req: AuthRequest, res: Respons
 router.put('/returns/:id/approve', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
     const ret = await prisma.returnRequest.findUnique({ where: { id: parseInt(req.params.id) } });
-    if (!ret || ret.sellerId !== req.adminId) { res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return; }
+    // Satıcı (biznes sahibi) və ya həmin mağazada «iadələr» icazəli işçi.
+    if (!ret || !(await canManageOrderAsSeller(ret.orderId, ret.sellerId, req.adminId!, 'returns'))) { res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return; }
     if (ret.status !== 'REQUESTED') { res.status(400).json({ success: false, message: 'Bu sorğu artıq cavablandırılıb' }); return; }
     // Satıcı məbləği dəyişə bilər: 0-dan böyük, sifarişin qalığından çox olmamaqla.
     const ord0 = await prisma.order.findUnique({ where: { id: ret.orderId }, select: { total: true, refundedAmount: true } });
@@ -1893,7 +1898,8 @@ router.put('/returns/:id/approve', adminAuth, async (req: AuthRequest, res: Resp
 router.put('/returns/:id/reject', adminAuth, upload.array('images', 4), processImages, async (req: AuthRequest, res: Response) => {
   try {
     const ret = await prisma.returnRequest.findUnique({ where: { id: parseInt(req.params.id) } });
-    if (!ret || ret.sellerId !== req.adminId) { res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return; }
+    // Satıcı (biznes sahibi) və ya həmin mağazada «iadələr» icazəli işçi.
+    if (!ret || !(await canManageOrderAsSeller(ret.orderId, ret.sellerId, req.adminId!, 'returns'))) { res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return; }
     if (ret.status !== 'REQUESTED') { res.status(400).json({ success: false, message: 'Bu sorğu artıq cavablandırılıb' }); return; }
     const note = String(req.body?.sellerNote || '').trim();
     if (note.length < 10) { res.status(400).json({ success: false, message: 'Rədd səbəbini ətraflı yazın (ən azı 10 simvol) — alıcı və sistem bunu görəcək' }); return; }
@@ -1940,7 +1946,8 @@ router.post('/returns/:id/dispute', complaintLimiter, adminAuth, upload.array('i
 router.put('/returns/:id/receive', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
     const ret = await prisma.returnRequest.findUnique({ where: { id: parseInt(req.params.id) } });
-    if (!ret || ret.sellerId !== req.adminId) { res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return; }
+    // Satıcı (biznes sahibi) və ya həmin mağazada «iadələr» icazəli işçi.
+    if (!ret || !(await canManageOrderAsSeller(ret.orderId, ret.sellerId, req.adminId!, 'returns'))) { res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return; }
     if (ret.status !== 'RETURN_SHIPPED') { res.status(400).json({ success: false, message: 'Məhsul hələ göndərilməyib' }); return; }
     const updated = await prisma.returnRequest.update({
       where: { id: ret.id },
@@ -1965,7 +1972,8 @@ router.put('/returns/:id/receive', adminAuth, async (req: AuthRequest, res: Resp
 router.post('/returns/:id/receive-problem', complaintLimiter, adminAuth, upload.array('images', 6), processImages, async (req: AuthRequest, res: Response) => {
   try {
     const ret = await prisma.returnRequest.findUnique({ where: { id: parseInt(String(req.params.id)) } });
-    if (!ret || ret.sellerId !== req.adminId) { res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return; }
+    // Satıcı (biznes sahibi) və ya həmin mağazada «iadələr» icazəli işçi.
+    if (!ret || !(await canManageOrderAsSeller(ret.orderId, ret.sellerId, req.adminId!, 'returns'))) { res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return; }
     if (ret.status !== 'RETURN_SHIPPED' && ret.status !== 'RETURN_RECEIVED') { res.status(400).json({ success: false, message: 'Bu mərhələdə problem bildirmək olmaz' }); return; }
     const description = String(req.body?.description || '').trim();
     const imgs = uploadedNames(req);
@@ -1994,7 +2002,8 @@ router.post('/returns/:id/receive-problem', complaintLimiter, adminAuth, upload.
 router.put('/returns/:id/refund', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
     const ret = await prisma.returnRequest.findUnique({ where: { id: parseInt(req.params.id) } });
-    if (!ret || ret.sellerId !== req.adminId) { res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return; }
+    // Satıcı (biznes sahibi) və ya həmin mağazada «iadələr» icazəli işçi.
+    if (!ret || !(await canManageOrderAsSeller(ret.orderId, ret.sellerId, req.adminId!, 'returns'))) { res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return; }
     if (ret.status !== 'RETURN_RECEIVED') { res.status(400).json({ success: false, message: 'Məhsul hələ qəbul edilməyib' }); return; }
     const r = await finalizeReturnRefund(ret.id, 'SELLER', req.adminId!);
     if (!r.ok) { res.status(r.retrying ? 502 : 400).json({ success: false, message: r.error, retrying: r.retrying }); return; }
