@@ -29,7 +29,7 @@ export async function notifySellersNewOrder(orderIds: number[]): Promise<void> {
     // Yalnız hələ xəbər verilməmiş və LƏĞV OLUNMAMIŞ sifarişlər.
     const targets = await prisma.order.findMany({
       where: { id: { in: ids }, sellerNotifiedAt: null, status: { not: 'CANCELLED' } },
-      select: { id: true, sellerId: true, buyerId: true, total: true, referrerId: true, referralAmount: true },
+      select: { id: true, sellerId: true, buyerId: true, total: true, referrerId: true, referralAmount: true, groupBuy: { select: { code: true } } },
     });
     if (!targets.length) return;
 
@@ -77,6 +77,9 @@ export async function notifySellersNewOrder(orderIds: number[]): Promise<void> {
       }).catch(() => {});
     }
 
+    // Birgə alış: alıcıya «paylaş — daha ucuz olsun» (məcburi deyil).
+    await notifyGroupShare(claimed.filter((o) => o.groupBuy?.code).map((o) => ({ buyerId: o.buyerId, orderId: o.id, code: o.groupBuy!.code })));
+
     for (const o of claimed) {
       emitToUser(o.sellerId, 'order:new', { orderId: o.id, total: o.total });
       // Satıcının açıq Sifarişlər səhifəsinə yeni sətir düşsün + zəng.
@@ -89,4 +92,22 @@ export async function notifySellersNewOrder(orderIds: number[]): Promise<void> {
   } catch (e) {
     console.error('[orderNotify] notifySellersNewOrder:', (e as any)?.message);
   }
+}
+
+/**
+ * Birgə alışda məhsul alındı — alıcıya paylaşmaq təklif olunur: pəncərəyə nə
+ * qədər çox adam qoşulsa, qiymət o qədər düşür və fərq ona qaytarılır.
+ * Paylaşmaq MƏCBURİ DEYİL — bu yalnız xatırlatmadır.
+ */
+export async function notifyGroupShare(rows: { buyerId: number; orderId: number; code: string }[]): Promise<void> {
+  if (!rows.length) return;
+  await prisma.notification.createMany({
+    data: rows.map((r) => ({
+      userId: r.buyerId, type: 'ORDER' as const,
+      title: 'Paylaş — daha ucuz olsun 👥',
+      body: `Sifariş #${r.orderId} birgə alışdadır. Linki dostlarınıza göndərin: nə qədər çox adam qoşulsa, qiymət o qədər düşür və fərq sizə qaytarılır. Paylaşmaq məcburi deyil.`,
+      link: `/g/${r.code}`,
+    })),
+  }).catch(() => {});
+  for (const r of rows) pushLive(r.buyerId, { kind: 'notification', toast: 'Birgə alış: paylaş — daha ucuz olsun 👥', tone: 'info' });
 }

@@ -12,7 +12,7 @@ import { settleOrders } from './payment';
 import { recordSettlement, recordSettlementMany, sellerBalance } from '../services/settlement';
 import { markOrdersAwaitingConfirm, getDeliveryDeadlineHours } from '../services/orderExpiry';
 import { checkPrice as yangoCheckPrice, isYangoConfigured, YANGO_MAX_WEIGHT_KG, yangoDead } from '../services/yangoDelivery';
-import { notifySellersNewOrder } from '../services/orderNotify';
+import { notifySellersNewOrder, notifyGroupShare } from '../services/orderNotify';
 import { notifyOrderStatus } from '../services/orderMessages';
 import { canManageOrderAsSeller, staffObjectIds } from '../services/bizAccess';
 import { notifyStaff, notifyStaffNewOrders, logStaffActivity, objectOfOrder, onSuccess } from '../services/staffWork';
@@ -1158,6 +1158,14 @@ router.post('/cart/checkout', requireType(BUYER_TYPES), async (req: AuthRequest,
 
     // Nağd / balans sifarişi artıq həqiqidir — «sifarişlər» icazəli işçilərə də xəbər.
     if (paymentMethod !== 'CARD') notifyStaffNewOrders(orders.map((o) => o.id)).catch(() => {});
+    // Birgə alış (nağd / balans): alıcıya «paylaş — daha ucuz olsun». Kartda bu, ödəniş təsdiqlənəndə gedir.
+    if (paymentMethod !== 'CARD') {
+      const gIds = orders.filter((o: any) => o.groupBuyId).map((o: any) => o.groupBuyId as number);
+      if (gIds.length) {
+        const gs = await prisma.groupBuy.findMany({ where: { id: { in: gIds } }, select: { id: true, code: true } });
+        notifyGroupShare(orders.filter((o: any) => o.groupBuyId).map((o: any) => ({ buyerId: o.buyerId, orderId: o.id, code: gs.find((g) => g.id === o.groupBuyId)?.code || '' })).filter((r) => r.code)).catch(() => {});
+      }
+    }
 
     // KART ÖDƏNİŞİ: transaction commit olandan SONRA (xarici API çağırışı
     // tranzaksiya içində olmamalıdır) Kapital-də bir ödəniş yaradılır və
@@ -1260,6 +1268,8 @@ router.get('/orders/buying', adminAuth, async (req: AuthRequest, res: Response) 
       where: { buyerId: req.adminId!, hiddenForBuyer: false, OR: [{ paymentMethod: { not: 'CARD' } }, { paymentStatus: 'PAID' }] },
       include: {
         // Kart görünüşü üçün məhsulun ilk şəkli.
+        // Birgə alış — alıcıya «paylaş, daha ucuz olsun» təklifi üçün.
+        groupBuy: { select: { code: true, status: true, expiresAt: true } },
         items: { include: { listing: { select: { images: true } } } },
         seller: {
           select: {

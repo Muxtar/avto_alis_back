@@ -51,6 +51,7 @@ import contentRoutes from './routes/content';
 import supportRoutes from './routes/support';
 import outreachRoutes from './routes/outreach';
 import mediaRoutes from './routes/media';
+import ogRoutes from './routes/og';
 import { auditMiddleware } from './services/auditLog';
 import { startOrderExpiryJob } from './services/orderExpiry';
 import { startYangoWatcher } from './routes/yango';
@@ -155,6 +156,7 @@ app.use('/api', contentRoutes);
 app.use('/api', supportRoutes);
 app.use('/api', outreachRoutes);
 app.use('/api', mediaRoutes);
+app.use('/api', ogRoutes);   // paylaşım önizləməsi (Open Graph)
 
 app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok' });
