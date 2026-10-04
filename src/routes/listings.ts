@@ -248,7 +248,7 @@ router.get('/sellers/:id', async (req: Request, res: Response) => {
         professionDocuments: { where: { isPublic: true }, select: { id: true, title: true, image: true, documentType: true, profession: true, status: true } },
         // Rəsmi işçilik — yalnız təsdiqlənmiş (ACTIVE) üzvlüklər public görünür.
         businessMemberships: {
-          where: { status: 'ACTIVE' },
+          where: { status: 'ACTIVE', business: { deletedAt: null, status: 'APPROVED' } },
           select: { id: true, business: { select: { id: true, name: true } }, object: { select: { id: true, name: true } } },
         },
       },

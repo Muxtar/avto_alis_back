@@ -786,6 +786,7 @@ router.post('/me/businesses/:id/members', adminAuth, async (req: AuthRequest, re
     await prisma.notification.create({
       data: { userId: target.id, type: 'SYSTEM', title: 'İşçi dəvəti', body: `«${biz?.name || 'Biznes'}» sizi işçi kimi əlavə etmək istəyir. Profilinizdən qəbul edin.`, link: '/profile' },
     }).catch(() => {});
+    pushLive(target.id, { kind: 'business', toast: `«${biz?.name || 'Biznes'}» sizi işçi kimi dəvət edir`, tone: 'info' });
     res.status(201).json({ success: true, member });
   } catch (error: any) {
     if (error?.code === 'P2002') { res.status(400).json({ success: false, message: 'Bu istifadəçi artıq əlavə edilib' }); return; }
@@ -835,6 +836,8 @@ router.post('/businesses/:id/join-request', adminAuth, async (req: AuthRequest, 
     await prisma.notification.create({
       data: { userId: biz.userId, type: 'SYSTEM', title: 'Yeni işçi sorğusu', body: `${me?.name || 'Bir istifadəçi'} «${biz.name}» biznesinin işçisi olduğunu bildirir. Biznes səhifəsindən təsdiqləyin.`, link: '/business' },
     }).catch(() => {});
+    pushLive(biz.userId, { kind: 'business', toast: `Yeni işçi sorğusu: ${me?.name || 'istifadəçi'}`, tone: 'info' });
+    pushLive(req.adminId!, { kind: 'business' });   // işçinin başqa açıq cihazı / tabı
     res.status(201).json({ success: true, member });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
@@ -851,6 +854,12 @@ router.put('/me/businesses/:id/members/:memberId', adminAuth, async (req: AuthRe
     const action = String(req.body.action || '');
     if (action === 'reject') {
       await prisma.businessMember.delete({ where: { id: memberId } });
+      if (m.status === 'PENDING_BUSINESS') {
+        await prisma.notification.create({
+          data: { userId: m.userId, type: 'SYSTEM', title: 'İşçi sorğusu rədd edildi', body: `«${m.business.name}» işçi sorğunuzu təsdiqləmədi.`, link: '/profile' },
+        }).catch(() => {});
+      }
+      pushLive(m.userId, { kind: 'business', toast: m.status === 'PENDING_BUSINESS' ? `«${m.business.name}» işçi sorğunuzu təsdiqləmədi` : undefined, tone: 'error' });
       res.json({ success: true, removed: true }); return;
     }
 
@@ -879,6 +888,10 @@ router.put('/me/businesses/:id/members/:memberId', adminAuth, async (req: AuthRe
       where: { id: memberId }, data,
       include: { user: { select: { id: true, name: true, publicId: true } }, object: { select: { id: true, name: true } } },
     });
+    // İşçinin profili səhifə yenilənmədən "rəsmi işçi" statusunu göstərsin.
+    pushLive(m.userId, action === 'accept'
+      ? { kind: 'business', toast: `«${m.business.name}» sizi rəsmi işçi kimi təsdiqlədi ✅`, tone: 'success' }
+      : { kind: 'business' });
     res.json({ success: true, member: updated });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
@@ -915,6 +928,7 @@ router.put('/me/employment/:id', adminAuth, async (req: AuthRequest, res: Respon
       await prisma.notification.create({
         data: { userId: m.business.userId, type: 'SYSTEM', title: 'İşçi dəvəti qəbul edildi', body: `${me?.name || 'İstifadəçi'} «${m.business.name}» işçi dəvətini qəbul etdi.`, link: '/business' },
       }).catch(() => {});
+      pushLive(m.business.userId, { kind: 'business', toast: `${me?.name || 'İstifadəçi'} işçi dəvətini qəbul etdi ✅`, tone: 'success' });
       res.json({ success: true, member: updated }); return;
     }
     if (action === 'reject' || action === 'leave') {
@@ -925,6 +939,7 @@ router.put('/me/employment/:id', adminAuth, async (req: AuthRequest, res: Respon
           data: { userId: m.business.userId, type: 'SYSTEM', title: 'İşçi ayrıldı', body: `${me?.name || 'İstifadəçi'} «${m.business.name}» biznesindən ayrıldı.`, link: '/business' },
         }).catch(() => {});
       }
+      pushLive(m.business.userId, { kind: 'business' });
       res.json({ success: true, removed: true }); return;
     }
     res.status(400).json({ success: false, message: 'Yanlış əməliyyat' });
@@ -934,9 +949,15 @@ router.put('/me/employment/:id', adminAuth, async (req: AuthRequest, res: Respon
 router.delete('/me/members/:id', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
     const id = parseInt(req.params.id);
-    const m = await prisma.businessMember.findUnique({ where: { id }, include: { business: { select: { userId: true } } } });
+    const m = await prisma.businessMember.findUnique({ where: { id }, include: { business: { select: { userId: true, name: true } } } });
     if (!m || m.business.userId !== req.adminId) { res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return; }
     await prisma.businessMember.delete({ where: { id } });
+    if (m.status === 'ACTIVE') {
+      await prisma.notification.create({
+        data: { userId: m.userId, type: 'SYSTEM', title: 'İşçilik dayandırıldı', body: `«${m.business.name}» sizi işçi siyahısından çıxardı.`, link: '/profile' },
+      }).catch(() => {});
+    }
+    pushLive(m.userId, { kind: 'business' });
     res.json({ success: true });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
