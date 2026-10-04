@@ -3,6 +3,7 @@ import { Router, Request, Response } from 'express';
 import { PrismaClient } from '@prisma/client';
 import { adminAuth, AuthRequest, viewerIdFromReq } from '../middleware/auth';
 import { activeRules, listingProDiscountInfo, normProf, PRO_DISCOUNT_MAX, verifiedProfessions } from '../services/professionDiscount';
+import { getOrCreateProgram, DOC_TYPES } from '../services/referral';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -83,6 +84,95 @@ router.put('/me/objects/:id/pro-discounts', adminAuth, async (req: AuthRequest, 
     ]);
     const rules = await prisma.professionDiscount.findMany({ where: { businessObjectId: id }, orderBy: { percent: 'desc' } });
     res.json({ success: true, rules });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
+// ── İXTİSAS GÜZƏŞTLƏRİ (obyekt səviyyəsində, bir yerdə) ──────────────────────
+// Bir ixtisas üçün İKİ güzəşt: ALANDA endirim (ProfessionDiscount) və SATANDA
+// komissiya (ReferralRule). Əvvəl bunlar iki ayrı səhifədə qurulurdu və eyni
+// ixtisas iki yerdə ayrıca yazılırdı; obyekt əlavə edəndə isə heç soruşulmurdu.
+// Bu ünvan ikisini bir sətirdə oxuyub-yazır (obyekt forması bunu işlədir).
+// Ətraflı ayarlar (endirimin məhsul seçimi / limitləri, referal partnyorları)
+// öz səhifələrində qalır və burada saxlananda pozulmur.
+router.get('/me/objects/:id/profession-terms', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const id = parseInt(String(req.params.id));
+    const obj = await ownObject(id, req.adminId!);
+    if (!obj) { res.status(403).json({ success: false, message: 'Bu mağaza sizə aid deyil' }); return; }
+    const [discounts, program] = await Promise.all([
+      prisma.professionDiscount.findMany({ where: { businessObjectId: id } }),
+      prisma.referralProgram.findUnique({ where: { objectId: id }, include: { rules: { orderBy: { id: 'asc' } } } }),
+    ]);
+    const map = new Map<string, { profession: string; discountPercent: number | null; commissionPercent: number | null; requiredDoc: string }>();
+    for (const d of discounts) map.set(normProf(d.profession), { profession: d.profession, discountPercent: d.active ? d.percent : null, commissionPercent: null, requiredDoc: 'DIPLOMA' });
+    for (const r of program?.rules || []) {
+      const k = normProf(r.profession);
+      const cur = map.get(k) || { profession: r.profession, discountPercent: null, commissionPercent: null, requiredDoc: 'DIPLOMA' };
+      cur.commissionPercent = r.commissionPercent; cur.requiredDoc = r.requiredDoc;
+      map.set(k, cur);
+    }
+    res.json({
+      success: true,
+      terms: Array.from(map.values()).filter((t) => t.discountPercent != null || t.commissionPercent != null),
+      referral: { enabled: !!program?.enabled, audience: program?.audience || 'PROFESSION' },
+      maxDiscount: PRO_DISCOUNT_MAX,
+    });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
+router.put('/me/objects/:id/profession-terms', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const id = parseInt(String(req.params.id));
+    const obj = await ownObject(id, req.adminId!);
+    if (!obj) { res.status(403).json({ success: false, message: 'Bu mağaza sizə aid deyil' }); return; }
+    const raw: any[] = Array.isArray(req.body?.terms) ? req.body.terms : [];
+    if (raw.length > MAX_RULES) { res.status(400).json({ success: false, message: `Ən çox ${MAX_RULES} ixtisas` }); return; }
+    const pct = (v: any) => (v === null || v === undefined || v === '' ? null : r2(parseFloat(String(v).replace(',', '.'))));
+    const seen = new Set<string>();
+    const clean: { profession: string; discount: number | null; commission: number | null; requiredDoc: string }[] = [];
+    for (const t of raw) {
+      const profession = String(t.profession || '').trim().replace(/\s+/g, ' ').slice(0, 80);
+      if (!profession) { res.status(400).json({ success: false, message: 'Hər sətir üçün ixtisas seçin' }); return; }
+      if (seen.has(normProf(profession))) { res.status(400).json({ success: false, message: `«${profession}» iki dəfə yazılıb` }); return; }
+      seen.add(normProf(profession));
+      const discount = pct(t.discountPercent);
+      const commission = pct(t.commissionPercent);
+      if (discount != null && (!Number.isFinite(discount) || discount < 1 || discount > PRO_DISCOUNT_MAX)) { res.status(400).json({ success: false, message: `«${profession}»: alış endirimi 1–${PRO_DISCOUNT_MAX}% arası olmalıdır` }); return; }
+      if (commission != null && (!Number.isFinite(commission) || commission <= 0 || commission > 90)) { res.status(400).json({ success: false, message: `«${profession}»: satış komissiyası 0-dan böyük, 90%-dən çox olmamalıdır` }); return; }
+      if (discount == null && commission == null) { res.status(400).json({ success: false, message: `«${profession}»: endirim və ya komissiya faizindən ən azı birini yazın` }); return; }
+      clean.push({ profession, discount, commission, requiredDoc: DOC_TYPES.includes(t.requiredDoc) ? t.requiredDoc : 'DIPLOMA' });
+    }
+
+    // ALIŞ ENDİRİMİ: mövcud qaydanın əlavə ayarları (məhsul seçimi, limitlər,
+    // son tarix) saxlanır — yalnız faiz yenilənir; siyahıdan çıxan ixtisas silinir.
+    const existing = await prisma.professionDiscount.findMany({ where: { businessObjectId: id } });
+    const ops: any[] = [];
+    const keep = new Set<number>();
+    for (const c of clean) {
+      if (c.discount == null) continue;
+      const old = existing.find((e) => normProf(e.profession) === normProf(c.profession));
+      if (old) { keep.add(old.id); ops.push(prisma.professionDiscount.update({ where: { id: old.id }, data: { percent: c.discount, active: true, profession: c.profession } })); }
+      else ops.push(prisma.professionDiscount.create({ data: { businessObjectId: id, profession: c.profession, percent: c.discount } }));
+    }
+    const drop = existing.filter((e) => !keep.has(e.id)).map((e) => e.id);
+    if (drop.length) ops.unshift(prisma.professionDiscount.deleteMany({ where: { id: { in: drop } } }));
+
+    // SATIŞ KOMİSSİYASI: obyektin referal proqramının ixtisas qaydaları.
+    const program = await getOrCreateProgram(req.adminId!, id);
+    const rules = clean.filter((c) => c.commission != null);
+    ops.push(prisma.referralRule.deleteMany({ where: { programId: program.id } }));
+    if (rules.length) {
+      ops.push(prisma.referralRule.createMany({ data: rules.map((c) => ({ programId: program.id, objectId: id, profession: c.profession, commissionPercent: c.commission!, requiredDoc: c.requiredDoc })) }));
+      // Komissiya yazılıbsa proqram «ixtisasa görə» rejimində açılır.
+      ops.push(prisma.referralProgram.update({ where: { id: program.id }, data: { enabled: true, audience: 'PROFESSION' } }));
+      ops.push(prisma.businessObject.update({ where: { id }, data: { referralEnabled: true } }));
+    } else if (program.audience === 'PROFESSION' && program.enabled) {
+      // İxtisas qaydası qalmadı — «ixtisasa görə» proqramın satacaq kimsəsi yoxdur.
+      ops.push(prisma.referralProgram.update({ where: { id: program.id }, data: { enabled: false } }));
+      ops.push(prisma.businessObject.update({ where: { id }, data: { referralEnabled: false } }));
+    }
+    await prisma.$transaction(ops);
+    res.json({ success: true, count: clean.length });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
 

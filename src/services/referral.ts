@@ -8,7 +8,7 @@
 //     heç birində.
 //   • hansı məhsullar (productScope): ALL (OFF işarələnənlərdən başqa) və ya
 //     SELECTED (yalnız ON işarələnənlər) — Listing.referralMode.
-//   • faiz: partnyora xüsusi → məhsula xüsusi → ixtisas qaydası → proqramın default faizi.
+//   • faiz: partnyora xüsusi → (yalnız fərdi proqramda: məhsula xüsusi) → ixtisas qaydası → proqramın default faizi.
 //
 // Referal satıcı link (ReferralCart) yaradır; alıcı linkdən məhsulları ADİ
 // SƏBƏTƏ atır (CartItem.referralCartId), ödəniş/çatdırılma adi checkout-dan
@@ -105,8 +105,12 @@ export async function eligibility(p: Program | { id: number; sellerId: number; e
 }
 
 /** Konkret məhsul üçün faiz: partnyor → məhsul → ixtisas qaydası → default. */
-export function percentFor(p: { defaultPercent: number }, l: { referralPercent: number | null }, el: Eligibility): number {
-  const v = el.partnerPercent ?? l.referralPercent ?? el.rulePercent ?? p.defaultPercent;
+export function percentFor(p: { defaultPercent: number; objectId?: number | null }, l: { referralPercent: number | null }, el: Eligibility): number {
+  // MAĞAZA proqramında referal MƏHSULA yox, OBYEKTƏ verilir: faiz ixtisas
+  // qaydasından gəlir, məhsula ayrıca yazılmış faiz nəzərə alınmır (əvvəl o,
+  // ixtisas qaydasını üstələyirdi — «Həkim 10%» yazılsa da məhsulda 3% qalırdı).
+  const perListing = p.objectId ? null : l.referralPercent;
+  const v = el.partnerPercent ?? perListing ?? el.rulePercent ?? p.defaultPercent;
   return Math.max(0, Math.min(90, Number(v) || 0));
 }
 
