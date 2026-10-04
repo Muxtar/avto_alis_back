@@ -968,7 +968,9 @@ router.delete('/me/members/:id', adminAuth, async (req: AuthRequest, res: Respon
 router.get('/me/managed', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
     const memberships = await prisma.businessMember.findMany({
-      where: { userId: req.adminId, status: 'ACTIVE', business: { deletedAt: null } },
+      // Yalnız SATIŞ səlahiyyəti olan üzvlüklər — əks halda işçi satış pəncərəsində
+      // mağazanı görür, açanda isə «İcazə yoxdur» alırdı.
+      where: { userId: req.adminId, status: 'ACTIVE', canSell: true, business: { deletedAt: null } },
       include: {
         business: { select: { id: true, name: true, isActive: true, status: true } },
         object: { select: { id: true, name: true } },
@@ -1023,89 +1025,8 @@ router.get('/me/businesses/:id/orders', adminAuth, async (req: AuthRequest, res:
   }
 });
 
-// Biznes sifarişinin statusunu dəyiş (sahibi VƏ YA səlahiyyətli üzv).
-// Fərdi satıcı axını (cart.ts) ilə eyni state machine — geriyə/qanunsuz keçidlər qadağandır.
-const ORDER_STATUSES = ['PENDING', 'CONFIRMED', 'SHIPPED', 'DELIVERED', 'CANCELLED'];
-const ORDER_TRANSITIONS: Record<string, string[]> = {
-  PENDING: ['CONFIRMED', 'CANCELLED'],
-  CONFIRMED: ['SHIPPED', 'CANCELLED'],
-  SHIPPED: ['DELIVERED'],
-  DELIVERED: [],
-  CANCELLED: [],
-};
-router.put('/me/business-orders/:orderId/status', adminAuth, async (req: AuthRequest, res: Response) => {
-  try {
-    const orderId = parseInt(req.params.orderId);
-    const status = String(req.body?.status || '').toUpperCase();
-    if (!ORDER_STATUSES.includes(status)) { res.status(400).json({ success: false, message: 'Yanlış status' }); return; }
-
-    const order = await prisma.order.findUnique({
-      where: { id: orderId },
-      include: { items: { include: { listing: { select: { businessId: true, businessObjectId: true } } } } },
-    });
-    if (!order) { res.status(404).json({ success: false, message: 'Sifariş tapılmadı' }); return; }
-
-    // State machine: yalnız icazəli keçidlər (PENDING→CONFIRMED→SHIPPED→DELIVERED, ləğv).
-    const allowedNext = ORDER_TRANSITIONS[order.status] || [];
-    if (!allowedNext.includes(status)) {
-      res.status(400).json({ success: false, message: `${order.status} → ${status} keçidi icazə verilmir` }); return;
-    }
-    // Kartla ödənilən sifarişi ödəniş təsdiqlənmədən göndərmək olmaz.
-    if (order.paymentMethod === 'CARD' && order.paymentStatus !== 'PAID' && (status === 'SHIPPED' || status === 'DELIVERED')) {
-      res.status(400).json({ success: false, message: 'Ödəniş təsdiqlənməyib — sifarişi göndərmək olmaz' }); return;
-    }
-
-    // Order-dəki elanların biznes/obyektləri
-    const bizIds = Array.from(new Set(order.items.map((i) => i.listing.businessId).filter((x): x is number => !!x)));
-    const objIds = Array.from(new Set(order.items.map((i) => i.listing.businessObjectId).filter((x): x is number => !!x)));
-    if (bizIds.length === 0) { res.status(400).json({ success: false, message: 'Bu sifariş biznesə aid deyil' }); return; }
-
-    // İcazə: bu bizneslərdən birinin sahibi, ya da uyğun üzv
-    const owns = await prisma.business.count({ where: { id: { in: bizIds }, userId: req.adminId } });
-    let allowed = owns > 0;
-    if (!allowed) {
-      const mem = await prisma.businessMember.count({
-        where: { userId: req.adminId, businessId: { in: bizIds }, status: 'ACTIVE', canSell: true, OR: [{ objectId: null }, { objectId: { in: objIds } }] },
-      });
-      allowed = mem > 0;
-    }
-    if (!allowed) { res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return; }
-
-    // Satış başlayır → stok indi götürülür; çatmırsa təsdiq edilmir.
-    if (['CONFIRMED', 'SHIPPED', 'DELIVERED'].includes(status) && !order.stockCommitted) {
-      const sc = await commitStockForOrder(order.id);
-      if (!sc.ok) {
-        res.status(409).json({ success: false, code: 'NO_STOCK', message: `«${sc.missing}» üçün stokda kifayət qədər məhsul yoxdur (qalıb: ${sc.available ?? 0}). Sifarişi ləğv edin — alıcının pulu qaytarılacaq.` });
-        return;
-      }
-    }
-    // CANCELLED → stoku geri qaytar (yalnız götürülübsə — stockCommitted).
-    if (status === 'CANCELLED' && order.status !== 'CANCELLED') {
-      await restoreStockForOrder(order.id).catch(() => {});
-    }
-    // Təhvil tarixi — qaytarma müddəti və hesablaşma buradan sayılır (əvvəl yazılmırdı).
-    const updated = await prisma.order.update({
-      where: { id: orderId },
-      data: { status: status as any, ...(status === 'DELIVERED' && !order.deliveredAt ? { deliveredAt: new Date(), pickupConfirmBy: null } : {}) },
-    });
-    if (isPickup(order)) {
-      if (status === 'CONFIRMED') onPickupReady(order.id).catch(() => {});
-      if (status === 'SHIPPED') await onPickupHandedOver(order.id).catch(() => {});
-    }
-
-    // Satıcı hesablaşması — status dəyişdi. BU ÇAĞIRIŞ OLMADAN biznesin
-    // "çatdırıldı" etdiyi sifariş ledger-də PENDING qalır və heç vaxt
-    // ödəniləcək (AVAILABLE) balansa keçmirdi. Alıcı və admin yollarında
-    // bu çağırış var idi, biznes yolunda unudulmuşdu.
-    await recordSettlement(orderId).catch(() => {});
-    await prisma.notification.create({
-      data: { userId: order.buyerId, type: 'ORDER', title: 'Sifariş statusu', body: `Sifariş #${order.id}: ${status}`, link: `/orders/${order.id}` },
-    }).catch(() => {});
-    res.json({ success: true, order: updated });
-  } catch (error: any) {
-    res.status(400).json({ success: false, message: error.message });
-  }
-});
+// Biznes sifarişinin statusu: routes/cart.ts → PUT /orders/:id/status (eyni kod
+// satıcı, biznes sahibi və səlahiyyətli işçi üçün). Buradakı ayrıca surət silindi.
 
 // ==================== ADMIN: BİZNES TƏSDİQİ ====================
 

@@ -14,6 +14,7 @@ import { markOrdersAwaitingConfirm, getDeliveryDeadlineHours } from '../services
 import { checkPrice as yangoCheckPrice, isYangoConfigured, YANGO_MAX_WEIGHT_KG, yangoDead } from '../services/yangoDelivery';
 import { notifySellersNewOrder } from '../services/orderNotify';
 import { notifyOrderStatus } from '../services/orderMessages';
+import { canManageOrderAsSeller } from '../services/bizAccess';
 import { dispatchOrderToYango, cancelActiveYangoClaim } from './yango';
 import { pushLive, pushAdmins } from '../services/live';
 import { upload } from '../middleware/upload';
@@ -1349,7 +1350,11 @@ const ORDER_TRANSITIONS: Record<string, string[]> = {
   CANCELLED: [],
 };
 
-router.put('/orders/:id/status', adminAuth, async (req: AuthRequest, res: Response) => {
+// İkinci yol (`/me/business-orders/...`) — «Satış pəncərəsi»nin köhnə ünvanı.
+// Əvvəl onun AYRICA, zəif surəti var idi: ləğvdə kart ödənişi qaytarılmır,
+// Yango ləğv olunmur, təhvil kodu yoxlanmır, bildirişlər getmirdi. İndi hər
+// iki ünvan eyni kodu işlədir.
+router.put(['/orders/:id/status', '/me/business-orders/:id/status'], adminAuth, async (req: AuthRequest, res: Response) => {
   try {
     const id = parseInt(req.params.id);
     if (Number.isNaN(id)) {
@@ -1361,12 +1366,18 @@ router.put('/orders/:id/status', adminAuth, async (req: AuthRequest, res: Respon
       res.status(400).json({ success: false, message: 'Yanlış status' }); return;
     }
     const order = await prisma.order.findUnique({ where: { id } });
-    const isSeller = !!order && order.sellerId === req.adminId;
     const isBuyer = !!order && order.buyerId === req.adminId;
+    // Satıcı tərəfi: sifarişin satıcısı, biznes sahibi, ya da həmin mağazada
+    // satış səlahiyyətli işçi (mağaza adından işləyir).
+    const isSeller = !!order && !isBuyer && (await canManageOrderAsSeller(order.id, order.sellerId, req.adminId!));
     if (!order || (!isSeller && !isBuyer)) {
       res.status(403).json({ success: false, message: 'İcazə yoxdur' });
       return;
     }
+    // İşçi əməliyyatı — satıcıya (sahibə) kimin etdiyi bildirilir.
+    const staffName = isSeller && order.sellerId !== req.adminId
+      ? (await prisma.user.findUnique({ where: { id: req.adminId! }, select: { name: true } }))?.name || 'İşçi'
+      : null;
     // Satıcı bütün keçidləri edə bilər; alıcı yalnız: gözləyəni ləğv, göndərilən sifarişi "təhvil aldım".
     // Alıcı: gözləyəni və ya təsdiqlənib hələ GÖNDƏRİLMƏMİŞ sifarişi ləğv edə bilər (ödənilibsə refund olunur);
     // göndərilən sifarişi "təhvil aldım" edə bilər. (Göndərildikdən sonra ləğv yoxdur — mallar yoldadır.)
@@ -1524,6 +1535,7 @@ router.put('/orders/:id/status', adminAuth, async (req: AuthRequest, res: Respon
     // ona görə burada həmin tərəf təkrar yazılmır.
     const pk = isPickup(order);
     await notifyOrderStatus(order, next, isBuyer ? 'BUYER' : 'SELLER', {
+      staffName,
       refundOk: next === 'CANCELLED' ? !refundFailed : null,
       quiet: {
         buyer: pk && !isBuyer && (next === 'CONFIRMED' || next === 'SHIPPED'),

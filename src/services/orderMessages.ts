@@ -59,7 +59,7 @@ export async function notifyOrderStatus(
   o: OrderLike,
   next: string,
   actor: OrderActor,
-  opts: { refundOk?: boolean | null; quiet?: { buyer?: boolean; seller?: boolean } } = {},
+  opts: { refundOk?: boolean | null; quiet?: { buyer?: boolean; seller?: boolean }; staffName?: string | null } = {},
 ): Promise<void> {
   const n = `Sifariş #${o.id}`;
   const pickup = o.deliveryType === 'PICKUP';
@@ -117,11 +117,21 @@ export async function notifyOrderStatus(
     buyer = m; seller = m;
   }
 
+  // Əməliyyatı satıcının özü yox, İŞÇİSİ edib — sahib kimin nə etdiyini bilsin.
+  let staffActed = false;
+  if (actor === 'SELLER' && opts.staffName && !seller) {
+    const what: Record<string, string> = { CONFIRMED: 'təsdiqlədi', SHIPPED: pickup ? 'alıcıya təhvil verdiyini qeyd etdi' : 'yola saldı', DELIVERED: 'çatdırıldı kimi qeyd etdi', CANCELLED: 'ləğv etdi' };
+    if (what[next]) {
+      seller = { title: `${n}: işçi ${what[next]}`, body: `${opts.staffName} sifarişi ${what[next]}.${next === 'CANCELLED' && paid ? ' Ödəniş alıcıya qaytarılır.' : ''}` };
+      staffActed = true;
+    }
+  }
+
   const bLive = buyer && !opts.quiet?.buyer ? await send(o.buyerId, buyer, BUYER_LINK, tone) : null;
   const sLive = seller && !opts.quiet?.seller ? await send(o.sellerId, seller, SELLER_LINK, tone) : null;
   // Hər iki tərəfin açıq «Sifarişlər» səhifəsi yenilənsin (bildiriş olmasa da).
   pushLive(o.buyerId, { kind: 'order', id: o.id, status: next, ...(bLive && actor !== 'BUYER' ? bLive : {}) });
-  pushLive(o.sellerId, { kind: 'order', id: o.id, status: next, ...(sLive && actor !== 'SELLER' ? sLive : {}) });
+  pushLive(o.sellerId, { kind: 'order', id: o.id, status: next, ...(sLive && (actor !== 'SELLER' || staffActed) ? sLive : {}) });
   if (o.courierId) {
     const cLive = courier ? await send(o.courierId, courier, '/orders', tone) : null;
     pushLive(o.courierId, { kind: 'order', id: o.id, status: next, ...(cLive || {}) });

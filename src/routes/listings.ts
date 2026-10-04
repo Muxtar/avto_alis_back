@@ -10,6 +10,7 @@ import { purchasedListing, reviewStats } from '../services/reviewGating';
 import { normalizeGtin, isRestrictedGtin } from '../services/gtin';
 import { searchWords } from '../services/searchTerms';
 import { pushAdmins } from '../services/live';
+import { canManageListing } from '../services/bizAccess';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -450,9 +451,9 @@ router.get('/me/listings/:id/visibility', adminAuth, async (req: AuthRequest, re
   try {
     const l = await prisma.listing.findUnique({
       where: { id: parseInt(String(req.params.id)) },
-      select: { userId: true, status: true, type: true, archivedAt: true, expiresAt: true, business: { select: { isActive: true, name: true } }, businessObject: { select: { isActive: true, name: true } } },
+      select: { userId: true, businessId: true, businessObjectId: true, status: true, type: true, archivedAt: true, expiresAt: true, business: { select: { isActive: true, name: true } }, businessObject: { select: { isActive: true, name: true } } },
     });
-    if (!l || l.userId !== req.adminId) { res.status(404).json({ success: false, message: 'Elan tapılmadı' }); return; }
+    if (!l || !(await canManageListing(l, req.adminId!))) { res.status(404).json({ success: false, message: 'Elan tapılmadı' }); return; }
     res.json({ success: true, ...visibilityOf(l) });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });

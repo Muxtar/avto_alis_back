@@ -355,6 +355,9 @@ model PhoneNumber {
 model Listing {
   id                   Int             @id @default(autoincrement())
   userId               Int
+  // Elanı kim yaradıb. Mağazaya bağlı elanda `userId` həmişə biznes sahibidir
+  // (satıcı odur); işçi yaradıbsa burada onun id-si qalır.
+  createdById          Int?
   title                String
   // Ştrix-kod (GTIN: EAN-13/EAN-8/UPC-A/ITF-14) — çeklə və mağazalarla qiymət müqayisəsi üçün.
   barcode              String?

@@ -11,6 +11,7 @@ import { sendVerificationCode } from '../services/mailer';
 import { resolveFlag } from '../services/settings';
 import { emitToAdmins } from '../services/callSignaling';
 import { pushAdmins, pushLive } from '../services/live';
+import { canManageListing, sellableObjects } from '../services/bizAccess';
 import { validateTiers } from '../services/tierPricing';
 import { MIN_WINDOW_DAYS, MAX_WINDOW_DAYS, RETURN_WINDOW_DAYS } from '../services/groupBuy';
 import { isValidMonths } from '../services/installment';
@@ -376,7 +377,7 @@ function normPhone(s: any): string { return String(s || '').replace(/[^\d+]/g, '
 
 // Obyektdə satış icazəsi: biznes sahibi VƏ YA satış (canSell) səlahiyyətli ACTIVE işçi.
 // Uğurda { bizId, bizObjId }, xətada { error, code } qaytarır.
-async function resolveObjectForSelling(businessObjectId: any, userId: number): Promise<{ bizId?: number; bizObjId?: number; objCity?: string | null; objAddress?: string | null; objLat?: number | null; objLng?: number | null; error?: string; code?: number }> {
+async function resolveObjectForSelling(businessObjectId: any, userId: number): Promise<{ bizId?: number; bizObjId?: number; ownerId?: number; objCity?: string | null; objAddress?: string | null; objLat?: number | null; objLng?: number | null; error?: string; code?: number }> {
   const obj = await prisma.businessObject.findUnique({
     where: { id: parseInt(String(businessObjectId)) },
     include: { business: true },
@@ -400,7 +401,7 @@ async function resolveObjectForSelling(businessObjectId: any, userId: number): P
   if (!obj.business.isActive) return { error: 'Biznes deaktivdir — əvvəlcə aktiv edin', code: 400 };
   if (obj.deletedAt) return { error: 'Bu obyekt silinib', code: 400 };
   if (!obj.isActive) return { error: 'Obyekt deaktivdir — əvvəlcə aktiv edin', code: 400 };
-  return { bizId: obj.businessId, bizObjId: obj.id, objCity: obj.city, objAddress: obj.address, objLat: obj.latitude, objLng: obj.longitude };
+  return { bizId: obj.businessId, bizObjId: obj.id, ownerId: obj.business.userId, objCity: obj.city, objAddress: obj.address, objLat: obj.latitude, objLng: obj.longitude };
 }
 
 router.get('/me/phones', adminAuth, async (req: AuthRequest, res: Response) => {
@@ -551,8 +552,13 @@ router.put('/me', adminAuth, async (req: AuthRequest, res: Response) => {
 // Get my listings with stats
 router.get('/me/listings', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
+    // İşçi olduğum mağazaların elanları da burada görünür (satıcısı biznes
+    // sahibidir, amma mən idarə edə bilirəm) — `staff: true` ilə işarələnir.
+    const staffObjIds = (await sellableObjects(req.adminId!)).filter((o) => !o.owned).map((o) => o.id);
     const listings = await prisma.listing.findMany({
-      where: { userId: req.adminId },
+      where: staffObjIds.length
+        ? { OR: [{ userId: req.adminId }, { businessObjectId: { in: staffObjIds } }] }
+        : { userId: req.adminId },
       orderBy: { createdAt: 'desc' },
       include: {
         user: { select: { id: true, name: true, phone: true, type: true } },
@@ -567,10 +573,19 @@ router.get('/me/listings', adminAuth, async (req: AuthRequest, res: Response) =>
     });
     // Hər elan üçün: saytda görünürmü, görünmürsə niyə (satıcı «niyə ana səhifədə yoxdur» soruşmasın).
     const now = new Date();
-    res.json({ listings: listings.map((l) => ({ ...l, visibility: visibilityOf(l as any, now) })) });
+    res.json({ listings: listings.map((l) => ({ ...l, staff: l.userId !== req.adminId, visibility: visibilityOf(l as any, now) })) });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }
+});
+
+// Elan formasındakı «mağaza» seçimi: öz obyektlərim + işçi olduğum (satış
+// səlahiyyətli) mağazalar. Əvvəl forma yalnız sahibin bizneslərini yükləyirdi —
+// işçi icazəsi olsa da mağazanı seçə bilmirdi.
+router.get('/me/sellable-objects', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    res.json({ success: true, objects: await sellableObjects(req.adminId!) });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
 
 // Create my listing — any logged-in user can post (PRODUCT or SERVICE).
@@ -612,21 +627,25 @@ router.post('/me/listings', listingWriteLimiter, adminAuth, upload.array('images
     if (type !== 'PRODUCT' && type !== 'SERVICE') {
       res.status(400).json({ success: false, message: 'Tip yalnız PRODUCT və ya SERVICE ola bilər' }); return;
     }
-    const bc = type === 'PRODUCT' ? await barcodeFor(req.body.barcode, req.adminId!) : { ok: true as const, value: null };
-    if (!bc.ok) { res.status(400).json({ success: false, message: bc.message }); return; }
-
     // Biznes obyekti seçilibsə — TƏSDİQLƏNMİŞ biznesə aid olmalıdır (kart üçün).
     let bizId: number | null = null;
     let bizObjId: number | null = null;
     // VÖEN elanda konum obyektdən gəlir — istifadəçi şəhər/ünvan girmir.
     let objLoc: { city: string | null; address: string | null; lat: number | null; lng: number | null } | null = null;
+    let sellerUserId = req.adminId!;
     if (businessObjectId) {
       const r = await resolveObjectForSelling(businessObjectId, req.adminId!);
       if (r.error) { res.status(r.code || 403).json({ success: false, message: r.error }); return; }
       bizId = r.bizId!;
       bizObjId = r.bizObjId!;
+      // Mağazaya bağlı elanın SATICISI biznes sahibidir — işçi yaratsa belə
+      // (sifariş, iadə, şikayət, reytinq və ödəniş biznesdə qalır).
+      sellerUserId = r.ownerId ?? req.adminId!;
       objLoc = { city: r.objCity ?? null, address: r.objAddress ?? null, lat: r.objLat ?? null, lng: r.objLng ?? null };
     }
+    // Ştrix-kod SATICININ (mağazanın) elanları arasında təkrarlanmamalıdır.
+    const bc = type === 'PRODUCT' ? await barcodeFor(req.body.barcode, sellerUserId) : { ok: true as const, value: null };
+    if (!bc.ok) { res.status(400).json({ success: false, message: bc.message }); return; }
 
     // VÖEN-li elan MÜTLƏQ təsdiqlənmiş biznes obyektinə bağlı olmalıdır (kartla satış).
     if (listingMode === 'voen' && !bizObjId) {
@@ -661,7 +680,7 @@ router.post('/me/listings', listingWriteLimiter, adminAuth, upload.array('images
     const expiresAt = new Date(Date.now() + 20 * 24 * 60 * 60 * 1000);
     const listing = await prisma.listing.create({
       data: {
-        userId: req.adminId!, title, description, price: parseFloat(price),
+        userId: sellerUserId, createdById: req.adminId!, title, description, price: parseFloat(price),
         barcode: bc.value ?? null,
         category, type, images, location: effectiveLocation, phone: phone || null,
         condition: condition || 'NEW',
@@ -754,12 +773,12 @@ router.post('/me/listings', listingWriteLimiter, adminAuth, upload.array('images
 router.put('/me/listings/:id', adminAuth, upload.array('images', 5), processImages, async (req: AuthRequest, res: Response) => {
   try {
     const existing = await prisma.listing.findUnique({ where: { id: parseInt(req.params.id) } });
-    if (!existing || existing.userId !== req.adminId) {
+    if (!existing || !(await canManageListing(existing, req.adminId!))) {
       res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return;
     }
     const { title, description, price, category, type, location, phone, condition, country, brand, stock, forVehicle, unit, unitValue, year, model, city, fuelType, paymentType, existingImages, attributes, barter, forRent, bookable, bookingType, maxGuests, openTime, closeTime, deliveryMethod } = req.body;
     const parsedAttrs = attributes !== undefined ? (() => { try { const o = JSON.parse(attributes); return o && typeof o === 'object' ? o : {}; } catch { return {}; } })() : undefined;
-    const bcUpd = await barcodeFor(req.body.barcode, req.adminId!, existing.id);
+    const bcUpd = await barcodeFor(req.body.barcode, existing.userId, existing.id);
     if (!bcUpd.ok) { res.status(400).json({ success: false, message: bcUpd.message }); return; }
 
     let nextImages: string[] | undefined;
@@ -927,11 +946,13 @@ router.post('/me/listings/bulk', bulkLimiter, adminAuth, async (req: AuthRequest
     // Bütün toplu elanlar bir təsdiqlənmiş biznes obyektinə bağlanır (kartla satış üçün).
     let bizId: number | null = null;
     let bizObjId: number | null = null;
+    let sellerUserId = req.adminId!;
     if (businessObjectId) {
       const r = await resolveObjectForSelling(businessObjectId, req.adminId!);
       if (r.error) { res.status(r.code || 403).json({ success: false, message: r.error }); return; }
       bizId = r.bizId!;
       bizObjId = r.bizObjId!;
+      sellerUserId = r.ownerId ?? req.adminId!;   // satıcı biznes sahibidir (işçi yükləsə belə)
     }
     // VÖEN-li toplu yükləmədə obyekt mütləqdir.
     if (listingMode === 'voen' && !bizObjId) {
@@ -953,14 +974,14 @@ router.post('/me/listings/bulk', bulkLimiter, adminAuth, async (req: AuthRequest
         }
         let barcode: string | null = null;
         if (it.type !== 'SERVICE' && it.barcode != null && String(it.barcode).trim()) {
-          const bc = await barcodeFor(it.barcode, req.adminId!);
+          const bc = await barcodeFor(it.barcode, sellerUserId);
           if (!bc.ok) warnings.push({ index: i, message: bc.message, externalId: it.externalId });
           else if (bc.value && seenCodes.has(bc.value)) warnings.push({ index: i, message: 'Bu ştrix-kod sorğuda təkrarlanır — barkodsuz yaradıldı', externalId: it.externalId });
           else { barcode = bc.value; if (barcode) seenCodes.add(barcode); }
         }
         const listing = await prisma.listing.create({
           data: {
-            userId: req.adminId!,
+            userId: sellerUserId, createdById: req.adminId!,
             title: String(it.title),
             description: String(it.description || it.title),
             price: parseFloat(String(it.price)),
@@ -1003,7 +1024,7 @@ router.post('/me/listings/:id/reactivate', adminAuth, async (req: AuthRequest, r
       res.status(400).json({ success: false, message: 'Yanlış ID' }); return;
     }
     const existing = await prisma.listing.findUnique({ where: { id } });
-    if (!existing || existing.userId !== req.adminId) {
+    if (!existing || !(await canManageListing(existing, req.adminId!))) {
       res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return;
     }
     // Cooldown: only allow reactivation if the listing is actually expired
@@ -1031,7 +1052,7 @@ router.post('/me/listings/:id/reactivate', adminAuth, async (req: AuthRequest, r
 router.delete('/me/listings/:id', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
     const existing = await prisma.listing.findUnique({ where: { id: parseInt(req.params.id) } });
-    if (!existing || existing.userId !== req.adminId) {
+    if (!existing || !(await canManageListing(existing, req.adminId!))) {
       res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return;
     }
 
