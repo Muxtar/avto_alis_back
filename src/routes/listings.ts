@@ -523,6 +523,7 @@ router.post('/listings/:id/comments', adminAuth, async (req: AuthRequest, res: R
       },
       include: { user: { select: { id: true, name: true, type: true } } },
     });
+    pushAdmins('comment');   // admin paneli özü yenilənsin
     alertNegativeReview(comment.id);
     res.status(201).json({ success: true, comment });
   } catch (error: any) {

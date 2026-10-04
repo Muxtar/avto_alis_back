@@ -5,6 +5,7 @@
 import { Request, Response, NextFunction } from 'express';
 import { PrismaClient } from '@prisma/client';
 import { AuthRequest } from '../middleware/auth';
+import { pushAdminMutation } from './live';
 
 const prisma = new PrismaClient();
 
@@ -55,6 +56,8 @@ export function auditMiddleware(req: AuthRequest, res: Response, next: NextFunct
       if (res.statusCode >= 400) return;         // yalnız uğurlu əməliyyatlar
       if (!req.adminId) return;                  // admin auth keçməyibsə (yəni admin deyil)
       const { action, targetType, targetId } = deriveAction(req.method, path);
+      // Açıq admin panelləri bu dəyişikliyi səhifə yenilənmədən görsün.
+      if (targetType) pushAdminMutation(targetType, targetId);
       const ip = (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() || req.socket?.remoteAddress || null;
       prisma.adminAuditLog.create({
         data: {

@@ -2,7 +2,7 @@ import { Router, Request, Response } from 'express';
 import { PrismaClient } from '@prisma/client';
 import { adminAuth, AuthRequest } from '../middleware/auth';
 import { alertNegativeReview, reviewTargetOwner, NEGATIVE_MAX } from '../services/reviewAlerts';
-import { pushLive } from '../services/live';
+import { pushLive, pushAdmins } from '../services/live';
 import { purchasedFromObject, consultedProfessional, deliveredOrderCountFromObject, consultationCount, reviewStats } from '../services/reviewGating';
 
 const router = Router();
@@ -51,6 +51,7 @@ router.post('/objects/:id/comments', adminAuth, async (req: AuthRequest, res: Re
       data: { userId: req.adminId!, objectId, content, rating: rating as number | null },
       include: { user: { select: { id: true, name: true, type: true, avatar: true } } },
     });
+    pushAdmins('comment');   // admin paneli özü yenilənsin
     alertNegativeReview(comment.id);
     res.status(201).json({ success: true, comment });
   } catch (error: any) {
@@ -105,6 +106,7 @@ router.post('/professionals/:id/comments', adminAuth, async (req: AuthRequest, r
       data: { userId: req.adminId!, professionalUserId: proId, content, rating: rating as number | null },
       include: { user: { select: { id: true, name: true, type: true, avatar: true } } },
     });
+    pushAdmins('comment');   // admin paneli özü yenilənsin
     alertNegativeReview(comment.id);
     res.status(201).json({ success: true, comment });
   } catch (error: any) {

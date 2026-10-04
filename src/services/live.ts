@@ -46,12 +46,44 @@ export function pushLive(userIds: number | number[] | null | undefined, payload:
   for (const id of new Set(ids)) {
     if (Number.isInteger(id)) emitToUser(id, 'live:update', { ...payload, at: Date.now() });
   }
+  // İstifadəçinin məlumatı dəyişibsə, admin panelində də eyni sətir köhnəlib
+  // (sifariş statusu, ödəniş, blok və s.) — açıq panel özü yenilənsin.
+  // Toast göndərilmir: o mətn istifadəçiyə ünvanlanıb.
+  const adminKind = USER_TO_ADMIN_KIND[payload.kind];
+  if (adminKind) pushAdmins(adminKind, { id: payload.id });
 }
 
 // Admin panelində gözləyən iş növləri — yeni müraciət gələndə panel özü yenilənsin.
 export type AdminLiveKind =
   | 'listing' | 'identity' | 'seller' | 'business' | 'object' | 'credential' | 'social'
-  | 'complaint' | 'support' | 'return' | 'order' | 'refund';
+  | 'complaint' | 'support' | 'return' | 'order' | 'refund'
+  | 'user' | 'payout' | 'comment' | 'promo' | 'banner' | 'page' | 'setting' | 'admin'
+  | 'outreach' | 'broadcast' | 'courier';
+
+const USER_TO_ADMIN_KIND: Partial<Record<LiveKind, AdminLiveKind>> = {
+  listing: 'listing', identity: 'identity', seller: 'seller', business: 'business', object: 'object',
+  credential: 'credential', social: 'social', account: 'user', complaint: 'complaint',
+  support: 'support', return: 'return', order: 'order', payout: 'payout',
+};
+
+// Admin API yolunun ilk hissəsi → paneldə hansı növ məlumat dəyişdi.
+const ADMIN_RESOURCE_KIND: Record<string, AdminLiveKind> = {
+  listings: 'listing', users: 'user', orders: 'order', finance: 'order', returns: 'return',
+  refunds: 'refund', payouts: 'payout', referral: 'payout', credentials: 'credential',
+  'social-links': 'social', comments: 'comment', couriers: 'courier', settings: 'setting', ai: 'setting',
+  admins: 'admin', businesses: 'business', banks: 'business', objects: 'object',
+  'seller-applications': 'seller', identity: 'identity', complaints: 'complaint', support: 'support',
+  promo: 'promo', banners: 'banner', pages: 'page', legal: 'page',
+  'social-outreach': 'outreach', 'social-invites': 'outreach', broadcast: 'broadcast',
+};
+
+/** Bir admin nəyisə dəyişdi — DİGƏR açıq panellər (başqa admin, başqa cihaz,
+    başqa tab) və həmin adminin öz siyahısı səhifə yenilənmədən təzələnsin.
+    auditLog middleware-i hər uğurlu admin mutasiyasından sonra çağırır. */
+export function pushAdminMutation(resource: string, id?: string | null) {
+  const kind = ADMIN_RESOURCE_KIND[resource];
+  if (kind) pushAdmins(kind, { id: id ?? undefined });
+}
 
 /** Admin panelinə "yeni iş var / iş dəyişdi" xəbəri. */
 export function pushAdmins(kind: AdminLiveKind, data: { id?: number | string; toast?: string } = {}) {

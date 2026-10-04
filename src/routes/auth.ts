@@ -1,4 +1,5 @@
 import { Router, Request, Response } from 'express';
+import { pushAdmins } from '../services/live';
 import { PrismaClient, UserType } from '@prisma/client';
 import { syncProGroups } from '../services/proGroups';
 import { deliverPendingInvites } from '../services/pendingInvites';
@@ -138,6 +139,7 @@ router.post('/register/phone', registerLimiter, async (req: Request, res: Respon
         return;
       }
       user = await prisma.user.create({ data: { phone } });
+      pushAdmins('user');   // admin paneli özü yenilənsin
     }
 
     const otp = await createVerificationCode(user.id);
@@ -462,6 +464,7 @@ router.post('/register/car-owner', registerLimiter, passportPairUpload, async (r
       },
       include: { vehicles: true },
     });
+    pushAdmins('user');   // admin paneli özü yenilənsin
 
     const otp = await createVerificationCode(user.id);
     res.status(201).json({ success: true, user, userId: user.id, ...otpFields(otp) });
@@ -499,6 +502,7 @@ router.post('/register/mechanic', registerLimiter, async (req: Request, res: Res
       },
       include: { workplaces: true },
     });
+    pushAdmins('user');   // admin paneli özü yenilənsin
 
     const otp = await createVerificationCode(user.id);
     res.status(201).json({ success: true, user, userId: user.id, ...otpFields(otp) });
@@ -536,6 +540,7 @@ router.post('/register/parts-seller', async (req: Request, res: Response) => {
       },
       include: { workplaces: true },
     });
+    pushAdmins('user');   // admin paneli özü yenilənsin
 
     const otp = await createVerificationCode(user.id);
     res.status(201).json({ success: true, user, userId: user.id, ...otpFields(otp) });
@@ -655,6 +660,7 @@ router.post('/register/telegram', registerLimiter, async (req: Request, res: Res
       data: userData,
       include: { vehicles: true, workplaces: true },
     });
+    pushAdmins('user');   // admin paneli özü yenilənsin
 
     const otp = await createVerificationCode(user.id);
     res.status(201).json({ success: true, user, userId: user.id, ...otpFields(otp) });
