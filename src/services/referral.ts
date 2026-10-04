@@ -19,7 +19,7 @@
 // referal satıcıya ReferralLedger yazılır — çatdırılandan sonra qaytarma
 // müddəti bitəndə ödənilə bilən olur, admin ReferralPayout ilə ödəyir.
 import { PrismaClient } from '@prisma/client';
-import { verifiedProfessions } from './professionDiscount';
+import { verifiedProfessions, primaryProfession } from './professionDiscount';
 import { getPayoutHoldDays } from './settlement';
 import { canConsult, voenAccount } from './proAccount';
 
@@ -87,7 +87,8 @@ export async function eligibility(p: Program | { id: number; sellerId: number; e
     select: { profession: true, professions: true, cvFile: true },
   });
   if (!me) return { ok: false, reason: 'İstifadəçi tapılmadı' };
-  const mine = new Set([me.profession, ...(me.professions || [])].map(norm).filter(Boolean));
+  // Bir hesab — bir ixtisas: yalnız hazırkı ixtisas sayılır.
+  const mine = new Set([primaryProfession(me)].map(norm).filter(Boolean));
   const rules = p.rules.filter((r: any) => mine.has(norm(r.profession)));
   if (!rules.length) {
     const list = p.rules.map((r: any) => r.profession).join(', ');

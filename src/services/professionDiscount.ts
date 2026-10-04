@@ -21,6 +21,13 @@ const prisma = new PrismaClient();
 const r2 = (n: number) => Math.round(n * 100) / 100;
 export const normProf = (s: string | null | undefined) => (s || '').trim().replace(/\s+/g, ' ').toLocaleLowerCase('az');
 export const PRO_DISCOUNT_MAX = 50;
+/** İxtisas dəyişəndən sonra yeni ixtisasın endirimləri neçə gündən sonra aktiv olur. */
+export const PROFESSION_SWITCH_DAYS = Math.max(0, Number(process.env.PROFESSION_SWITCH_DAYS ?? 30) || 0);
+
+/** Hesabın YEGANƏ ixtisası (köhnə hesablarda bir neçəsi yazılıbsa — birincisi). */
+export function primaryProfession(u: { profession?: string | null; professions?: string[] | null } | null | undefined): string | null {
+  return (u?.profession || '').trim() || (u?.professions || []).map((p) => (p || '').trim()).find(Boolean) || null;
+}
 
 /** İstifadəçinin SƏNƏDLƏ sübut etdiyi ixtisaslar (normallaşdırılmış). */
 export async function verifiedProfessions(userId: number): Promise<Set<string>> {
@@ -45,13 +52,19 @@ export async function verifiedProfessions(userId: number): Promise<Set<string>> 
 }
 
 /** Alıcının ixtisasları: profildə yazdıqları (declared) və sənədlə sübut etdikləri (verified). */
-export async function buyerProfessions(userId: number): Promise<{ declared: Set<string>; verified: Set<string> }> {
-  const [u, verified] = await Promise.all([
-    prisma.user.findUnique({ where: { id: userId }, select: { profession: true, professions: true } }),
+export async function buyerProfessions(userId: number): Promise<{ declared: Set<string>; verified: Set<string>; cooldownUntil: Date | null; profession: string | null }> {
+  const [u, verifiedAll] = await Promise.all([
+    prisma.user.findUnique({ where: { id: userId }, select: { profession: true, professions: true, professionDiscountFrom: true } }),
     verifiedProfessions(userId),
   ]);
-  const declared = new Set([u?.profession, ...(u?.professions || [])].map(normProf).filter(Boolean));
-  return { declared, verified };
+  // BİR HESAB — BİR İXTİSAS: endirim yalnız hazırkı ixtisasa görə verilir (başqa
+  // ixtisas üzrə köhnə sənəd endirim açmır).
+  const prof = primaryProfession(u);
+  const cooldownUntil = u?.professionDiscountFrom && u.professionDiscountFrom > new Date() ? u.professionDiscountFrom : null;
+  // İxtisas yeni dəyişdirilib — gözləmə müddəti bitənə qədər endirim yoxdur.
+  if (!prof || cooldownUntil) return { declared: new Set(), verified: new Set(), cooldownUntil, profession: prof };
+  const key = normProf(prof);
+  return { declared: new Set([key]), verified: new Set(verifiedAll.has(key) ? [key] : []), cooldownUntil: null, profession: prof };
 }
 /** Qayda bu alıcıya şamil olunurmu. */
 export const ruleApplies = (r: { profession: string; requireDoc?: boolean }, bp: { declared: Set<string>; verified: Set<string> }) =>
@@ -127,21 +140,26 @@ export function applyProDiscounts(lines: ProLine[], rules: Map<number, ProRule>)
 
 /** Elan səhifəsi üçün: mağazanın ixtisas endirimləri + bu alıcının statusu. */
 export async function listingProDiscountInfo(listing: { id: number; businessObjectId: number | null; userId: number }, viewerId?: number | null) {
-  if (!listing.businessObjectId) return { rules: [], mine: null as null | { percent: number; profession: string }, missingDoc: [] as string[] };
+  if (!listing.businessObjectId) return { rules: [], mine: null as null | { percent: number; profession: string }, missingDoc: [] as string[], cooldown: null as null | { until: Date; profession: string; percent: number } };
   const rules = (await activeRules([listing.businessObjectId])).filter((r) => ruleCovers(r, listing.id)).sort((a, b) => b.percent - a.percent);
   let mine: { percent: number; profession: string } | null = null;
   let missingDoc: string[] = [];
+  let cooldown: null | { until: Date; profession: string; percent: number } = null;
   if (viewerId && viewerId !== listing.userId && rules.length) {
     const bp = await buyerProfessions(viewerId);
     const hit = rules.find((r) => ruleApplies(r, bp));   // rules faizə görə azalan sırada — ən yaxşısı
     if (hit) mine = { percent: hit.percent, profession: hit.profession };
-    else {
+    else if (bp.cooldownUntil && bp.profession) {
+      // İxtisas yeni dəyişdirilib — endirim var, amma gözləmə müddəti bitməyib.
+      const hit2 = rules.find((r) => normProf(r.profession) === normProf(bp.profession));
+      if (hit2) cooldown = { until: bp.cooldownUntil, profession: hit2.profession, percent: hit2.percent };
+    } else {
       // Mağaza sənəd tələb edir, alıcı isə ixtisası yalnız profildə yazıb — nə etməli olduğunu deyirik.
       missingDoc = rules.filter((r) => bp.declared.has(normProf(r.profession))).map((r) => r.profession);
     }
   }
   return {
     rules: rules.map((r) => ({ profession: r.profession, percent: r.percent, maxUnitsPerOrder: r.maxUnitsPerOrder, maxDiscountPerOrder: r.maxDiscountPerOrder })),
-    mine, missingDoc,
+    mine, missingDoc, cooldown,
   };
 }

@@ -13,6 +13,7 @@ import { emitToAdmins } from '../services/callSignaling';
 import { pushAdmins, pushLive } from '../services/live';
 import { canManageListing, sellableObjects, canSellAtObject } from '../services/bizAccess';
 import { logStaffActivity } from '../services/staffWork';
+import { normProf, PROFESSION_SWITCH_DAYS } from '../services/professionDiscount';
 import { validateTiers } from '../services/tierPricing';
 import { MIN_WINDOW_DAYS, MAX_WINDOW_DAYS, RETURN_WINDOW_DAYS } from '../services/groupBuy';
 import { isValidMonths } from '../services/installment';
@@ -48,7 +49,7 @@ router.get('/me', adminAuth, async (req: AuthRequest, res: Response) => {
       select: {
         id: true, name: true, phone: true, email: true, emailVerified: true, type: true, role: true, verified: true,
         profileComplete: true, sellerVerified: true, sellerVerifiedAt: true, createdAt: true, isBlocked: true,
-        idVerifyStatus: true, profession: true, professions: true, bio: true, avatar: true, cvFile: true, cvPublic: true,
+        idVerifyStatus: true, profession: true, professions: true, professionDiscountFrom: true, bio: true, avatar: true, cvFile: true, cvPublic: true,
         idCardImage: true, idCardBackImage: true, selfieImage: true, selfieRightImage: true, selfieLeftImage: true,
         faceMatchScore: true, idNumber: true, birthDate: true, gender: true,
         idAiNameMatch: true, idAiNameScore: true, idAiFaceMatch: true, idAiFaceScore: true, idAiReason: true,
@@ -512,7 +513,19 @@ router.put('/me', adminAuth, async (req: AuthRequest, res: Response) => {
       return Number.isFinite(n) ? n : null;
     };
     // Kimlik təsdiqlənibsə (şəkil var) ad/FIN/doğum tarixi/cins kilidlidir — yalnız kimlik qaldırıldıqdan sonra dəyişilir.
-    const cur = await prisma.user.findUnique({ where: { id: req.adminId }, select: { idCardImage: true, city: true, profession: true, professions: true } });
+    const cur = await prisma.user.findUnique({ where: { id: req.adminId }, select: { idCardImage: true, city: true, profession: true, professions: true, professionLast: true, professionDiscountFrom: true } });
+    // BİR HESAB — BİR İXTİSAS. Bir neçəsi göndərilsə yalnız birincisi götürülür.
+    if (profList !== undefined) profList = profList.slice(0, 1);
+    // İxtisas DƏYİŞİR (əvvəlkindən fərqli yenisi seçilir) → yeni ixtisasın
+    // endirimləri PROFESSION_SWITCH_DAYS gün sonra aktiv olur. İlk dəfə seçəndə və
+    // eyni ixtisası yenidən yazanda gözləmə yoxdur.
+    let profExtra: Record<string, any> = {};
+    if (profList !== undefined && profList[0]) {
+      const np = normProf(profList[0]);
+      const prev = cur?.professionLast || cur?.profession || (cur?.professions || [])[0] || null;
+      if (prev && normProf(prev) !== np) profExtra = { professionLast: profList[0], professionDiscountFrom: new Date(Date.now() + PROFESSION_SWITCH_DAYS * 24 * 3600 * 1000) };
+      else if (!cur?.professionLast) profExtra = { professionLast: profList[0] };
+    }
     const idLocked = !!cur?.idCardImage;
     const user = await prisma.user.update({
       where: { id: req.adminId },
@@ -522,7 +535,7 @@ router.put('/me', adminAuth, async (req: AuthRequest, res: Response) => {
         ...(!idLocked && birthDate !== undefined && { birthDate: /^\d{4}-\d{2}-\d{2}$/.test(String(birthDate)) ? new Date(birthDate) : null }),
         ...(!idLocked && gender !== undefined && { gender: (gender || '').trim() || null }),
         ...(phone !== undefined && { phone }),
-        ...(profList !== undefined && { professions: profList, profession: profList[0] || null }),
+        ...(profList !== undefined && { professions: profList, profession: profList[0] || null, ...profExtra }),
         ...(bio !== undefined && { bio: (bio || '').trim() || null }),
         ...(city !== undefined && { city: city || null }),
         ...(address !== undefined && { address: address || null }),
@@ -531,7 +544,7 @@ router.put('/me', adminAuth, async (req: AuthRequest, res: Response) => {
       },
       select: {
         id: true, name: true, phone: true, email: true, type: true, role: true, verified: true, createdAt: true,
-        profession: true, professions: true, bio: true, avatar: true, idNumber: true, birthDate: true, gender: true, idVerifyStatus: true,
+        profession: true, professions: true, professionDiscountFrom: true, bio: true, avatar: true, idNumber: true, birthDate: true, gender: true, idVerifyStatus: true,
         city: true, address: true, latitude: true, longitude: true,
       },
     });

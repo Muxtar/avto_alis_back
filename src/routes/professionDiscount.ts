@@ -2,7 +2,7 @@
 import { Router, Request, Response } from 'express';
 import { PrismaClient } from '@prisma/client';
 import { adminAuth, AuthRequest, viewerIdFromReq } from '../middleware/auth';
-import { activeRules, listingProDiscountInfo, normProf, PRO_DISCOUNT_MAX, verifiedProfessions, buyerProfessions, ruleApplies } from '../services/professionDiscount';
+import { activeRules, listingProDiscountInfo, normProf, PRO_DISCOUNT_MAX, verifiedProfessions, buyerProfessions, ruleApplies, primaryProfession } from '../services/professionDiscount';
 import { getOrCreateProgram, eligibility, DOC_TYPES } from '../services/referral';
 
 const router = Router();
@@ -182,7 +182,7 @@ router.put('/me/objects/:id/profession-terms', adminAuth, async (req: AuthReques
 router.get('/me/pro-discounts', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
     const bp = await buyerProfessions(req.adminId!);
-    if (!bp.declared.size && !bp.verified.size) { res.json({ success: true, rules: [] }); return; }
+    if (!bp.declared.size && !bp.verified.size) { res.json({ success: true, rules: [], cooldownUntil: bp.cooldownUntil }); return; }
     const now = new Date();
     const all = await prisma.professionDiscount.findMany({
       where: { active: true, OR: [{ validUntil: null }, { validUntil: { gt: now } }], object: { isActive: true, deletedAt: null, business: { userId: { not: req.adminId! } } } },
@@ -200,9 +200,13 @@ router.get('/me/pro-discounts', adminAuth, async (req: AuthRequest, res: Respons
 router.get('/me/profession-benefits', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
     const me = req.adminId!;
-    const u = await prisma.user.findUnique({ where: { id: me }, select: { profession: true, professions: true } });
-    const declared = Array.from(new Set([u?.profession, ...(u?.professions || [])].map((x) => (x || '').trim()).filter(Boolean)));
+    const u = await prisma.user.findUnique({ where: { id: me }, select: { profession: true, professions: true, professionDiscountFrom: true } });
+    // Bir hesab — bir ixtisas.
+    const only = primaryProfession(u);
+    const declared = only ? [only] : [];
     const verified = await verifiedProfessions(me);
+    // İxtisas yeni dəyişdirilibsə endirimlər bu tarixə qədər aktiv deyil.
+    const cooldownUntil = u?.professionDiscountFrom && u.professionDiscountFrom > new Date() ? u.professionDiscountFrom : null;
     const mine = new Set([...declared.map(normProf), ...verified]);
     if (!mine.size) { res.json({ success: true, professions: declared, verified: [], objects: [] }); return; }
 
@@ -237,7 +241,7 @@ router.get('/me/profession-benefits', adminAuth, async (req: AuthRequest, res: R
       r.discountPercent = d.percent;
       r.discountProducts = d.scope === 'SELECTED' ? d.listingIds.length : null;
       // Standart: ixtisas profildə olan kimi aktivdir; mağaza sənəd tələb edibsə — təsdiqli sənədlə.
-      r.discountReady = verified.has(normProf(d.profession)) || (!d.requireDoc && declared.map(normProf).includes(normProf(d.profession)));
+      r.discountReady = !cooldownUntil && (verified.has(normProf(d.profession)) || (!d.requireDoc && declared.map(normProf).includes(normProf(d.profession))));
     }
     for (const p of programs) {
       const rules = p.rules.filter((x) => mine.has(normProf(x.profession)));
@@ -268,7 +272,7 @@ router.get('/me/profession-benefits', adminAuth, async (req: AuthRequest, res: R
     }).filter((o) => o.listingCount > 0)
       .sort((a, b) => Number(b.ready) - Number(a.ready) || b.listingCount - a.listingCount);
 
-    res.json({ success: true, professions: declared, verified: declared.filter((d) => verified.has(normProf(d))), objects });
+    res.json({ success: true, professions: declared, verified: declared.filter((d) => verified.has(normProf(d))), objects, cooldownUntil });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
 

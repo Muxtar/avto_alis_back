@@ -209,6 +209,10 @@ model User {
   referralCarts         ReferralCart[]        @relation("ReferralCarts")
   // Referal komissiyasının köçürüləcəyi hesab (referal satıcı üçün).
   referralIban          String?
+  // BİR HESAB — BİR İXTİSAS. İxtisas dəyişəndə yeni ixtisasın ENDİRİMLƏRİ 30 gün
+  // sonra aktiv olur (tez-tez ixtisas dəyişib endirimli almağın qarşısı).
+  professionLast          String? // son seçilmiş ixtisas (silinib yenidən eyni yazılsa gözləmə yaranmır)
+  professionDiscountFrom  DateTime? // bu tarixdən əvvəl ixtisas endirimi tətbiq olunmur
   // İXTİSAS SAHİBİNİN VÖEN HESABI — «Rəy konsultasiyası» bölməsində yazılır.
   // Konsultasiyadan və referal satışdan qazandığı pul bu hesaba ödənilir.
   proVoen               String?
