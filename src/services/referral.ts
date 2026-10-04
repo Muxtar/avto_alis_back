@@ -21,6 +21,7 @@
 import { PrismaClient } from '@prisma/client';
 import { verifiedProfessions } from './professionDiscount';
 import { getPayoutHoldDays } from './settlement';
+import { canConsult, voenAccount } from './proAccount';
 
 const prisma = new PrismaClient();
 
@@ -64,6 +65,11 @@ export interface Eligibility { ok: boolean; reason: string; rulePercent?: number
 export async function eligibility(p: Program | { id: number; sellerId: number; enabled: boolean; audience: string; rules: any[] }, userId: number): Promise<Eligibility> {
   if (!p.enabled) return { ok: false, reason: 'Satıcı referal satışı dayandırıb' };
   if (p.sellerId === userId) return { ok: false, reason: 'Öz məhsulunuza referal ola bilməzsiniz' };
+  // REFERAL SATIŞ yalnız «Rəy konsultasiyası» edə bilən ixtisas sahiblərinə açıqdır:
+  // ixtisas + VÖEN hesabı (komissiya ora ödənilir) + aktiv konsultasiya təklifi.
+  // Proqramın rejimindən (hamı / dəvətlilər / ixtisasa görə) asılı olmayaraq yoxlanır.
+  const pro = await canConsult(userId);
+  if (!pro.ok) return { ok: false, reason: pro.reason };
   const partner = await prisma.referralPartner.findUnique({ where: { programId_userId: { programId: p.id, userId } } });
   if (partner?.status === 'REVOKED') return { ok: false, reason: 'Satıcı sizin referal satışınızı dayandırıb', partnerStatus: 'REVOKED' };
   if (partner?.status === 'ACTIVE') return { ok: true, reason: '', partnerPercent: partner.percent, partnerStatus: 'ACTIVE' };
@@ -258,8 +264,10 @@ export async function createReferralPayout(referrerId: number, adminId: number, 
   const amount = r2(ledgers.reduce((s, l) => s + l.amount, 0));
   if (amount <= 0) throw new Error('Ödəniləcək referal balansı yoxdur');
   const u = await prisma.user.findUnique({ where: { id: referrerId }, select: { name: true, referralIban: true, referralPayeeName: true } });
+  // Ödəniş ixtisas sahibinin VÖEN hesabına gedir (yoxdursa köhnə IBAN qalır).
+  const acct = await voenAccount(referrerId);
   const payout = await prisma.referralPayout.create({
-    data: { referrerId, amount, iban: u?.referralIban || null, payeeName: u?.referralPayeeName || u?.name || null, method: method || null, reference: reference || null, createdById: adminId, createdName: adminName },
+    data: { referrerId, amount, voen: acct?.voen || null, iban: acct?.iban || u?.referralIban || null, payeeName: acct?.name || u?.referralPayeeName || u?.name || null, method: method || null, reference: reference || null, createdById: adminId, createdName: adminName },
   });
   await prisma.referralLedger.updateMany({ where: { id: { in: ledgers.map((l) => l.id) } }, data: { status: 'PAID_OUT', payoutId: payout.id } });
   await prisma.notification.create({

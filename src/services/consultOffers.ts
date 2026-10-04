@@ -13,6 +13,7 @@
 //
 // Pulu almaq (qəbul / qarşı təklif) üçün peşəkarın təsdiqlənmiş VÖEN-li biznesi olmalıdır.
 import { PrismaClient, ConsultationSession, ConsultationPayment } from '@prisma/client';
+import { hasVoenAccount } from './proAccount';
 import { createPayment as createGatewayPayment, refundOrder } from './paymentGateway';
 import { emitToUser } from './callSignaling';
 
@@ -31,10 +32,10 @@ const r2 = (n: number) => Math.round(n * 100) / 100;
 const fmtMin = (m: number) => (m >= 60 && m % 60 === 0 ? `${m / 60} saat` : `${m} dəq`);
 export const offerLine = (minutes: number, price: number) => `${fmtMin(minutes)} / ${r2(price)} AZN`;
 
+// Ad köhnədir: indi «VÖEN hesabı var» deməkdir — profildə (Rəy konsultasiyası
+// bölməsində) yazılan VÖEN hesabı və ya admin təsdiqli VÖEN-li biznes.
 export async function hasApprovedBusiness(userId: number | null | undefined): Promise<boolean> {
-  if (!userId) return false;
-  const b = await prisma.business.findFirst({ where: { userId, status: 'APPROVED', isActive: true }, select: { id: true } });
-  return !!b;
+  return hasVoenAccount(userId);
 }
 
 function notify(userId: number | null | undefined, title: string, body: string, id: number) {
@@ -176,7 +177,7 @@ export async function acceptOffer(id: number, proId: number) {
   const s = await load(id);
   need(s.professionalId === proId, 'Tapılmadı');
   need(s.status === 'OFFERED' && s.paymentStatus === 'PAID', 'Bu təklif artıq qəbul edilə bilməz');
-  need(await hasApprovedBusiness(proId), 'Ödənişi almaq üçün əvvəlcə VÖEN-li biznes əlavə edin (Profil → Biznes əlavə et). Təklif o vaxta qədər gözləyir.', 'NEEDS_VOEN');
+  need(await hasApprovedBusiness(proId), 'Ödənişi almaq üçün əvvəlcə VÖEN hesabınızı yazın (Profil → Rəy konsultasiyası). Təklif o vaxta qədər gözləyir.', 'NEEDS_VOEN');
   const up = await prisma.consultationSession.update({ where: { id }, data: { status: 'ACTIVE', runningSince: new Date(), startedAt: new Date() } });
   await chatMsg(up, false, '✅ Təklif qəbul edildi — söhbət açıldı.');
   await notify(up.buyerId, 'Təklifiniz qəbul edildi ✓', 'Söhbət açıldı, vaxt işləyir.', id);
@@ -202,7 +203,7 @@ export async function counterOffer(id: number, proId: number, price: number, min
   price = r2(price); minutes = Math.round(minutes);
   need(price >= 1 && price <= 100000, 'Qiymət 1–100000 AZN olmalıdır');
   need(minutes >= 5 && minutes <= 600, 'Müddət 5–600 dəqiqə olmalıdır');
-  need(await hasApprovedBusiness(proId), 'Ödənişi almaq üçün əvvəlcə VÖEN-li biznes əlavə edin (Profil → Biznes əlavə et).', 'NEEDS_VOEN');
+  need(await hasApprovedBusiness(proId), 'Ödənişi almaq üçün əvvəlcə VÖEN hesabınızı yazın (Profil → Rəy konsultasiyası).', 'NEEDS_VOEN');
   const replyBy = new Date(Date.now() + COUNTER_REPLY_HOURS * 3600e3);
   const up = await prisma.consultationSession.update({
     where: { id },

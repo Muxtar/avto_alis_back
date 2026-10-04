@@ -209,6 +209,12 @@ model User {
   referralCarts         ReferralCart[]        @relation("ReferralCarts")
   // Referal komissiyasının köçürüləcəyi hesab (referal satıcı üçün).
   referralIban          String?
+  // İXTİSAS SAHİBİNİN VÖEN HESABI — «Rəy konsultasiyası» bölməsində yazılır.
+  // Konsultasiyadan və referal satışdan qazandığı pul bu hesaba ödənilir.
+  proVoen               String?
+  proVoenName           String? // VÖEN sahibinin adı (fərdi sahibkar / şirkət)
+  proIban               String?
+  proVoenAt             DateTime?
   referralPayeeName     String?
   emailVerifications    EmailVerification[]
   socialLinks           SocialLink[]
@@ -1382,6 +1388,7 @@ model ReferralPayout {
   referrerId  Int
   amount      Float
   iban        String?
+  voen        String? // ödənişin getdiyi VÖEN (ixtisas sahibinin VÖEN hesabı)
   payeeName   String?
   method      String?
   reference   String?

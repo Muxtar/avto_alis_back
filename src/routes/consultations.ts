@@ -1,6 +1,7 @@
 import { Router, Response } from 'express';
 import { PrismaClient, ConsultationSession } from '@prisma/client';
 import { adminAuth, AuthRequest } from '../middleware/auth';
+import { hasVoenAccount, voenAccount, normVoen, normIban, isVoen, isAzIban } from '../services/proAccount';
 import { createPayment as createGatewayPayment } from '../services/paymentGateway';
 import { Prisma } from '@prisma/client';
 import {
@@ -54,8 +55,7 @@ function publicSession(s: ConsultationSession, meId: number) {
 
 // Peşəkarın təsdiqlənmiş (VÖEN) aktiv biznesi varmı?
 async function hasApprovedBusiness(userId: number): Promise<boolean> {
-  const b = await prisma.business.findFirst({ where: { userId, status: 'APPROVED', isActive: true }, select: { id: true } });
-  return !!b;
+  return hasVoenAccount(userId);   // profildə yazılan VÖEN hesabı və ya təsdiqli biznes
 }
 
 // ── Peşəkarın "Rəy" təklifləri (çoxlu) ────────────────────────────────────────
@@ -72,13 +72,35 @@ function offerFromBody(b: any) {
 router.get('/me/consultation-offers', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
     const offers = await prisma.consultationOffer.findMany({ where: { userId: req.adminId! }, orderBy: { createdAt: 'asc' } });
-    const voen = await hasApprovedBusiness(req.adminId!);
-    res.json({ success: true, offers, hasVoen: voen });
+    const account = await voenAccount(req.adminId!);
+    res.json({ success: true, offers, hasVoen: !!account, voenAccount: account });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
+// İXTİSAS SAHİBİNİN VÖEN HESABI — «Rəy konsultasiyası» bölməsində yazılır.
+// Konsultasiyadan (və referal satışdan) qazanılan pul bu hesaba ödənilir.
+router.put('/me/pro-voen', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const voen = normVoen(req.body?.voen);
+    const iban = normIban(req.body?.iban);
+    const name = String(req.body?.name || '').trim().replace(/\s+/g, ' ').slice(0, 120);
+    if (!isVoen(voen)) { res.status(400).json({ success: false, message: 'VÖEN 10 rəqəmdən ibarət olmalıdır' }); return; }
+    if (name.length < 3) { res.status(400).json({ success: false, message: 'VÖEN sahibinin adını yazın (fərdi sahibkar və ya şirkət)' }); return; }
+    if (!isAzIban(iban)) { res.status(400).json({ success: false, message: 'IBAN düzgün deyil (AZ + 26 simvol)' }); return; }
+    // Bir VÖEN yalnız bir istifadəçiyə bağlana bilər — başqasının hesabını yazmaq olmaz.
+    const taken = await prisma.user.findFirst({ where: { proVoen: voen, id: { not: req.adminId! } }, select: { id: true } });
+    if (taken) { res.status(400).json({ success: false, message: 'Bu VÖEN başqa istifadəçinin hesabına bağlıdır' }); return; }
+    await prisma.user.update({ where: { id: req.adminId! }, data: { proVoen: voen, proVoenName: name, proIban: iban, proVoenAt: new Date() } });
+    res.json({ success: true, voenAccount: await voenAccount(req.adminId!) });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
 
 router.post('/me/consultation-offers', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
+    // Təklif yaratmaq üçün VÖEN hesabı MƏCBURİDİR: ödəniş həmin hesaba gedir.
+    if (!(await hasVoenAccount(req.adminId!))) {
+      res.status(400).json({ success: false, code: 'NEEDS_VOEN', message: 'Əvvəlcə VÖEN hesabınızı yazın — konsultasiya ödənişləri həmin hesaba köçürülür' }); return;
+    }
     const offer = await prisma.consultationOffer.create({ data: { userId: req.adminId!, ...offerFromBody(req.body) } });
     res.json({ success: true, offer });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
@@ -313,7 +335,7 @@ router.post('/consultations/:id/pay', consultationLimiter, adminAuth, async (req
     }
     if (!s.professionalId) { res.status(400).json({ success: false, message: 'Peşəkar hələ qoşulmayıb' }); return; }
     const voen = await hasApprovedBusiness(s.professionalId);
-    if (!voen) { res.status(400).json({ success: false, message: 'Peşəkar hələ VÖEN əlavə etməyib — ödəniş aktivləşə bilməz' }); return; }
+    if (!voen) { res.status(400).json({ success: false, message: 'Peşəkar hələ VÖEN hesabını yazmayıb — ödəniş aktivləşə bilməz' }); return; }
     if (s.status === 'ACTIVE') { res.status(400).json({ success: false, message: 'Seans artıq aktivdir' }); return; }
     // Ödəniş yalnız peşəkar sorğunu QƏBUL edəndən sonra (ACCEPTED) və ya vaxt artırmada (ENDED).
     if (!['ACCEPTED', 'ENDED'].includes(s.status)) {

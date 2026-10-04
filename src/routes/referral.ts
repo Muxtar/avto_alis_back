@@ -5,6 +5,7 @@ import crypto from 'crypto';
 import { adminAuth, requirePermission, AuthRequest } from '../middleware/auth';
 import { referralLimiter } from '../middleware/rateLimiter';
 import { pushLive } from '../services/live';
+import { canConsult, voenAccount } from '../services/proAccount';
 import {
   AUDIENCES, PRODUCT_SCOPES, DOC_TYPES, getOrCreateProgram, loadProgram, programForListing, listingIncluded,
   eligibility, percentFor, validateLink, referralBalance, createReferralPayout,
@@ -316,7 +317,8 @@ router.get('/referral/stores', adminAuth, async (req: AuthRequest, res: Response
     }
     out.sort((a, b) => Number(b.eligible) - Number(a.eligible) || (b.percent - a.percent));
     const me2 = await prisma.user.findUnique({ where: { id: me }, select: { profession: true, professions: true } });
-    res.json({ success: true, profession: me2?.profession || null, professions: me2?.professions || [], stores: out });
+    // Referal satıcı olmaq şərtləri (ixtisas, VÖEN hesabı, aktiv Rəy konsultasiyası təklifi).
+    res.json({ success: true, profession: me2?.profession || null, professions: me2?.professions || [], stores: out, requirements: await canConsult(me) });
   } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
 });
 
@@ -559,12 +561,16 @@ router.get('/admin/referral/payables', requirePermission('finance_payouts'), asy
     const clawbacks = await prisma.referralLedger.findMany({ where: { clawbackNeeded: true }, select: { orderId: true, referrerId: true, amount: true } });
     const cashDue = await prisma.referralLedger.groupBy({ by: ['sellerId'], where: { heldByPlatform: false, status: { not: 'REVERSED' } }, _sum: { amount: true } });
     const sellerUsers = await prisma.user.findMany({ where: { id: { in: cashDue.map((c) => c.sellerId) } }, select: { id: true, name: true, phone: true } });
+    // Hər referal satıcının VÖEN hesabı — admin kimə, hansı VÖEN-ə ödədiyini görsün.
+    const accounts = new Map<number, Awaited<ReturnType<typeof voenAccount>>>();
+    for (const id of ids) accounts.set(id, await voenAccount(id));
     res.json({
       success: true,
       referrers: ids.map((id) => {
         const u = users.find((x) => x.id === id);
         const sum = (st: string) => r2(grouped.filter((g) => g.referrerId === id && g.status === st).reduce((s, g) => s + (g._sum.amount || 0), 0));
-        return { referrerId: id, name: u?.name, phone: u?.phone, iban: u?.referralIban || null, payeeName: u?.referralPayeeName || null, available: sum('AVAILABLE'), pending: sum('PENDING'), paidOut: sum('PAID_OUT') };
+        const acct = accounts.get(id);
+        return { referrerId: id, name: u?.name, phone: u?.phone, voen: acct?.voen || null, iban: acct?.iban || u?.referralIban || null, payeeName: acct?.name || u?.referralPayeeName || null, available: sum('AVAILABLE'), pending: sum('PENDING'), paidOut: sum('PAID_OUT') };
       }).sort((a, b) => b.available - a.available),
       clawbacks,
       // Nağd referal satışlarında satıcıların platformaya borcu (komissiya onların əlindədir).
