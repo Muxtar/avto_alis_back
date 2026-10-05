@@ -54,6 +54,12 @@ export function nameOverlapScore(a: string, b: string): number {
 // Daha ucuz üçün Railway-də CREDENTIAL_AI_MODEL=claude-sonnet-4-6 qoyula bilər.
 const AI_MODEL = process.env.CREDENTIAL_AI_MODEL || 'claude-opus-4-8';
 
+/** Provayderin xam xətası (balans, limit, açar) jurnala yazılır; istifadəçi / admin sadə mətn görür. */
+function aiDown(e: any): string {
+  console.error('[credentialAI] AI xətası:', e?.status || '', e?.message || e);
+  return 'AI müvəqqəti işləmir — admin əl ilə yoxlayacaq.';
+}
+
 let client: Anthropic | null = null;
 function getClient(): Anthropic | null {
   if (!process.env.ANTHROPIC_API_KEY) return null;
@@ -114,7 +120,7 @@ Qeyd: VÖEN adətən 10 rəqəmdir. Tapılmayan sahəni null qoy.`;
   try {
     const res = await ai.messages.create({ model: AI_MODEL, max_tokens: 800, messages: [{ role: 'user', content: [block, { type: 'text', text: prompt }] }] });
     text = res.content.filter((b: any) => b.type === 'text').map((b: any) => b.text).join('\n').trim();
-  } catch (e: any) { return { ...EMPTY, error: `AI oxuya bilmədi: ${e?.message || 'xəta'}` }; }
+  } catch (e: any) { return { ...EMPTY, error: aiDown(e) }; }
 
   const parsed = parseJson(text);
   if (!parsed) return { ...EMPTY, error: 'AI cavabı oxunmadı.' };
@@ -186,7 +192,7 @@ Qeyd: ad-soyad müqayisəsində Azərbaycan hərflərinin transliterasiyasını 
     });
     text = res.content.filter((b: any) => b.type === 'text').map((b: any) => b.text).join('\n').trim();
   } catch (e: any) {
-    return { ...EMPTY, error: `AI analizi alınmadı: ${e?.message || 'naməlum xəta'}` };
+    return { ...EMPTY, error: aiDown(e) };
   }
 
   // JSON-u çıxar (model bəzən ```json ... ``` ilə bükür).
@@ -288,7 +294,7 @@ Qeyd: Azərbaycan vəsiqələrində ad/soyad latın hərfləri ilə yazılır. A
     });
     text = res.content.filter((b: any) => b.type === 'text').map((b: any) => b.text).join('\n').trim();
   } catch (e: any) {
-    return { ...EMPTY, error: `AI oxuya bilmədi: ${e?.message || 'xəta'}` };
+    return { ...EMPTY, error: aiDown(e) };
   }
 
   const jsonStr = (() => {
@@ -398,7 +404,7 @@ Qeyd: Azərbaycan hərflərinin transliterasiyasını (ə↔e) və ad/soyad sır
     });
     text = res.content.filter((b: any) => b.type === 'text').map((b: any) => b.text).join('\n').trim();
   } catch (e: any) {
-    return { ...EMPTY_ID, error: `AI analizi alınmadı: ${e?.message || 'naməlum xəta'}` };
+    return { ...EMPTY_ID, error: aiDown(e) };
   }
 
   const jsonStr = (() => {
@@ -533,7 +539,7 @@ Qeyd: Azərbaycan hərflərinin transliterasiyasını (ə↔e) və ad/soyad sır
     const res = await ai.messages.create({ model: AI_MODEL, max_tokens: 1500, messages: [{ role: 'user', content }] });
     text = res.content.filter((b: any) => b.type === 'text').map((b: any) => b.text).join('\n').trim();
   } catch (e: any) {
-    return { ...EMPTY_BIZ, error: `AI analizi alınmadı: ${e?.message || 'naməlum xəta'}` };
+    return { ...EMPTY_BIZ, error: aiDown(e) };
   }
 
   const jsonStr = (() => {
@@ -611,7 +617,7 @@ Qeyd: IBAN-ı tam və boşluqsuz yaz. Hesab tapılmırsa accounts boş massiv ol
     });
     text = res.content.filter((b: any) => b.type === 'text').map((b: any) => b.text).join('\n').trim();
   } catch (e: any) {
-    return { ok: false, accounts: [], documentValid: false, reason: '', error: `AI oxuya bilmədi: ${e?.message || 'xəta'}` };
+    return { ok: false, accounts: [], documentValid: false, reason: '', error: aiDown(e) };
   }
 
   const jsonStr = (() => {

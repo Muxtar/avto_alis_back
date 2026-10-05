@@ -752,7 +752,9 @@ export async function runAgent(userId: number, token: string, history: ChatTurn[
       if (!triedFallback && model !== 'claude-opus-4-8' && /not_found|does not exist|model|404|permission|access/i.test(msg)) {
         triedFallback = true; model = 'claude-opus-4-8'; round--; continue;
       }
-      return { reply: `AI xətası: ${msg}`.slice(0, 500), pendingAction, executed };
+      // Provayderin xam xətası (balans, limit, açar və s.) istifadəçiyə GÖSTƏRİLMİR —
+      // yuxarıda jurnala yazılıb; istifadəçi yalnız sadə mesaj görür.
+      return { reply: 'AI müvəqqəti işləmir. Bir az sonra yenidən cəhd edin.', pendingAction, executed };
     }
 
     if (resp.stop_reason !== 'tool_use') {
