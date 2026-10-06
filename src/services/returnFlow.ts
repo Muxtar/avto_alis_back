@@ -54,12 +54,14 @@ export async function approveReturn(retId: number, actor: Actor, actorId: number
   const amt = Math.min(opts.refundAmount ?? ret.refundAmount ?? remain, remain);
   const updated = await prisma.returnRequest.update({
     where: { id: ret.id },
-    data: { status: 'APPROVED', refundAmount: amt, shipBy: hoursFromNow(RETURN_SHIP_DAYS * 24), sellerRespondBy: null },
+    data: { status: 'APPROVED', refundAmount: amt, shipBy: hoursFromNow(RETURN_SHIP_DAYS * 24), sellerRespondBy: null, receiveBy: null, refundBy: null },
   });
   const who = actor === 'SYSTEM' ? 'Satıcı vaxtında cavab vermədiyi üçün sistem' : actor === 'ADMIN' ? 'Admin' : 'Satıcı';
   await logReturnEvent(ret.id, actor, actorId, 'APPROVED', opts.note || `${who} iadəni təsdiqlədi (${amt.toFixed(2)} AZN)`);
+  // Satıcı məbləği endiribsə alıcı bunu göndərməzdən ƏVVƏL açıq görməlidir.
+  const lowered = ret.refundAmount != null && amt < ret.refundAmount - 0.009;
   await notify(ret.buyerId, `İadə təsdiqləndi — sifariş #${ret.orderId}`,
-    `${who} iadəni təsdiqlədi (${amt.toFixed(2)} AZN). Məhsulu ${RETURN_SHIP_DAYS} gün ərzində satıcıya göndərib «Göndərdim» düyməsini basın.`);
+    `${who} iadəni təsdiqlədi (${amt.toFixed(2)} AZN).${lowered ? ` DİQQƏT: istədiyiniz məbləğ ${ret.refundAmount!.toFixed(2)} AZN idi — razı deyilsinizsə məhsulu göndərməyin, iadəni ləğv edin və ya dəstəyə yazın.` : ''} Məhsulu ${RETURN_SHIP_DAYS} gün ərzində satıcıya göndərib «Göndərdim» düyməsini basın.`);
   if (actor !== 'SELLER') {
     await notify(ret.sellerId, `İadə təsdiqləndi — sifariş #${ret.orderId}`,
       `${who} sifariş #${ret.orderId} üzrə iadəni təsdiqlədi. Alıcı məhsulu geri göndərəcək.`);
@@ -68,20 +70,43 @@ export async function approveReturn(retId: number, actor: Actor, actorId: number
   return updated;
 }
 
+/** Qaytarılan mal susmaya görə stoka qayıdırmı: qüsurlu maldan başqa hamısı. */
+export const defaultRestock = (reason: string) => reason !== 'DEFECTIVE';
+
 /**
- * PULU QAYTAR + stoku bərpa et + referalı ləğv et + hesablaşmanı yenilə.
+ * PULU QAYTAR + stoku bərpa et + xalları düzəlt + referalı ləğv et + hesablaşmanı yenilə.
  * Satıcının «Geri ödə» düyməsi, admin qərarı və sistemin avtomatik qaytarması
  * EYNİ funksiyanı işlədir — məntiq bir yerdədir.
+ *
+ * STOK yalnız o halda artır ki:
+ *   • mal FİZİKİ OLARAQ satıcıya çatıb (receivedAt) — admin malı geri almadan pulu
+ *     qaytarırsa (məs. mübahisə qərarı) anbara heç nə gəlməyib, stok artmamalıdır;
+ *   • satıcı «stoka qaytarma» deməyib (qüsurlu mal yenidən satışa çıxmamalıdır).
  */
 export async function finalizeReturnRefund(
-  retId: number, actor: Actor, actorId: number | null, opts: { amount?: number; note?: string } = {},
-): Promise<{ ok: boolean; error?: string; retrying?: boolean; cashRefund?: boolean; amount?: number; stockWarnings?: string[] }> {
+  retId: number, actor: Actor, actorId: number | null, opts: { amount?: number; note?: string; restock?: boolean } = {},
+): Promise<{ ok: boolean; error?: string; retrying?: boolean; cashRefund?: boolean; amount?: number; stockWarnings?: string[]; restockedQty?: number }> {
+  // ── QIFIL ── Əvvəl status əvvəlcədən oxunurdu: iki paralel sorğu (iki klik və ya
+  // satıcı + 10 dəqiqəlik sistem işi) hər ikisi «hələ qaytarılmayıb» görüb pulu və
+  // stoku İKİ DƏFƏ qaytara bilərdi. Yarımçıq qalmış qıfıl 10 dəqiqədən sonra açılır.
+  const stale = new Date(Date.now() - 10 * 60 * 1000);
+  const claim = await prisma.returnRequest.updateMany({
+    where: { id: retId, status: { not: 'REFUNDED' }, OR: [{ refundClaimedAt: null }, { refundClaimedAt: { lt: stale } }] },
+    data: { refundClaimedAt: new Date() },
+  });
+  if (claim.count === 0) {
+    const cur = await prisma.returnRequest.findUnique({ where: { id: retId }, select: { status: true } });
+    if (!cur) return { ok: false, error: 'İadə tapılmadı' };
+    return { ok: false, error: cur.status === 'REFUNDED' ? 'Bu iadə artıq tamamlanıb' : 'Pul qaytarma artıq gedir — bir az gözləyin' };
+  }
+  const release = () => prisma.returnRequest.update({ where: { id: retId }, data: { refundClaimedAt: null } }).catch(() => {});
+
+  try {
   const ret = await prisma.returnRequest.findUnique({
     where: { id: retId },
     include: { orderItem: true, order: { include: { items: true } } },
   });
   if (!ret) return { ok: false, error: 'İadə tapılmadı' };
-  if (ret.status === 'REFUNDED') return { ok: false, error: 'Bu iadə artıq tamamlanıb' };
 
   const ord = ret.order;
   const isCardPaid = !!((ord.gatewayRef || ord.gatewayOrderId) && ord.paymentStatus === 'PAID');
@@ -91,18 +116,33 @@ export async function finalizeReturnRefund(
   const cashRefund = !isCardPaid;
   if (isCardPaid && amt > 0.009) {
     const r = await refundOrderSafe(ord.id, actor === 'ADMIN' ? 'ADMIN' : 'RETURN', amt);
-    if (!r.ok) return { ok: false, error: 'Bank iadəsi alınmadı: ' + (r.error || ''), retrying: true };
+    if (!r.ok) { await release(); return { ok: false, error: 'Bank iadəsi alınmadı: ' + (r.error || ''), retrying: true }; }
   }
 
+  const received = !!ret.receivedAt;
+  const wantRestock = opts.restock ?? ret.restock ?? defaultRestock(ret.reason);
+  const doRestock = received && wantRestock;
   const stockWarnings: string[] = [];
+  let restockedQty = 0;
   await prisma.$transaction(async (tx) => {
     const lines = ret.orderItem
       ? [{ listingId: ret.orderItem.listingId, qty: ret.quantity }]
       : ord.items.map((i) => ({ listingId: i.listingId, qty: i.quantity }));
-    for (const l of lines) {
+    if (doRestock) for (const l of lines) {
+      if (l.qty <= 0) continue;
       const exists = await tx.listing.findUnique({ where: { id: l.listingId }, select: { id: true } });
-      if (exists) await tx.listing.update({ where: { id: l.listingId }, data: { stock: { increment: l.qty } } });
+      if (exists) { await tx.listing.update({ where: { id: l.listingId }, data: { stock: { increment: l.qty } } }); restockedQty += l.qty; }
       else stockWarnings.push(`Elan #${l.listingId} silinib, stok bərpa edilə bilmədi`);
+    }
+    // XALLAR — qaytarılan pulun payı qədər: bu alışdan qazanılan xal geri alınır,
+    // alışda xərclənən xal alıcıya qaytarılır. Əvvəl heç biri edilmirdi: alıcı malı
+    // qaytarıb pulunu alır, qazandığı xal isə onda qalırdı.
+    const ratio = ord.total > 0 ? Math.min(1, amt / ord.total) : (ret.orderItem ? 0 : 1);
+    const takeBack = Math.round((ord.pointsEarned || 0) * ratio);
+    const giveBack = Math.round((ord.pointsUsed || 0) * ratio);
+    if (takeBack || giveBack) {
+      const u = await tx.user.findUnique({ where: { id: ret.buyerId }, select: { loyaltyPoints: true } });
+      if (u) await tx.user.update({ where: { id: ret.buyerId }, data: { loyaltyPoints: Math.max(0, u.loyaltyPoints - takeBack + giveBack) } });
     }
     // Qaytarılmış mal üçün referal komissiyası ödənilmir.
     // QİSMƏN iadə (bir sətir): komissiya yalnız həmin sətrin payı qədər azalır.
@@ -122,7 +162,7 @@ export async function finalizeReturnRefund(
     }
     await tx.returnRequest.update({
       where: { id: ret.id },
-      data: { status: 'REFUNDED', cashRefund, refundAmount: amt, refundedAt: new Date(), refundBy: null },
+      data: { status: 'REFUNDED', cashRefund, refundAmount: amt, refundedAt: new Date(), refundBy: null, receiveBy: null, restock: wantRestock, restockedQty, refundClaimedAt: null },
     });
   });
   if (stockWarnings.length) console.warn(`[returnFlow] iadə #${ret.id} stok xəbərdarlığı:`, stockWarnings);
@@ -131,19 +171,27 @@ export async function finalizeReturnRefund(
   await recordSettlement(ord.id).catch(() => {});
 
   const who = actor === 'SYSTEM' ? 'Sistem' : actor === 'ADMIN' ? 'Admin' : 'Satıcı';
+  const stockNote = restockedQty > 0 ? `${restockedQty} ədəd stoka qaytarıldı`
+    : !received ? 'mal satıcıya çatmadığı üçün stok dəyişmədi'
+    : !wantRestock ? 'mal stoka qaytarılmadı' : 'stok dəyişmədi';
   await logReturnEvent(ret.id, actor, actorId, 'REFUNDED',
-    opts.note || `${who}: ${amt.toFixed(2)} AZN ${cashRefund ? 'nağd qaytarılmalıdır' : 'karta qaytarıldı'}`);
+    `${opts.note || `${who}: ${amt.toFixed(2)} AZN ${cashRefund ? 'nağd qaytarılmalıdır' : 'karta qaytarıldı'}`} · ${stockNote}`);
   await notify(ret.buyerId, `İadə tamamlandı — sifariş #${ord.id}`,
     cashRefund
       ? `Məbləğ (${amt.toFixed(2)} AZN) nağd ödəniş olduğu üçün satıcı tərəfindən nağd qaytarılır — almadınızsa dəstəyə yazın.`
       : `${amt.toFixed(2)} AZN kartınıza qaytarıldı. Banka düşməsi bir neçə iş günü çəkə bilər.`);
   if (actor !== 'SELLER') {
     await notify(ret.sellerId, `İadə tamamlandı — sifariş #${ord.id}`,
-      `${who} sifariş #${ord.id} üzrə ${amt.toFixed(2)} AZN iadəni tamamladı.${cashRefund ? ' Nağd sifariş: məbləği alıcıya siz qaytarmalısınız.' : ''}`);
+      `${who} sifariş #${ord.id} üzrə ${amt.toFixed(2)} AZN iadəni tamamladı (${stockNote}).${cashRefund ? ' Nağd sifariş: məbləği alıcıya siz qaytarmalısınız.' : ''}`, '/iadeler?tab=selling');
   }
   pushLive([ret.buyerId, ret.sellerId], { kind: 'return', id: ret.id, status: 'REFUNDED' });
   if (cashRefund && actor === 'SYSTEM') pushAdmins('return', { id: ret.id, toast: `Nağd iadə #${ret.id}: satıcının qaytarmasına nəzarət edin` });
-  return { ok: true, cashRefund, amount: amt, stockWarnings };
+  return { ok: true, cashRefund, amount: amt, stockWarnings, restockedQty };
+  } catch (e) {
+    // Gözlənilməz xəta — qıfılı aç ki, iadə həmişəlik ilişib qalmasın.
+    await release();
+    throw e;
+  }
 }
 
 /** İadəni rədd edilmiş kimi bağla (satıcı səbəbi ilə və ya mübahisə satıcının xeyrinə). */

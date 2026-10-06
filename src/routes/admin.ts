@@ -2360,7 +2360,7 @@ router.put('/admin/returns/:id/override', requirePermission('returns'), async (r
     const note = adminNote ? `Admin: ${String(adminNote).slice(0, 500)}` : undefined;
 
     if (status === 'REFUNDED') {
-      const r = await finalizeReturnRefund(ret.id, 'ADMIN', req.adminId!, { amount, note });
+      const r = await finalizeReturnRefund(ret.id, 'ADMIN', req.adminId!, { amount, note, restock: typeof req.body?.restock === 'boolean' ? req.body.restock : undefined });
       if (!r.ok) { res.status(r.retrying ? 502 : 400).json({ success: false, message: r.error, retrying: r.retrying }); return; }
     } else if (status === 'APPROVED') {
       await approveReturn(ret.id, 'ADMIN', req.adminId!, { refundAmount: amount, note });

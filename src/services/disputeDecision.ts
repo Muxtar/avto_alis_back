@@ -422,6 +422,10 @@ async function runDisputeDeadlinesInner() {
   for (const r of notReceived) {
     await prisma.returnRequest.update({ where: { id: r.id }, data: { status: 'DISPUTED', receiveBy: null } });
     await logReturnEvent(r.id, 'SYSTEM', null, 'DISPUTED', `Satıcı qaytarılan məhsulun qəbulunu müddətində təsdiqləmədi${r.trackingCode ? ` (izləmə kodu: ${r.trackingCode})` : ''} — admin baxır`);
+    await prisma.notification.createMany({ data: [
+      { userId: r.sellerId, type: 'ORDER', title: `İadə #${r.id}: qəbul təsdiqlənməyib`, body: 'Alıcının geri göndərdiyi məhsulun qəbulunu müddətində təsdiqləmədiniz — iadəyə admin baxır.', link: `/iadeler?tab=selling&id=${r.id}` },
+      { userId: r.buyerId, type: 'ORDER', title: `İadə #${r.id}: admin yoxlayır`, body: 'Satıcı qaytardığınız məhsulun qəbulunu vaxtında təsdiqləmədi. Admin yoxlayıb qərar verəcək — göndərmə sübutunu (qəbz, izləmə kodu) saxlayın.', link: `/iadeler?id=${r.id}` },
+    ] }).catch(() => {});
     pushAdmins('return', { id: r.id, toast: `İadə #${r.id}: satıcı qəbulu təsdiqləmədi` });
     pushLive([r.buyerId, r.sellerId], { kind: 'return', id: r.id, status: 'DISPUTED' });
   }

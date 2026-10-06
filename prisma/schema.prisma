@@ -990,6 +990,13 @@ model ReturnRequest {
   shippedAt       DateTime?
   receivedAt      DateTime?
   refundedAt      DateTime?
+  // STOK — satıcı qaytarılan malı yenidən satışa çıxarırmı. null = susmaya görə
+  // (qüsurlu maldan başqa hamısı stoka qayıdır). restockedQty — faktiki artırılan say.
+  restock         Boolean?
+  restockedQty    Int           @default(0)
+  // Pul qaytarma QIFILI — eyni anda iki «Pulu qaytar» (və ya satıcı + sistem)
+  // pulu və stoku iki dəfə qaytarmasın.
+  refundClaimedAt DateTime?
   disputeId       Int? // açılmış mübahisə (Complaint.id)
   createdAt       DateTime      @default(now())
   updatedAt       DateTime      @updatedAt
