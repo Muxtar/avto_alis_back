@@ -43,11 +43,13 @@ function redact(body: any): any {
 const MUTATING = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 // Bu path-lar jurnala düşməsin (login cəhdləri, jurnalın özü, sağlamlıq).
 function skip(path: string): boolean {
-  return /\/admin\/(login|audit|service-health|me|overview|dashboard|analytics|search)\b/.test(path);
+  return /^\/api\/admin\/(login|audit|service-health|me|overview|dashboard|analytics|search)(\/|$)/.test(path);
 }
 
 export function auditMiddleware(req: AuthRequest, res: Response, next: NextFunction) {
-  const path = req.originalUrl || req.url;
+  // Sorğu sətri (?…) ATILIR: əvvəl `?x=/admin/me` əlavə etməklə istənilən əməliyyat
+  // «jurnala düşməyən» siyahıya salınıb izsiz icra oluna bilirdi.
+  const path = (req.originalUrl || req.url).split('?')[0];
   if (!MUTATING.has(req.method) || !/\/api\/admin\//.test(path) || skip(path)) return next();
 
   // Cavab bitəndə (route handler-dən sonra) — req.adminId/adminName artıq təyin olunub.

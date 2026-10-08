@@ -267,10 +267,15 @@ export async function createReferralPayout(referrerId: number, adminId: number, 
   const u = await prisma.user.findUnique({ where: { id: referrerId }, select: { name: true, referralIban: true, referralPayeeName: true } });
   // Ödəniş ixtisas sahibinin VÖEN hesabına gedir (yoxdursa köhnə IBAN qalır).
   const acct = await voenAccount(referrerId);
-  const payout = await prisma.referralPayout.create({
-    data: { referrerId, amount, voen: acct?.voen || null, iban: acct?.iban || u?.referralIban || null, payeeName: acct?.name || u?.referralPayeeName || u?.name || null, method: method || null, reference: reference || null, createdById: adminId, createdName: adminName },
+  // Tranzaksiya + şərtli yeniləmə — paralel iki sorğu eyni komissiyanı iki dəfə ödəməsin.
+  const payout = await prisma.$transaction(async (tx) => {
+    const p = await tx.referralPayout.create({
+      data: { referrerId, amount, voen: acct?.voen || null, iban: acct?.iban || u?.referralIban || null, payeeName: acct?.name || u?.referralPayeeName || u?.name || null, method: method || null, reference: reference || null, createdById: adminId, createdName: adminName },
+    });
+    const done = await tx.referralLedger.updateMany({ where: { id: { in: ledgers.map((l) => l.id) }, status: 'AVAILABLE' }, data: { status: 'PAID_OUT', payoutId: p.id } });
+    if (done.count !== ledgers.length) throw new Error('Bu balans artıq ödənilir — səhifəni yeniləyin');
+    return p;
   });
-  await prisma.referralLedger.updateMany({ where: { id: { in: ledgers.map((l) => l.id) } }, data: { status: 'PAID_OUT', payoutId: payout.id } });
   await prisma.notification.create({
     data: { userId: referrerId, type: 'REFERRAL', title: 'Referal komissiyası ödənildi', body: `${amount.toFixed(2)} AZN hesabınıza köçürüldü.`, link: '/referral-earnings' },
   }).catch(() => {});

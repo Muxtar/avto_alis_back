@@ -328,6 +328,10 @@ router.post('/admin/complaints/:id/resolve', requirePermission('complaints'), as
     const id = parseInt(String(req.params.id));
     const c = await prisma.complaint.findUnique({ where: { id }, include: { consultation: true } });
     if (!c) { res.status(404).json({ success: false, message: 'Tapılmadı' }); return; }
+    // Bağlanmış şikayət ikinci dəfə həll olunmur — əvvəl hər təkrar klik satıcının
+    // «əsaslı şikayət» sayğacını bir də artırır, seans şikayətində isə pulu yenidən qaytara bilirdi.
+    if (c.status === 'RESOLVED' || c.status === 'REJECTED') { res.status(400).json({ success: false, message: 'Bu şikayət üzrə artıq qərar verilib' }); return; }
+    const prevStatus = c.status;
 
     // SİFARİŞ/MƏHSUL ŞİKAYƏTİ — admin yalnız əsaslı olub-olmadığını qərarlaşdırır
     // (reytinqə təsir). Pul/mal qaytarılması iadə bölməsindədir.
@@ -337,6 +341,8 @@ router.post('/admin/complaints/:id/resolve', requirePermission('complaints'), as
       const note = String(req.body.adminNote || '').trim();
       if (note.length < 5) { res.status(400).json({ success: false, message: 'Qərarın səbəbini yazın — hər iki tərəf görəcək' }); return; }
       const upheld = verdict === 'UPHELD';
+      const won = await prisma.complaint.updateMany({ where: { id, status: prevStatus }, data: { status: upheld ? 'RESOLVED' : 'REJECTED' } });
+      if (won.count === 0) { res.status(409).json({ success: false, message: 'Bu şikayət üzrə artıq qərar verilib' }); return; }
       const updated = await prisma.complaint.update({
         where: { id },
         data: { status: upheld ? 'RESOLVED' : 'REJECTED', resolution: verdict, adminNote: note, decisionReason: note, decisionBy: 'ADMIN', decidedAt: new Date(), resolvedAt: new Date(), resolvedById: req.adminId },
@@ -358,6 +364,12 @@ router.post('/admin/complaints/:id/resolve', requirePermission('complaints'), as
     const doRefund = !!req.body.refund;
     const doSuspend = !!req.body.suspend;
     const upheld = status === 'RESOLVED';
+    if (status !== 'RESOLVED' && status !== 'REJECTED') { res.status(400).json({ success: false, message: 'Yanlış qərar' }); return; }
+    // Rədd edilən şikayətdə pul qaytarılmır və peşəkar dayandırılmır.
+    if (!upheld && (doRefund || doSuspend)) { res.status(400).json({ success: false, message: 'Rədd edilən şikayətdə geri ödəniş və ya dayandırma seçilə bilməz' }); return; }
+    // ƏVVƏLCƏ şikayət «tutulur» (şərtli yeniləmə) — paralel iki klik iki geri ödəniş göndərməsin.
+    const won = await prisma.complaint.updateMany({ where: { id, status: prevStatus }, data: { status: status as any } });
+    if (won.count === 0) { res.status(409).json({ success: false, message: 'Bu şikayət üzrə artıq qərar verilib' }); return; }
 
     // Geri ödəniş (yalnız seans şikayətində, ödənilibsə).
     if (doRefund && c.consultation && c.consultation.paymentStatus === 'PAID' && (c.consultation.gatewayRef || c.consultation.gatewayOrderId)) {
@@ -369,6 +381,8 @@ router.post('/admin/complaints/:id/resolve', requirePermission('complaints'), as
           gatewayPassword: c.consultation.gatewayPassword,
         }, c.consultation.price);
       } catch (err: any) {
+        // Şlüz rədd etdi — şikayət açıq qalır ki, yenidən cəhd etmək olsun.
+        await prisma.complaint.update({ where: { id }, data: { status: prevStatus } }).catch(() => {});
         res.status(400).json({ success: false, message: 'Geri ödəniş alınmadı: ' + (err?.message || 'şlüz xətası') }); return;
       }
       await prisma.consultationSession.update({ where: { id: c.consultation.id }, data: { paymentStatus: 'REFUNDED' } });

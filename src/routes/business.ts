@@ -1189,7 +1189,8 @@ router.get('/admin/businesses', requirePermission('businesses'), async (req: Aut
           idNumber: true, birthDate: true, gender: true, idVerifyStatus: true,
           idCardImage: true, selfieImage: true, idAiNameMatch: true, idAiFaceMatch: true,
         } },
-        objects: true,
+        // Silinmiş obyektlər göstərilmir — əvvəl «sil»dən sonra da kartda qalırdı.
+        objects: { where: { deletedAt: null } },
         banks: true,
       },
       orderBy: { createdAt: 'desc' },
@@ -1211,9 +1212,10 @@ router.put('/admin/businesses/:id/approve', requirePermission('businesses'), asy
     // (?force=1) təsdiqləməlidir.
     const target = await prisma.business.findUnique({
       where: { id },
-      select: { userId: true, user: { select: { idVerifyStatus: true, name: true } } },
+      select: { userId: true, deletedAt: true, user: { select: { idVerifyStatus: true, name: true } } },
     });
     if (!target) { res.status(404).json({ success: false, message: 'Biznes tapılmadı' }); return; }
+    if (target.deletedAt) { res.status(400).json({ success: false, message: 'Silinmiş biznes təsdiqlənə bilməz' }); return; }
     if (target.user.idVerifyStatus !== 'APPROVED' && String(req.query.force || '') !== '1') {
       res.status(409).json({
         success: false,
@@ -1251,16 +1253,22 @@ router.put('/admin/businesses/:id/reject', requirePermission('businesses'), asyn
     const id = parseInt(req.params.id);
     const { reason } = req.body;
     if (!reason?.trim()) { res.status(400).json({ success: false, message: 'Səbəb tələb olunur' }); return; }
+    const before = await prisma.business.findUnique({ where: { id }, select: { status: true } });
+    if (!before) { res.status(404).json({ success: false, message: 'Biznes tapılmadı' }); return; }
+    const wasApproved = before.status === 'APPROVED';
     const biz = await prisma.business.update({
-      where: { id }, data: { status: 'REJECTED', reviewedAt: new Date(), rejectionReason: reason.trim() },
+      // Təsdiqli biznes rədd edilirsə saytdan da götürülür — əvvəl elanları açıq qalırdı.
+      where: { id }, data: { status: 'REJECTED', reviewedAt: new Date(), rejectionReason: reason.trim(), ...(wasApproved ? { isActive: false } : {}) },
     });
     const stillApproved = await prisma.business.count({ where: { userId: biz.userId, status: 'APPROVED', deletedAt: null } });
     if (stillApproved === 0) await prisma.user.update({ where: { id: biz.userId }, data: { sellerVerified: false } });
     // Rədd → ödənilmiş haqq yenidən istifadəyə açılır. Pul alındı, amma biznes
     // açılmadı: istifadəçi düzəldib yenidən göndərəndə təkrar ödəməməlidir.
-    await releaseFee(id);
+    // (Artıq açılıb işləmiş biznesdə haqq xərclənib — geri açılmır.)
+    if (!wasApproved) await releaseFee(id);
+    else pushPublicListings({ reason: 'removed' });
     await prisma.notification.create({
-      data: { userId: biz.userId, type: 'SYSTEM', title: 'Biznes rədd edildi', body: `"${biz.name}": ${reason.trim()}\n\nÖdədiyiniz haqq qüvvədədir — düzəlişdən sonra əlavə ödəniş etmədən yenidən müraciət edə bilərsiniz.`, link: '/business' },
+      data: { userId: biz.userId, type: 'SYSTEM', title: 'Biznes rədd edildi', body: `"${biz.name}": ${reason.trim()}${wasApproved ? '\n\nBiznes və elanları saytdan götürüldü.' : '\n\nÖdədiyiniz haqq qüvvədədir — düzəlişdən sonra əlavə ödəniş etmədən yenidən müraciət edə bilərsiniz.'}`, link: '/business' },
     }).catch(() => {});
     pushLive(biz.userId, { kind: 'business', id: biz.id, status: 'REJECTED', toast: `Biznes rədd edildi: «${biz.name}»`, tone: 'error' });
     res.json({ success: true, business: biz });
@@ -1598,6 +1606,12 @@ router.delete('/admin/businesses/:id', requirePermission('businesses'), async (r
       const b = await tx.business.update({ where: { id }, data: { deletedAt: now, isActive: false } });
       return { count: del.count, userId: b.userId };
     });
+    // Təsdiqli biznesi qalmayan sahib «təsdiqli satıcı» sayılmır (sahibin öz silməsində də belədir).
+    const stillApproved = await prisma.business.count({ where: { userId: archived.userId, status: 'APPROVED', deletedAt: null } });
+    if (stillApproved === 0) await prisma.user.update({ where: { id: archived.userId }, data: { sellerVerified: false } }).catch(() => {});
+    await prisma.notification.create({
+      data: { userId: archived.userId, type: 'SYSTEM', title: 'Biznesiniz silindi', body: 'Admin biznesinizi və ona aid elanları saytdan götürdü. Sualınız varsa dəstəyə yazın.', link: '/support' },
+    }).catch(() => {});
     pushLive(archived.userId, { kind: 'business', id });
     pushPublicListings({ reason: 'removed' });
     res.json({ success: true, deletedListings: archived.count, deletedObjects: objectIds.length });

@@ -192,14 +192,24 @@ export async function sellerBalance(sellerId: number) {
 
 // Payout yarat — satıcının AVAILABLE + heldByPlatform ledger-lərini PAID_OUT et.
 export async function createPayout(sellerId: number, adminId: number, adminName: string, method?: string, reference?: string) {
-  const ledgers = await prisma.sellerLedger.findMany({ where: { sellerId, status: 'AVAILABLE', heldByPlatform: true } });
-  const amount = Math.round(ledgers.reduce((s, l) => s + l.netAmount, 0) * 100) / 100;
-  if (amount <= 0) throw new Error('Ödəniləcək mövcud balans yoxdur');
-  const payout = await prisma.payout.create({
-    data: { sellerId, amount, method: method || null, reference: reference || null, createdById: adminId, createdName: adminName },
+  // Bir tranzaksiya + ŞƏRTLİ yeniləmə: iki klik / iki admin eyni sətirlər üçün iki
+  // ödəniş qeydi yarada bilməsin (ikinci sorğu 0 sətir tutur və geri qayıdır).
+  // Geri alınmalı (clawback) və saxlama müddəti bitməmiş sətirlər ödənilmir.
+  return prisma.$transaction(async (tx) => {
+    const where = {
+      sellerId, status: 'AVAILABLE' as const, heldByPlatform: true, clawbackNeeded: false,
+      OR: [{ availableAt: null }, { availableAt: { lte: new Date() } }],
+    };
+    const ledgers = await tx.sellerLedger.findMany({ where });
+    const amount = Math.round(ledgers.reduce((s, l) => s + l.netAmount, 0) * 100) / 100;
+    if (amount <= 0) throw new Error('Ödəniləcək mövcud balans yoxdur');
+    const payout = await tx.payout.create({
+      data: { sellerId, amount, method: method || null, reference: reference || null, createdById: adminId, createdName: adminName },
+    });
+    const done = await tx.sellerLedger.updateMany({ where: { id: { in: ledgers.map((l) => l.id) }, status: 'AVAILABLE' }, data: { status: 'PAID_OUT', payoutId: payout.id } });
+    if (done.count !== ledgers.length) throw new Error('Bu balans artıq ödənilir — səhifəni yeniləyin');
+    return payout;
   });
-  await prisma.sellerLedger.updateMany({ where: { id: { in: ledgers.map((l) => l.id) } }, data: { status: 'PAID_OUT', payoutId: payout.id } });
-  return payout;
 }
 
 /**

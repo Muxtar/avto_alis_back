@@ -18,7 +18,7 @@ import { PrismaClient, Prisma, UserType } from '@prisma/client';
 import { approveReturn, finalizeReturnRefund, rejectReturn } from '../services/returnFlow';
 import { visibilityOf } from '../services/listingVisibility';
 import bcrypt from 'bcryptjs';
-import { adminAuth, requireAdmin, requirePermission, requireSuperAdmin, AuthRequest, generateToken, isAdminPhone, ADMIN_MODULES, SENSITIVE_MODULES, canAdminLogin, nationalPhone } from '../middleware/auth';
+import { adminAuth, requireAdmin, requirePermission, requireSuperAdmin, AuthRequest, generateToken, createSession, isAdminPhone, ADMIN_MODULES, SENSITIVE_MODULES, canAdminLogin, nationalPhone, AdminModule } from '../middleware/auth';
 import { authLimiter } from '../middleware/rateLimiter';
 import { createOtp } from '../services/otp';
 import { listFlags, setFlag, listNumbers, setNumber } from '../services/settings';
@@ -41,6 +41,21 @@ import { archiveUserPayees } from '../services/payoutArchive';
 
 const router = Router();
 const prisma = new PrismaClient();
+
+/**
+ * İstifadəçinin telefonunu admin dəyişəndə yoxlama. Super-adminlik TELEFONA görə
+ * təyin olunur, ona görə admin nömrəsini yalnız super-admin təyin edə bilər; eyni
+ * nömrə iki hesabda ola bilməz (giriş kodu hansına gedəcəyi bilinməzdi).
+ * Xəta mətni qaytarır, hər şey qaydasındadırsa null.
+ */
+async function phoneChangeError(phone: string, selfId: number | null, req: AuthRequest): Promise<string | null> {
+  const nat = nationalPhone(phone);
+  if (!nat) return 'Telefon nömrəsi düzgün deyil';
+  if ((isAdminPhone(phone) || canAdminLogin(phone)) && !req.isSuperAdmin) return 'Bu nömrə admin siyahısındadır — yalnız super-admin təyin edə bilər';
+  const same = await prisma.user.findFirst({ where: { phone: { endsWith: nat }, ...(selfId ? { id: { not: selfId } } : {}) }, select: { id: true } });
+  if (same) return 'Bu telefon artıq başqa hesabda qeydiyyatdadır';
+  return null;
+}
 
 // ── Tənzimləmələr (feature-flags) ──
 // Admin paneldəki "Tənzimləmələr" səhifəsi üçün. Bütün flag-lar meta + cari
@@ -99,6 +114,9 @@ router.patch('/admin/settings', requirePermission('settings'), async (req: AuthR
     const key = String(req.body?.key || '');
     const value = req.body?.value === true || req.body?.value === 'true';
     if (!key) { res.status(400).json({ success: false, message: 'key tələb olunur' }); return; }
+    // Real SMS kodu söndürüləndə giriş kodu cavabın içində qayıdır — yəni istənilən
+    // hesaba (super-admin daxil) girmək olur. Bu açarı yalnız super-admin dəyişir.
+    if (key === 'otp_real' && !req.isSuperAdmin) { res.status(403).json({ success: false, message: 'Bu tənzimləməni yalnız super-admin dəyişə bilər' }); return; }
     await setFlag(key, value);
     res.json({ success: true, key, value });
   } catch (error: any) {
@@ -205,7 +223,13 @@ router.post('/admin/login/phone/verify', authLimiter, async (req: AuthRequest, r
       where: { userId, verified: false, expiresAt: { gt: new Date() } },
       orderBy: { createdAt: 'desc' },
     });
-    if (!record || record.code !== code) {
+    // Rol yalnız super-admin nömrəsinə avtomatik verilir. Əvvəl ADMIN_LOGIN_PHONES-dakı,
+    // amma səlahiyyəti götürülmüş şəxs adi giriş kodu ilə özünü yenidən admin edə bilirdi.
+    if (user.role !== 'ADMIN' && !isAdminPhone(user.phone)) { res.status(403).json({ success: false, message: 'İcazə yoxdur' }); return; }
+    // Kod heç istənilməyibsə cəhd sayılmır — əks halda kənar şəxs userId ilə boş
+    // sorğular göndərib admini daim kilidli saxlaya bilərdi.
+    if (!record) { res.status(400).json({ success: false, message: 'Kodun vaxtı keçib — yenidən kod istəyin' }); return; }
+    if (record.code !== code) {
       // SƏHV KOD → sayğacı artır; limit aşılanda hesabı kilidlə.
       // Bu, IP limitindən asılı deyil — fərqli IP-lərdən yavaş hücum da dayanır.
       const failed = user.adminFailedLogins + 1;
@@ -229,7 +253,9 @@ router.post('/admin/login/phone/verify', authLimiter, async (req: AuthRequest, r
     await prisma.verificationCode.update({ where: { id: record.id }, data: { verified: true } });
     // Uğurlu giriş → sayğac sıfırlanır.
     await prisma.user.update({ where: { id: userId }, data: { adminFailedLogins: 0, adminLockedUntil: null, ...(user.role !== 'ADMIN' ? { role: 'ADMIN' } : {}) } });
-    const token = generateToken(user.id);
+    // Sessiyalı token: uzaqdan bağlana bilir və 7 gün hərəkətsizlikdə özü bitir
+    // (əvvəl 90 günlük, geri alına bilməyən token verilirdi).
+    const token = await createSession(user.id, req);
     res.json({ success: true, token, admin: { id: user.id, name: user.name } });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
@@ -454,6 +480,18 @@ async function unpaidOwed(userId: number): Promise<number> {
   return Math.round(rows.reduce((s, l) => s + l.netAmount, 0) * 100) / 100;
 }
 
+/** Hesabın silinməsinə mane olan açıq pul öhdəlikləri (yoxdursa null). */
+async function userDeleteBlockers(userId: number): Promise<string | null> {
+  const mine = { OR: [{ buyerId: userId }, { sellerId: userId }] };
+  const [refunds, active] = await Promise.all([
+    prisma.refundAttempt.count({ where: { status: { not: 'DONE' }, order: mine } }),
+    prisma.order.count({ where: { ...mine, paymentStatus: 'PAID', status: { in: ['PENDING', 'CONFIRMED', 'SHIPPED'] } } }),
+  ]);
+  if (refunds > 0) return `Bu hesabın sifarişləri üzrə ${refunds} tamamlanmamış geri qaytarma var — əvvəlcə «Geri qaytarmalar» bölməsində bağlayın`;
+  if (active > 0) return `Bu hesabın ${active} ödənilmiş, hələ tamamlanmamış sifarişi var — əvvəlcə onları tamamlayın və ya ləğv edib pulu qaytarın`;
+  return null;
+}
+
 async function deleteUserSafely(U: number, adminName?: string): Promise<{ archived: number; owed: number }> {
   const archived = await archiveUserPayees(U).catch(() => 0);
   const owed = await unpaidOwed(U);
@@ -573,6 +611,7 @@ router.post('/admin/users/bulk', requirePermission('users'), async (req: AuthReq
     if (action === 'block' || action === 'unblock') {
       const isBlocked = action === 'block';
       count = (await prisma.user.updateMany({ where: { id: { in: targetIds } }, data: { isBlocked } })).count;
+      if (isBlocked) await prisma.session.updateMany({ where: { userId: { in: targetIds }, revokedAt: null }, data: { revokedAt: new Date() } }).catch(() => {});
       pushLive(targetIds, { kind: 'account', status: isBlocked ? 'BLOCKED' : 'ACTIVE' });
     }
     else if (action === 'delete') {
@@ -1013,7 +1052,9 @@ router.post('/admin/payouts/businesses/:key/pay', requirePermission('finance_pay
             createdById: req.adminId!, createdName: req.adminName || 'Admin',
           },
         });
-        await tx.sellerLedger.updateMany({ where: { id: { in: rows.map((l) => l.id) } }, data: { status: 'PAID_OUT', payoutId: p.id } });
+        // Şərtli yeniləmə: sətir bu arada başqa sorğu ilə ödənilibsə hamısı geri qayıdır.
+        const done = await tx.sellerLedger.updateMany({ where: { id: { in: rows.map((l) => l.id) }, status: 'AVAILABLE' }, data: { status: 'PAID_OUT', payoutId: p.id } });
+        if (done.count !== rows.length) throw new Error('Seçilmiş sətirlərin bir hissəsi artıq ödənilib — səhifəni yeniləyin');
         created.push({ payout: p, count: rows.length });
       }
       return created;
@@ -1193,7 +1234,7 @@ router.get('/admin/me', requireAdmin, async (req: AuthRequest, res: Response) =>
     // adminlər) görmür — onlar yalnız açıq verilən icazə ilə açılır.
     const effective = req.isSuperAdmin
       ? [...ADMIN_MODULES]
-      : unconfigured ? ADMIN_MODULES.filter((m) => !SENSITIVE_MODULES.includes(m)) : perms;
+      : unconfigured ? ADMIN_MODULES.filter((m) => !SENSITIVE_MODULES.includes(m)) : perms.filter((m) => m !== 'none');
     res.json({
       success: true,
       id: me?.id, name: me?.name, avatar: me?.avatar,
@@ -1468,8 +1509,19 @@ router.post('/admin/refunds/:orderId/retry', requirePermission('finance'), async
     const orderId = parseInt(String(req.params.orderId));
     const row = await prisma.refundAttempt.findUnique({ where: { orderId } });
     if (!row) { res.status(404).json({ success: false, message: 'Qeyd tapılmadı' }); return; }
+    // Yalnız UĞURSUZ sətir təkrarlanır. Əvvəl vəziyyət yoxlanmadan sıfırlanırdı:
+    // gedən (PENDING) sorğunun qıfılı qırılır, bitmiş (DONE) qaytarma isə ikinci dəfə
+    // göndərilirdi — alıcıya iki dəfə pul qayıda bilərdi.
+    if (row.status === 'DONE') { res.status(400).json({ success: false, message: 'Bu pul artıq qaytarılıb' }); return; }
+    if (row.status === 'PENDING' && !row.needsReview) { res.status(409).json({ success: false, message: 'Qaytarma hazırda gedir — bir az sonra yoxlayın' }); return; }
+    // ŞÜBHƏLİ sətir (şlüz cavab vermədi, pul ÇIXMIŞ ola bilər) yalnız admin şlüzdə
+    // yoxlayıb açıq təsdiqlədikdə yenidən göndərilir.
+    if (row.needsReview && req.body?.force !== true) {
+      res.status(409).json({ success: false, needsConfirm: true, message: 'Bu qaytarma şübhəlidir: pul artıq çıxmış ola bilər. Əvvəlcə şlüz/bank hesabında yoxlayın.' }); return;
+    }
     // Cəhd sayğacı MAX-a çatıbsa avtomatik təkrar dayanır — əl ilə basılanda sıfırlanır.
-    await prisma.refundAttempt.update({ where: { orderId }, data: { attempts: 0, status: 'FAILED' } });
+    const reset = await prisma.refundAttempt.updateMany({ where: { orderId, status: row.status, updatedAt: row.updatedAt }, data: { attempts: 0, status: 'FAILED', needsReview: false } });
+    if (reset.count === 0) { res.status(409).json({ success: false, message: 'Sətir bu arada dəyişib — səhifəni yeniləyin' }); return; }
     const r = await refundOrderSafe(orderId, row.reason as any, row.amount);
     if (!r.ok) { res.status(502).json({ success: false, message: r.error || 'Yenə alınmadı' }); return; }
     res.json({ success: true });
@@ -1483,11 +1535,24 @@ router.post('/admin/refunds/:orderId/resolve', requirePermission('finance'), asy
     const orderId = parseInt(String(req.params.orderId));
     const note = String(req.body?.note || '').trim();
     if (!note) { res.status(400).json({ success: false, message: 'Necə həll olunduğunu yazın' }); return; }
-    await prisma.refundAttempt.update({
-      where: { orderId },
-      data: { status: 'DONE', doneAt: new Date(), adminNote: `${note} (admin #${req.adminId})` },
+    const row = await prisma.refundAttempt.findUnique({ where: { orderId } });
+    if (!row) { res.status(404).json({ success: false, message: 'Qeyd tapılmadı' }); return; }
+    if (row.status === 'DONE') { res.status(400).json({ success: false, message: 'Bu qaytarma artıq bağlanıb' }); return; }
+    const closed = await prisma.refundAttempt.updateMany({
+      where: { orderId, status: { not: 'DONE' } },
+      data: { status: 'DONE', doneAt: new Date(), needsReview: false, adminNote: `${note} (admin #${req.adminId})` },
     });
-    await prisma.order.update({ where: { id: orderId }, data: { paymentStatus: 'REFUNDED', gatewayStatus: 'Refunded (manual)' } }).catch(() => {});
+    if (closed.count === 0) { res.status(400).json({ success: false, message: 'Bu qaytarma artıq bağlanıb' }); return; }
+    // Qaytarılan məbləğ sifarişə YAZILIR və satıcının hesablaşması yenilənir. Əvvəl
+    // yalnız status dəyişirdi: alıcıya pul qaytarılırdı, satıcıya isə həmin sifarişin
+    // pulu sonradan tam ödənilə bilirdi; qismən iadə də bütöv sifarişi «qaytarılıb» edirdi.
+    const ord = await prisma.order.findUnique({ where: { id: orderId }, select: { total: true, refundedAmount: true } });
+    if (ord) {
+      const refunded = Math.min(ord.total, Math.round(((ord.refundedAmount || 0) + row.amount) * 100) / 100);
+      const full = refunded >= Math.round(ord.total * 100) / 100 - 0.009;
+      await prisma.order.update({ where: { id: orderId }, data: { refundedAmount: refunded, ...(full ? { paymentStatus: 'REFUNDED' } : {}), gatewayStatus: 'Refunded (manual)' } });
+      await recordSettlement(orderId).catch((e) => console.error('[refund resolve] settlement', e?.message));
+    }
     res.json({ success: true });
   } catch (error: any) { res.status(400).json({ success: false, message: error.message }); }
 });
@@ -1500,11 +1565,12 @@ router.post('/admin/users', requirePermission('users'), async (req: AuthRequest,
     if (!name || !phone) { res.status(400).json({ success: false, message: 'Ad və telefon tələb olunur' }); return; }
     const validTypes = ['CAR_OWNER', 'MECHANIC', 'PARTS_SELLER', 'COURIER'];
     const type = validTypes.includes(req.body.type) ? req.body.type : 'CAR_OWNER';
-    const exists = await prisma.user.findFirst({ where: { phone } });
-    if (exists) { res.status(400).json({ success: false, message: 'Bu telefon artıq qeydiyyatdadır' }); return; }
+    const badPhone = await phoneChangeError(String(phone), null, req);
+    if (badPhone) { res.status(400).json({ success: false, message: badPhone }); return; }
     const data: any = {
       name, phone, type: type as UserType,
-      role: req.body.role === 'ADMIN' ? 'ADMIN' : 'USER',
+      // Admin rolu yalnız super-admin tərəfindən («Adminlər» bölməsi) verilir.
+      role: req.body.role === 'ADMIN' && req.isSuperAdmin ? 'ADMIN' : 'USER',
       verified: req.body.verified === true || req.body.verified === 'true',
       profileComplete: true,
     };
@@ -1525,24 +1591,42 @@ router.put('/admin/users/:id', requirePermission('users'), async (req: AuthReque
   try {
     const { name, phone, type, verified, role } = req.body;
 
-    const targetId = parseInt(req.params.id);
-    // Admin başqa istifadəçiyə admin rolu VERƏ bilər (owner istəyi).
-    // Yalnız öz admin rolunu düşürməsinin qarşısı alınır (özünü kilidləməsin).
-    if (targetId === req.adminId && role && role !== 'ADMIN') {
-      res.status(403).json({ success: false, message: 'Öz admin rolunuzu dəyişə bilməzsiniz' });
-      return;
+    const targetId = parseInt(String(req.params.id));
+    if (Number.isNaN(targetId)) { res.status(400).json({ success: false, message: 'Yanlış ID' }); return; }
+    const target = await prisma.user.findUnique({ where: { id: targetId }, select: { role: true, phone: true } });
+    if (!target) { res.status(404).json({ success: false, message: 'İstifadəçi tapılmadı' }); return; }
+    // ── SƏLAHİYYƏT SƏRHƏDİ ──
+    // Əvvəl «istifadəçilər» icazəsi faktiki super-adminlik idi: admin öz telefonunu
+    // super-admin nömrəsinə dəyişə, istənilən adama admin rolu verə və ya super-admindən
+    // rolu ala bilirdi. İndi admin hesablarına və rola yalnız super-admin toxunur.
+    if ((target.role === 'ADMIN' || isAdminPhone(target.phone)) && !req.isSuperAdmin) {
+      res.status(403).json({ success: false, message: 'Admin hesabını yalnız super-admin dəyişə bilər' }); return;
+    }
+    if (role !== undefined && role !== target.role) {
+      if (!req.isSuperAdmin) { res.status(403).json({ success: false, message: 'Rolu yalnız super-admin dəyişə bilər («Adminlər» bölməsi)' }); return; }
+      if (role !== 'ADMIN' && role !== 'USER') { res.status(400).json({ success: false, message: 'Yanlış rol' }); return; }
+      if (targetId === req.adminId) { res.status(403).json({ success: false, message: 'Öz admin rolunuzu dəyişə bilməzsiniz' }); return; }
+      if (isAdminPhone(target.phone)) { res.status(403).json({ success: false, message: 'Super-adminin rolu dəyişdirilə bilməz' }); return; }
+    }
+    const validTypes = ['CAR_OWNER', 'MECHANIC', 'PARTS_SELLER', 'COURIER'];
+    if (type !== undefined && !validTypes.includes(type)) { res.status(400).json({ success: false, message: 'Yanlış istifadəçi tipi' }); return; }
+    if (phone !== undefined && String(phone).trim() !== target.phone) {
+      const bad = await phoneChangeError(String(phone), targetId, req);
+      if (bad) { res.status(400).json({ success: false, message: bad }); return; }
     }
 
     try {
       const user = await prisma.user.update({
         where: { id: targetId },
         data: {
-          ...(name !== undefined && { name }),
-          ...(phone !== undefined && { phone }),
+          ...(name !== undefined && { name: String(name).trim().slice(0, 100) }),
+          ...(phone !== undefined && { phone: String(phone).trim() }),
           ...(type !== undefined && { type }),
-          ...(verified !== undefined && { verified }),
+          ...(verified !== undefined && { verified: verified === true || verified === 'true' }),
           ...(role !== undefined && { role }),
         },
+        // Tam sətir QAYTARILMIR — əvvəl şifrə heşi, vəsiqə şəkilləri və IBAN da gedirdi.
+        select: { id: true, name: true, phone: true, email: true, type: true, role: true, verified: true, isBlocked: true, createdAt: true },
       });
       // Rol / təsdiq nişanı / ad dəyişdi — istifadəçinin açıq sessiyası
       // bunu səhifəni yeniləmədən görsün.
@@ -1573,8 +1657,19 @@ router.delete('/admin/users/:id', requirePermission('users'), async (req: AuthRe
       res.status(403).json({ success: false, message: 'Öz hesabınızı silə bilməzsiniz' });
       return;
     }
+    // Admin hesabı bu yolla silinmir (toplu silmədə də belədir) — əvvəl «istifadəçilər»
+    // icazəli admin super-admini bütün məlumatı ilə silə bilirdi.
+    const delTarget = await prisma.user.findUnique({ where: { id: targetId }, select: { role: true, phone: true } });
+    if (!delTarget) { res.status(404).json({ success: false, message: 'İstifadəçi tapılmadı' }); return; }
+    if (delTarget.role === 'ADMIN' || isAdminPhone(delTarget.phone)) {
+      res.status(403).json({ success: false, message: 'Admin hesabı silinə bilməz — əvvəlcə «Adminlər» bölməsindən səlahiyyəti götürün' }); return;
+    }
     // Ödənilməmiş borc varsa admin bunu bilərək təsdiqləməlidir: hesab silinir,
     // borc isə ödəniş ekranında "hesab silinib" nişanı ilə qalır.
+    // Başqalarının pulu ilişib qalmasın: hesab silinəndə onun sifarişləri də silinir.
+    // Gözləyən geri qaytarma və ya ödənilib hələ bağlanmamış sifariş varsa silməyə icazə yoxdur.
+    const blockers = await userDeleteBlockers(targetId);
+    if (blockers) { res.status(409).json({ success: false, message: blockers }); return; }
     const owed = await unpaidOwed(targetId);
     if (owed > 0 && String(req.query.force || '') !== '1') {
       res.status(409).json({
@@ -1938,12 +2033,21 @@ router.get('/admin/couriers', requirePermission('couriers'), async (_req: AuthRe
 router.put('/admin/couriers/:id', requirePermission('couriers'), async (req: AuthRequest, res: Response) => {
   try {
     const { name, phone, password } = req.body;
+    // HƏDƏF MÜTLƏQ KURYER OLMALIDIR. Əvvəl yoxlanmırdı: «kuryerlər» icazəli admin
+    // istənilən istifadəçinin (o cümlədən super-adminin) telefonunu/şifrəsini dəyişə bilirdi.
+    const cid = parseInt(String(req.params.id));
+    const cur = await prisma.user.findUnique({ where: { id: cid }, select: { type: true, role: true } });
+    if (!cur || cur.type !== 'COURIER' || cur.role === 'ADMIN') { res.status(404).json({ success: false, message: 'Kuryer tapılmadı' }); return; }
     const data: any = {};
-    if (name !== undefined) data.name = name;
-    if (phone !== undefined) data.phone = phone;
+    if (name !== undefined) data.name = String(name).trim().slice(0, 100);
+    if (phone !== undefined) {
+      const bad = await phoneChangeError(String(phone), cid, req);
+      if (bad) { res.status(400).json({ success: false, message: bad }); return; }
+      data.phone = String(phone).trim();
+    }
     if (password) data.password = await bcrypt.hash(password, 10);
     const courier = await prisma.user.update({
-      where: { id: parseInt(req.params.id) },
+      where: { id: cid },
       data,
       select: { id: true, name: true, phone: true },
     });
@@ -1956,7 +2060,13 @@ router.put('/admin/couriers/:id', requirePermission('couriers'), async (req: Aut
 // Delete Courier
 router.delete('/admin/couriers/:id', requirePermission('couriers'), async (req: AuthRequest, res: Response) => {
   try {
-    await prisma.user.delete({ where: { id: parseInt(req.params.id) } });
+    const cid = parseInt(String(req.params.id));
+    const cur = await prisma.user.findUnique({ where: { id: cid }, select: { type: true, role: true } });
+    if (!cur || cur.type !== 'COURIER' || cur.role === 'ADMIN') { res.status(404).json({ success: false, message: 'Kuryer tapılmadı' }); return; }
+    // Kuryerin alıcı/satıcı kimi sifarişləri varsa onlar da silinərdi (cascade) — icazə vermirik.
+    const own = await prisma.order.count({ where: { OR: [{ buyerId: cid }, { sellerId: cid }] } });
+    if (own > 0) { res.status(409).json({ success: false, message: 'Bu hesabın alıcı/satıcı kimi sifarişləri var — «İstifadəçilər» bölməsindən silin' }); return; }
+    await prisma.user.delete({ where: { id: cid } });
     res.json({ success: true });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
@@ -2394,6 +2504,23 @@ router.put('/admin/orders/:id/status', requirePermission('orders'), async (req: 
     const order = await prisma.order.findUnique({ where: { id: orderId }, include: { items: true } });
     if (!order) { res.status(404).json({ success: false, message: 'Sifariş tapılmadı' }); return; }
 
+    // ── KEÇİD QAYDALARI ── Əvvəl admin istənilən statusu istənilən statusa çevirə bilirdi.
+    if (status !== order.status) {
+      // Ləğv edilmiş sifariş dirilmir: stok və pul artıq geri qaytarılıb.
+      if (order.status === 'CANCELLED') { res.status(400).json({ success: false, message: 'Ləğv edilmiş sifarişin statusu dəyişdirilə bilməz — alıcı yeni sifariş verməlidir' }); return; }
+      // Pulu qaytarılmış sifariş göndərilə/çatdırıla bilməz.
+      if (order.paymentStatus === 'REFUNDED' && status !== 'CANCELLED') { res.status(400).json({ success: false, message: 'Bu sifarişin pulu geri qaytarılıb — yalnız ləğv edilə bilər' }); return; }
+      // Ödənilməmiş KART sifarişi irəli getmir (satıcı tərəfdə də belədir).
+      if (order.paymentMethod === 'CARD' && order.paymentStatus !== 'PAID' && ['CONFIRMED', 'SHIPPED', 'DELIVERED'].includes(status)) {
+        res.status(400).json({ success: false, message: 'Kartla ödəniş tamamlanmayıb — sifariş təsdiqlənə/göndərilə bilməz' }); return;
+      }
+      // Çatdırılmış sifariş geri «gözləmədə»yə qaytarılmır (hesablaşma və iadə müddəti başlayıb).
+      if (order.status === 'DELIVERED' && status !== 'CANCELLED') { res.status(400).json({ success: false, message: 'Çatdırılmış sifarişin statusu geri qaytarıla bilməz — problem varsa iadə və ya ləğv edin' }); return; }
+      // Şərtli keçid: paralel iki sorğu stoku/pulu iki dəfə qaytarmasın.
+      const claim = await prisma.order.updateMany({ where: { id: orderId, status: order.status }, data: { updatedAt: new Date() } });
+      if (claim.count === 0) { res.status(409).json({ success: false, message: 'Sifariş bu arada dəyişib — səhifəni yeniləyin' }); return; }
+    }
+
     // Ləğv: əvvəlcə aktiv Yango çatdırılması ləğv olunur. Kuryer malı
     // götürübsə Yango icazə vermir — admin bunu bilərək ?force=1 ilə keçə bilər
     // (məs. mal satıcıya qayıdıb, Yango statusu isə ilişib qalıb).
@@ -2484,9 +2611,20 @@ router.delete('/admin/orders/:id', requirePermission('orders'), async (req: Auth
     if (Number.isNaN(id)) { res.status(400).json({ success: false, message: 'Yanlış sifariş ID' }); return; }
     const order = await prisma.order.findUnique({
       where: { id },
-      select: { id: true, status: true, paymentStatus: true, total: true },
+      select: { id: true, status: true, paymentStatus: true, paymentMethod: true, total: true, createdAt: true },
     });
     if (!order) { res.status(404).json({ success: false, message: 'Sifariş tapılmadı' }); return; }
+    // Yalnız BAĞLANMIŞ sifariş silinir. Nağd sifariş heç vaxt «ödənilib» olmadığı üçün
+    // əvvəl yolda olan və ya çatdırılmış nağd satış da silinə bilirdi (stok geri
+    // qayıtmadan, satış tarixçəsi itərək).
+    if (order.status !== 'CANCELLED') {
+      const stalePending = order.status === 'PENDING' && order.paymentStatus !== 'PAID' && Date.now() - order.createdAt.getTime() > 60 * 60 * 1000;
+      if (!stalePending) { res.status(400).json({ success: false, message: 'Yalnız ləğv edilmiş sifariş silinə bilər — əvvəlcə statusu «Ləğv edildi» edin' }); return; }
+    }
+    // Satıcıya ödənilmiş (və ya geri alınmalı) hesablaşma sətri olan sifariş silinmir.
+    const paidOut = await prisma.sellerLedger.count({ where: { orderId: id, OR: [{ status: 'PAID_OUT' }, { clawbackNeeded: true }] } });
+    if (paidOut > 0) { res.status(400).json({ success: false, message: 'Bu sifariş üzrə satıcıya ödəniş edilib / geri alınmalı məbləğ var — maliyyə qeydi kimi saxlanmalıdır' }); return; }
+    await restoreStockForOrder(id).catch(() => {});
     if (!ORDER_DELETABLE_PAYMENT.includes(order.paymentStatus as any)) {
       res.status(400).json({
         success: false,
@@ -2549,6 +2687,8 @@ router.put('/admin/users/:id/block', requirePermission('users'), async (req: Aut
     });
     // Bloklanan istifadəçinin açıq sessiyası dərhal bağlanır (frontend /me
     // sorğusunda 403 alıb çıxış edir) — bloku ancaq yeniləyəndə hiss etmirdi.
+    // Bloklananın bütün cihaz sessiyaları bağlanır — əvvəl mövcud token işləməyə davam edirdi.
+    if (user.isBlocked) await prisma.session.updateMany({ where: { userId: user.id, revokedAt: null }, data: { revokedAt: new Date() } }).catch(() => {});
     pushLive(user.id, { kind: 'account', status: user.isBlocked ? 'BLOCKED' : 'ACTIVE' });
     res.json({ success: true, user });
   } catch (error: any) {
@@ -2840,11 +2980,15 @@ router.get('/admin/search', requireAdmin, async (req: AuthRequest, res: Response
     const bizOr: any[] = [{ name: { contains: q, mode: 'insensitive' } }, { voen: { contains: q } }];
     if (hasId) bizOr.push({ id: idNum });
 
+    // Axtarış da modul icazələrinə tabedir — əvvəl yalnız «bannerlər» icazəli admin
+    // də istifadəçi telefonlarını və sifariş məbləğlərini axtarıb görə bilirdi.
+    const can = (m: AdminModule) => !!req.isSuperAdmin || (req.adminPermissions || []).includes(m)
+      || ((req.adminPermissions || []).length === 0 && !SENSITIVE_MODULES.includes(m));
     const [usersRes, listingsRes, businessesRes, ordersRes] = await Promise.all([
-      prisma.user.findMany({ where: { role: 'USER', OR: userOr }, take: 6, select: { id: true, name: true, phone: true, type: true, isBlocked: true, avatar: true } }),
-      prisma.listing.findMany({ where: { OR: listOr }, take: 6, select: { id: true, title: true, price: true, type: true } }),
-      prisma.business.findMany({ where: { OR: bizOr }, take: 5, select: { id: true, name: true, voen: true, status: true } }),
-      hasId ? prisma.order.findMany({ where: { id: idNum }, take: 3, select: { id: true, status: true, total: true, paymentStatus: true } }) : Promise.resolve([]),
+      !can('users') ? Promise.resolve([]) : prisma.user.findMany({ where: { role: 'USER', OR: userOr }, take: 6, select: { id: true, name: true, phone: true, type: true, isBlocked: true, avatar: true } }),
+      !can('listings') ? Promise.resolve([]) : prisma.listing.findMany({ where: { OR: listOr }, take: 6, select: { id: true, title: true, price: true, type: true } }),
+      !can('businesses') ? Promise.resolve([]) : prisma.business.findMany({ where: { OR: bizOr }, take: 5, select: { id: true, name: true, voen: true, status: true } }),
+      hasId && can('orders') ? prisma.order.findMany({ where: { id: idNum }, take: 3, select: { id: true, status: true, total: true, paymentStatus: true } }) : Promise.resolve([]),
     ]);
     res.json({ success: true, results: { users: usersRes, listings: listingsRes, businesses: businessesRes, orders: ordersRes } });
   } catch (error: any) {
@@ -2856,6 +3000,10 @@ router.get('/admin/search', requireAdmin, async (req: AuthRequest, res: Response
 // ADMİN İDARƏETMƏSİ (RBAC) — yalnız super-admin (ADMIN_PHONES).
 // İstifadəçiləri admin edir, icazə modullarını (adminPermissions) təyin edir.
 // ══════════════════════════════════════════════════════════════════════════
+
+/** Boş siyahı «konfiqurasiya olunmamış» (geniş giriş) sayıldığı üçün, super-adminin
+ *  BİLƏRƏKDƏN boş saxladığı siyahı 'none' nişanı ilə yazılır = heç bir bölməyə giriş yoxdur. */
+const storePermissions = (perms: string[]) => (perms.length ? perms : ['none']);
 
 function cleanPermissions(input: any): string[] {
   const arr = Array.isArray(input) ? input : [];
@@ -2880,7 +3028,7 @@ router.get('/admin/admins', requireSuperAdmin, async (_req: AuthRequest, res: Re
         isSuperAdmin: isAdminPhone(a.phone),
         // Boş icazə + super deyil → köhnə/konfiqurasiya olunmamış (tam giriş).
         unconfigured: !isAdminPhone(a.phone) && (a.adminPermissions || []).length === 0,
-        permissions: isAdminPhone(a.phone) ? [...ADMIN_MODULES] : (a.adminPermissions || []),
+        permissions: isAdminPhone(a.phone) ? [...ADMIN_MODULES] : (a.adminPermissions || []).filter((m) => m !== 'none'),
       })),
     });
   } catch (error: any) { res.status(400).json({ success: false, message: error.message }); }
@@ -2910,7 +3058,7 @@ router.post('/admin/admins', requireSuperAdmin, async (req: AuthRequest, res: Re
     const perms = cleanPermissions(req.body?.permissions);
     const updated = await prisma.user.update({
       where: { id: userId },
-      data: { role: 'ADMIN', adminPermissions: perms },
+      data: { role: 'ADMIN', adminPermissions: storePermissions(perms) },
       select: { id: true, name: true, phone: true, adminPermissions: true },
     });
     res.json({ success: true, admin: { ...updated, isSuperAdmin: isAdminPhone(updated.phone) } });
@@ -2925,7 +3073,7 @@ router.put('/admin/admins/:id/permissions', requireSuperAdmin, async (req: AuthR
     if (!target || target.role !== 'ADMIN') { res.status(404).json({ success: false, message: 'Admin tapılmadı' }); return; }
     if (isAdminPhone(target.phone)) { res.status(400).json({ success: false, message: 'Super-adminin icazələri dəyişdirilə bilməz' }); return; }
     const perms = cleanPermissions(req.body?.permissions);
-    const updated = await prisma.user.update({ where: { id }, data: { adminPermissions: perms }, select: { id: true, name: true, phone: true, adminPermissions: true } });
+    const updated = await prisma.user.update({ where: { id }, data: { adminPermissions: storePermissions(perms) }, select: { id: true, name: true, phone: true, adminPermissions: true } });
     res.json({ success: true, admin: { ...updated, isSuperAdmin: false } });
   } catch (error: any) { res.status(400).json({ success: false, message: error.message }); }
 });

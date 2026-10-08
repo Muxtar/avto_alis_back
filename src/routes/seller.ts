@@ -133,9 +133,18 @@ router.put('/admin/seller-applications/:id/approve', requirePermission('kyc'), a
 router.put('/admin/seller-applications/:id/reject', requirePermission('kyc'), async (req: AuthRequest, res: Response) => {
   try {
     const id = parseInt(req.params.id);
-    const { reason } = req.body;
+    // Panel `rejectionReason` göndərir — əvvəl yalnız `reason` oxunurdu və adminin
+    // yazdığı səbəb itirdi (satıcı səbəbsiz «rədd edildi» görürdü).
+    const reason = String(req.body?.reason ?? req.body?.rejectionReason ?? '').trim().slice(0, 500);
     const app = await prisma.sellerVerification.findUnique({ where: { id } });
     if (!app) { res.status(404).json({ success: false, message: 'Ərizə tapılmadı' }); return; }
+    if (app.status === 'REJECTED') { res.status(400).json({ success: false, message: 'Bu ərizə artıq rədd edilib' }); return; }
+    // Əvvəl təsdiqlənmiş ərizə rədd edilirsə «təsdiqli satıcı» nişanı da götürülür
+    // (təsdiqli biznesi olan istisna — o, biznesi ilə təsdiqlidir).
+    if (app.status === 'APPROVED') {
+      const biz = await prisma.business.count({ where: { userId: app.userId, status: 'APPROVED', deletedAt: null } });
+      if (biz === 0) await prisma.user.update({ where: { id: app.userId }, data: { sellerVerified: false } }).catch(() => {});
+    }
 
     await prisma.$transaction([
       prisma.sellerVerification.update({
