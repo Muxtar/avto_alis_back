@@ -277,6 +277,7 @@ router.post('/payment/refund/:orderId', requirePermission('finance'), async (req
     // Eyni gateway-order altındakı bütün order-lər birlikdə ödənildiyi üçün,
     // qismən iadə bu order-in məbləği qədər; məbləç verilməsə bu order-in totalı.
     const refundAmount = amount !== undefined ? parseFloat(amount) : order.total;
+    if (!Number.isFinite(refundAmount) || refundAmount <= 0) { res.status(400).json({ success: false, message: 'Qaytarılacaq məbləğ 0-dan böyük olmalıdır' }); return; }
     // Ortaq servis: ikiqat qaytarma qıfılı + qeyd + uğursuzluqda təkrar cəhd.
     const r = await refundOrderSafe(order.id, 'ADMIN', refundAmount);
     if (!r.ok) { res.status(502).json({ success: false, message: r.error || 'Qaytarma alınmadı', retrying: true }); return; }

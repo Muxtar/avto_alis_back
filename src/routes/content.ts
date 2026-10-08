@@ -68,7 +68,11 @@ router.put('/admin/pages/:id', requirePermission('content'), async (req: AuthReq
     const data: any = { updatedById: req.adminId! };
     if (req.body?.title !== undefined) data.title = String(req.body.title).trim().slice(0, 200);
     if (req.body?.content !== undefined) data.content = String(req.body.content);
-    if (req.body?.slug !== undefined) data.slug = slugify(String(req.body.slug));
+    if (req.body?.slug !== undefined) {
+      // Boş slug saxlanmır — başlıqdan yaranır (forma da belə vəd edir), yoxsa səhifə /p/ olub itərdi.
+      const sl = slugify(String(req.body.slug)) || (data.title ? slugify(data.title) : '');
+      if (sl) data.slug = sl;
+    }
     if (req.body?.published !== undefined) data.published = !!req.body.published;
     const page = await prisma.page.update({ where: { id }, data });
     res.json({ success: true, page });

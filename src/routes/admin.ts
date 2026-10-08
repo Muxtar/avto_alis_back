@@ -43,6 +43,26 @@ const router = Router();
 const prisma = new PrismaClient();
 
 /**
+ * BAŞ TUTMUŞ SATIŞ — bütün gəlir rəqəmlərinin ortaq tərifi.
+ *   • kart / balans: ödənilib və ləğv edilməyib;
+ *   • nağd: çatdırılıb (nağd sifariş heç vaxt «PAID» olmur — əvvəl bütün nağd satışlar
+ *     gəlirdən və maliyyə cəmlərindən kənarda qalırdı).
+ * Gəlir = cəm − qaytarılan məbləğ (qismən iadələr də nəzərə alınır).
+ */
+/** Sifarişdən şlüz sirlərini çıxar — panelə ödəniş şlüzünün parolu/istinadı getməsin. */
+function safeOrder<T extends Record<string, any> | null | undefined>(o: T): T {
+  if (!o) return o;
+  const { gatewayPassword, pickupCode, ...rest } = o as any;
+  return rest as T;
+}
+
+const CASH_SOLD = { paymentMethod: 'CASH' as const, status: 'DELIVERED' as const, paymentStatus: { not: 'REFUNDED' as const } };
+const PAID_SOLD = { paymentStatus: 'PAID' as const, status: { not: 'CANCELLED' as const } };
+const SOLD = { OR: [PAID_SOLD, CASH_SOLD] };
+const netOf = (agg: { _sum: { total: number | null; refundedAmount?: number | null } }) =>
+  Math.round(((agg._sum.total || 0) - (agg._sum.refundedAmount || 0)) * 100) / 100;
+
+/**
  * İstifadəçinin telefonunu admin dəyişəndə yoxlama. Super-adminlik TELEFONA görə
  * təyin olunur, ona görə admin nömrəsini yalnız super-admin təyin edə bilər; eyni
  * nömrə iki hesabda ola bilməz (giriş kodu hansına gedəcəyi bilinməzdi).
@@ -412,8 +432,8 @@ router.get('/admin/service-health', requirePermission('ai'), async (_req: AuthRe
 router.get('/admin/analytics/advanced', requireAdmin, async (_req: AuthRequest, res: Response) => {
   try {
     const [paidAgg, sellerGroups, totalUsers, buyerGroups, items] = await Promise.all([
-      prisma.order.aggregate({ _sum: { total: true }, _count: true, where: { paymentStatus: 'PAID' } }),
-      prisma.order.groupBy({ by: ['sellerId'], where: { paymentStatus: 'PAID' }, _sum: { total: true }, _count: true }),
+      prisma.order.aggregate({ _sum: { total: true }, _count: true, where: SOLD }),
+      prisma.order.groupBy({ by: ['sellerId'], where: SOLD, _sum: { total: true }, _count: true }),
       prisma.user.count({ where: { role: 'USER' } }),
       prisma.order.groupBy({ by: ['buyerId'], where: { paymentStatus: 'PAID' }, _count: true }),
       // Satılan məhsullar (ödənilmiş sifarişlərdən) — məhdud, yaddaşda toplanır.
@@ -1252,8 +1272,9 @@ router.get('/admin/me', requireAdmin, async (req: AuthRequest, res: Response) =>
 router.get('/admin/users', requirePermission('users'), async (req: AuthRequest, res: Response) => {
   try {
     const { search, type, page = '1', limit = '20' } = req.query;
-    const skip = (parseInt(page as string) - 1) * parseInt(limit as string);
-    const take = parseInt(limit as string);
+    // Səhifə ölçüsü məhdudlaşdırılır (əvvəl limit=1000000 bütün cədvəli boşaldırdı; limit=abc xəta verirdi).
+    const take = Math.min(100, Math.max(1, parseInt(limit as string) || 20));
+    const skip = (Math.max(1, parseInt(page as string) || 1) - 1) * take;
 
     const where: Prisma.UserWhereInput = { role: 'USER' };
     if (search) {
@@ -1689,8 +1710,9 @@ router.delete('/admin/users/:id', requirePermission('users'), async (req: AuthRe
 router.get('/admin/listings', requirePermission('listings'), async (req: AuthRequest, res: Response) => {
   try {
     const { search, category, type, status, page = '1', limit = '20' } = req.query;
-    const skip = (parseInt(page as string) - 1) * parseInt(limit as string);
-    const take = parseInt(limit as string);
+    // Səhifə ölçüsü məhdudlaşdırılır (əvvəl limit=1000000 bütün cədvəli boşaldırdı; limit=abc xəta verirdi).
+    const take = Math.min(100, Math.max(1, parseInt(limit as string) || 20));
+    const skip = (Math.max(1, parseInt(page as string) || 1) - 1) * take;
 
     const where: Prisma.ListingWhereInput = {};
     // ?status=PENDING — moderasiya növbəsi
@@ -1867,6 +1889,10 @@ router.patch('/admin/listings/:id/status', requirePermission('listings'), async 
       res.status(400).json({ success: false, message: 'status yalnız APPROVED, REJECTED və ya PENDING ola bilər' });
       return;
     }
+    // Arxivlənmiş (silinmiş) elan moderasiya ilə dirildilmir.
+    const curL = await prisma.listing.findUnique({ where: { id }, select: { status: true } });
+    if (!curL) { res.status(404).json({ success: false, message: 'Elan tapılmadı' }); return; }
+    if (curL.status === 'ARCHIVED') { res.status(400).json({ success: false, message: 'Bu elan arxivlənib (silinib) — statusu dəyişdirilə bilməz' }); return; }
     const listing = await prisma.listing.update({
       where: { id },
       data: {
@@ -1910,15 +1936,21 @@ router.patch('/admin/listings/:id/status', requirePermission('listings'), async 
 // Update Listing
 router.put('/admin/listings/:id', requirePermission('listings'), async (req: AuthRequest, res: Response) => {
   try {
-    const { title, description, price, category, type } = req.body;
+    const { title, description, price, category, type, location, phone } = req.body;
+    const p = price !== undefined ? parseFloat(price) : undefined;
+    if (p !== undefined && (!Number.isFinite(p) || p < 0)) { res.status(400).json({ success: false, message: 'Qiymət düzgün deyil' }); return; }
+    if (title !== undefined && !String(title).trim()) { res.status(400).json({ success: false, message: 'Başlıq boş ola bilməz' }); return; }
     const listing = await prisma.listing.update({
-      where: { id: parseInt(req.params.id) },
+      where: { id: parseInt(String(req.params.id)) },
       data: {
-        ...(title !== undefined && { title }),
+        ...(title !== undefined && { title: String(title).trim() }),
         ...(description !== undefined && { description }),
-        ...(price !== undefined && { price: parseFloat(price) }),
+        ...(p !== undefined && { price: p }),
         ...(category !== undefined && { category }),
         ...(type !== undefined && { type }),
+        // Ünvan və telefon formada var idi, amma saxlanmırdı («saxlanıldı» yazıb geri qayıdırdı).
+        ...(location !== undefined && { location: String(location).trim() || null }),
+        ...(phone !== undefined && { phone: String(phone).trim() || null }),
       },
     });
     pushLive(listing.userId, { kind: 'listing', id: listing.id });
@@ -1980,6 +2012,8 @@ router.post('/admin/listings/reactivate-expired', requirePermission('listings'),
 
     const result = await prisma.listing.updateMany({
       where: {
+        // Yalnız təsdiqli elanlar uzadılır — rədd edilmiş/arxivlənmişlərə toxunulmur.
+        status: 'APPROVED',
         OR: [
           { expiresAt: null },
           { expiresAt: { lte: now } },
@@ -2079,8 +2113,9 @@ router.delete('/admin/couriers/:id', requirePermission('couriers'), async (req: 
 router.get('/admin/orders', requirePermission('orders'), async (req: AuthRequest, res: Response) => {
   try {
     const { status, page = '1', limit = '20' } = req.query;
-    const skip = (parseInt(page as string) - 1) * parseInt(limit as string);
-    const take = parseInt(limit as string);
+    // Səhifə ölçüsü məhdudlaşdırılır (əvvəl limit=1000000 bütün cədvəli boşaldırdı; limit=abc xəta verirdi).
+    const take = Math.min(100, Math.max(1, parseInt(limit as string) || 20));
+    const skip = (Math.max(1, parseInt(page as string) || 1) - 1) * take;
 
     const where: Prisma.OrderWhereInput = {};
     if (status && status !== 'all') where.status = status as any;
@@ -2108,7 +2143,7 @@ router.get('/admin/orders', requirePermission('orders'), async (req: AuthRequest
     // deyir. Səbəb adətən üçdən biridir: ödəniş tamamlanmayıb (kart sətri
     // ödənişdən ƏVVƏL yaradılır), ödəniş uğursuz olub, və ya tərəf sifarişi
     // öz siyahısından gizlədib. Bunu daha təxmin etməyə ehtiyac yoxdur.
-    const withState = orders.map((o) => {
+    const withState = orders.map(safeOrder).map((o) => {
       const notes: string[] = [];
       if (o.paymentMethod === 'CARD' && o.paymentStatus === 'PENDING' && o.status === 'PENDING') {
         notes.push('Ödəniş tamamlanmayıb — alıcı bank səhifəsində ödəməyib (pul çıxmayıb)');
@@ -2150,7 +2185,8 @@ router.get('/admin/finance-tree', requirePermission('finance'), async (req: Auth
     const q = String(req.query.q || '').trim();
     const payStatus = String(req.query.paymentStatus || 'PAID');
     const from = req.query.from ? new Date(String(req.query.from)) : null;
-    const to = req.query.to ? new Date(String(req.query.to)) : null;
+    // «Son tarix» seçilən GÜNÜ də əhatə edir (əvvəl 00:00-da kəsilir, son gün düşürdü).
+    const to = req.query.to ? new Date(new Date(String(req.query.to)).getTime() + 24 * 3600 * 1000 - 1) : null;
 
     const where: Prisma.OrderWhereInput = {};
     if (payStatus !== 'all') where.paymentStatus = payStatus as any;
@@ -2320,7 +2356,8 @@ router.get('/admin/finance', requirePermission('finance'), async (req: AuthReque
     const payStatus = String(req.query.paymentStatus || 'all'); // all | PAID | PENDING | FAILED | REFUNDED
     const q = String(req.query.q || '').trim();
     const from = req.query.from ? new Date(String(req.query.from)) : null;
-    const to = req.query.to ? new Date(String(req.query.to)) : null;
+    // «Son tarix» seçilən GÜNÜ də əhatə edir (əvvəl 00:00-da kəsilir, son gün düşürdü).
+    const to = req.query.to ? new Date(new Date(String(req.query.to)).getTime() + 24 * 3600 * 1000 - 1) : null;
 
     // Ortaq filtr (tarix + axtarış) — özet kartları bunun üzərindən hesablanır.
     const baseWhere: Prisma.OrderWhereInput = {};
@@ -2350,13 +2387,14 @@ router.get('/admin/finance', requirePermission('finance'), async (req: AuthReque
       }),
       prisma.order.count({ where: tableWhere }),
       // Bizə gələn pul: KART + PAID
-      prisma.order.aggregate({ _sum: { total: true }, _count: true, where: { ...baseWhere, paymentMethod: 'CARD', paymentStatus: 'PAID' } }),
+      prisma.order.aggregate({ _sum: { total: true, refundedAmount: true }, _count: true, where: { ...baseWhere, paymentMethod: 'CARD', ...PAID_SOLD } }),
       // Nağd (elden): CASH + PAID — bizə gəlmir, satıcıya birbaşa
-      prisma.order.aggregate({ _sum: { total: true }, _count: true, where: { ...baseWhere, paymentMethod: 'CASH', paymentStatus: 'PAID' } }),
+      prisma.order.aggregate({ _sum: { total: true, refundedAmount: true }, _count: true, where: { ...baseWhere, ...CASH_SOLD } }),
       // İadə edilmiş
-      prisma.order.aggregate({ _sum: { total: true }, _count: true, where: { ...baseWhere, paymentStatus: 'REFUNDED' } }),
+      // Qaytarılan pul — tam VƏ qismən iadələr (əvvəl yalnız tam qaytarılmış sifarişlər sayılırdı).
+      prisma.order.aggregate({ _sum: { refundedAmount: true }, _count: true, where: { ...baseWhere, refundedAmount: { gt: 0 } } }),
       // Bütün ödənilmiş (kart+nağd)
-      prisma.order.aggregate({ _sum: { total: true }, _count: true, where: { ...baseWhere, paymentStatus: 'PAID' } }),
+      prisma.order.aggregate({ _sum: { total: true, refundedAmount: true }, _count: true, where: { AND: [baseWhere, SOLD] } }),
       // Referala ödəniləcək komissiya (voided olmayan)
       // Referal satıcılara borcumuz — hesablaşma cədvəlindən (nağd və kart), ödənilməmiş hissə.
       prisma.referralLedger.aggregate({ _sum: { amount: true }, where: { status: { in: ['PENDING', 'AVAILABLE'] } } }),
@@ -2365,17 +2403,17 @@ router.get('/admin/finance', requirePermission('finance'), async (req: AuthReque
     res.json({
       success: true,
       summary: {
-        cardPaidTotal: cardPaid._sum.total || 0,   // bizə gələn pul (kart)
+        cardPaidTotal: netOf(cardPaid),   // bizə gələn pul (kart)
         cardPaidCount: cardPaid._count || 0,
-        cashPaidTotal: cashPaid._sum.total || 0,    // elden (satıcıya birbaşa)
+        cashPaidTotal: netOf(cashPaid),    // elden (satıcıya birbaşa)
         cashPaidCount: cashPaid._count || 0,
-        refundedTotal: refunded._sum.total || 0,
+        refundedTotal: Math.round((refunded._sum.refundedAmount || 0) * 100) / 100,
         refundedCount: refunded._count || 0,
-        allPaidTotal: allPaid._sum.total || 0,      // ümumi dövriyyə
+        allPaidTotal: netOf(allPaid),      // ümumi dövriyyə
         allPaidCount: allPaid._count || 0,
         referralPayable: referralAgg._sum.amount || 0, // referal satıcılara ödəniləcək (gözləyən + ödənilə bilən)
       },
-      transactions: rows,
+      transactions: rows.map(safeOrder),
       total, page, totalPages: Math.ceil(total / take) || 1,
     });
   } catch (error: any) {
@@ -2422,8 +2460,9 @@ router.put('/admin/orders/:id/assign-courier', requirePermission('orders'), asyn
 router.get('/admin/returns', requirePermission('returns'), async (req: AuthRequest, res: Response) => {
   try {
     const { status, page = '1', limit = '20' } = req.query;
-    const skip = (parseInt(page as string) - 1) * parseInt(limit as string);
-    const take = parseInt(limit as string);
+    // Səhifə ölçüsü məhdudlaşdırılır (əvvəl limit=1000000 bütün cədvəli boşaldırdı; limit=abc xəta verirdi).
+    const take = Math.min(100, Math.max(1, parseInt(limit as string) || 20));
+    const skip = (Math.max(1, parseInt(page as string) || 1) - 1) * take;
 
     const where: Prisma.ReturnRequestWhereInput = {};
     if (status && status !== 'all') where.status = status as any;
@@ -2445,7 +2484,7 @@ router.get('/admin/returns', requirePermission('returns'), async (req: AuthReque
       prisma.returnRequest.count({ where }),
     ]);
 
-    res.json({ returns, total, page: parseInt(page as string), totalPages: Math.ceil(total / take) });
+    res.json({ returns: returns.map((r) => ({ ...r, order: safeOrder(r.order) })), total, page: parseInt(page as string), totalPages: Math.ceil(total / take) });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }
@@ -2565,7 +2604,7 @@ router.put('/admin/orders/:id/status', requirePermission('orders'), async (req: 
       }).catch(() => {});
     }
     res.json({
-      success: true, order: updated,
+      success: true, order: safeOrder(updated),
       ...(refundFailed ? { refundPending: true, refundError: refundFailed, message: 'Sifariş ləğv edildi, lakin ödənişin qaytarılması alınmadı — avtomatik təkrar cəhd ediləcək.' } : {}),
     });
   } catch (error: any) {
@@ -2701,8 +2740,9 @@ router.put('/admin/users/:id/block', requirePermission('users'), async (req: Aut
 router.get('/admin/comments', requirePermission('comments'), async (req: AuthRequest, res: Response) => {
   try {
     const { page = '1', limit = '20' } = req.query;
-    const skip = (parseInt(page as string) - 1) * parseInt(limit as string);
-    const take = parseInt(limit as string);
+    // Səhifə ölçüsü məhdudlaşdırılır (əvvəl limit=1000000 bütün cədvəli boşaldırdı; limit=abc xəta verirdi).
+    const take = Math.min(100, Math.max(1, parseInt(limit as string) || 20));
+    const skip = (Math.max(1, parseInt(page as string) || 1) - 1) * take;
     const [comments, total] = await Promise.all([
       prisma.comment.findMany({
         include: {
@@ -2766,9 +2806,9 @@ router.get('/admin/analytics', requireAdmin, async (_req: AuthRequest, res: Resp
 
     const [ordersByStatus, paidAgg, deliveredCount, last30Orders, newUsers30, blockedUsers, pendingKyc, openReturns] = await Promise.all([
       prisma.order.groupBy({ by: ['status'], _count: true }),
-      prisma.order.aggregate({ _sum: { total: true }, where: { paymentStatus: 'PAID' } }),
+      prisma.order.aggregate({ _sum: { total: true, refundedAmount: true }, where: SOLD }),
       prisma.order.count({ where: { status: 'DELIVERED' } }),
-      prisma.order.findMany({ where: { createdAt: { gte: last30 } }, select: { total: true, createdAt: true, status: true } }),
+      prisma.order.findMany({ where: { createdAt: { gte: last30 } }, select: { total: true, refundedAmount: true, createdAt: true, status: true, paymentStatus: true, paymentMethod: true } }),
       prisma.user.count({ where: { role: 'USER', createdAt: { gte: last30 } } }),
       prisma.user.count({ where: { isBlocked: true } }),
       prisma.sellerVerification.count({ where: { status: 'PENDING' } }),
@@ -2781,13 +2821,15 @@ router.get('/admin/analytics', requireAdmin, async (_req: AuthRequest, res: Resp
       const day = o.createdAt.toISOString().slice(0, 10);
       const cur = dailyMap.get(day) || { revenue: 0, orders: 0 };
       cur.orders += 1;
-      if (o.status !== 'CANCELLED') cur.revenue += o.total;
+      // «Gəlir» kartı ilə EYNİ tərif — əvvəl ödənilməmiş sifarişlər də sayılırdı və iki rəqəm tutmurdu.
+      const sold = (o.paymentStatus === 'PAID' && o.status !== 'CANCELLED') || (o.paymentMethod === 'CASH' && o.status === 'DELIVERED' && o.paymentStatus !== 'REFUNDED');
+      if (sold) cur.revenue += o.total - (o.refundedAmount || 0);
       dailyMap.set(day, cur);
     }
     const daily = Array.from(dailyMap.entries()).sort((a, b) => a[0].localeCompare(b[0])).map(([date, v]) => ({ date, ...v }));
 
     res.json({
-      revenueTotal: paidAgg._sum.total || 0,
+      revenueTotal: netOf(paidAgg),
       deliveredCount,
       ordersByStatus: ordersByStatus.map((s) => ({ status: s.status, count: s._count })),
       newUsers30,
@@ -2836,12 +2878,14 @@ router.post('/admin/credentials/:id/:action', requirePermission('credentials'), 
     if (!cur) { res.status(404).json({ success: false, message: 'Sənəd tapılmadı' }); return; }
     const profession = String(req.body?.profession || '').trim() || cur.profession || cur.user.profession || null;
     if (action === 'approve' && !profession) { res.status(400).json({ success: false, message: 'Sənədin hansı ixtisası sübut etdiyini seçin' }); return; }
-    const vu = req.body?.validUntil ? new Date(req.body.validUntil) : null;
+    // Tarix göndərilməyibsə mövcud müddət saxlanır (əvvəl yenidən təsdiqdə silinirdi).
+    const vuSent = req.body?.validUntil !== undefined && req.body?.validUntil !== null && req.body?.validUntil !== '';
+    const vu = vuSent ? new Date(req.body.validUntil) : null;
     const doc = await prisma.professionDocument.update({
       where: { id },
       data: {
         status: action === 'approve' ? 'APPROVED' : 'REJECTED', reviewedAt: new Date(),
-        ...(action === 'approve' ? { profession, validUntil: vu && !isNaN(vu.getTime()) ? vu : null } : {}),
+        ...(action === 'approve' ? { profession, ...(vuSent && vu && !isNaN(vu.getTime()) ? { validUntil: vu } : {}) } : {}),
       },
       select: { id: true, status: true, userId: true, title: true, profession: true },
     });
@@ -2936,8 +2980,8 @@ router.get('/admin/overview', requireAdmin, async (_req: AuthRequest, res: Respo
       prisma.listing.count({ where: { status: 'PENDING' } }),
       // Əl ilə kimlik yoxlaması növbəsi (Veriff söndürüləndə dolur).
       prisma.user.count({ where: { idVerifyStatus: 'PENDING', idCardImage: { not: null } } }),
-      prisma.order.aggregate({ _sum: { total: true }, where: { paymentStatus: 'PAID' } }),
-      prisma.order.aggregate({ _sum: { total: true }, where: { paymentStatus: 'PAID', createdAt: { gte: startOfDay } } }),
+      prisma.order.aggregate({ _sum: { total: true, refundedAmount: true }, where: SOLD }),
+      prisma.order.aggregate({ _sum: { total: true, refundedAmount: true }, where: { AND: [SOLD, { createdAt: { gte: startOfDay } }] } }),
       prisma.order.count({ where: { createdAt: { gte: startOfDay } } }),
       prisma.user.count({ where: { role: 'USER', createdAt: { gte: weekAgo } } }),
       prisma.consultationSession.count({ where: { status: 'ACTIVE' } }).catch(() => 0),
@@ -2954,8 +2998,8 @@ router.get('/admin/overview', requireAdmin, async (_req: AuthRequest, res: Respo
       success: true,
       stats: {
         users, blockedUsers, listings, orders, businesses, couriers,
-        revenueTotal: revenueAgg._sum.total || 0,
-        revenueToday: revenueTodayAgg._sum.total || 0,
+        revenueTotal: netOf(revenueAgg),
+        revenueToday: netOf(revenueTodayAgg),
         ordersToday, newUsers7d, activeConsult,
       },
       pending,

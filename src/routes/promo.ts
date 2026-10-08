@@ -63,6 +63,30 @@ router.post('/promo/validate', adminAuth, async (req: AuthRequest, res: Response
   }
 });
 
+// Promo dəyərlərinin yoxlanması (yaratma və redaktə üçün ortaq). Xəta mətni və ya null.
+function promoError(b: any, partial: boolean): string | null {
+  if (b.discountType !== undefined || !partial) {
+    if (!['PERCENT', 'FIXED'].includes(String(b.discountType))) return 'Endirim tipi PERCENT və ya FIXED olmalıdır';
+  }
+  if (b.discountValue !== undefined || !partial) {
+    const v = parseFloat(b.discountValue);
+    if (!Number.isFinite(v) || v <= 0) return 'Endirim 0-dan böyük olmalıdır';
+    if (String(b.discountType || '') === 'PERCENT' && v > 100) return 'Faiz endirimi 100-dən çox ola bilməz';
+  }
+  for (const k of ['minOrderAmount', 'maxDiscount', 'usageLimit']) {
+    if (b[k] !== undefined && b[k] !== null && b[k] !== '' && !(parseFloat(b[k]) >= 0)) return 'Mənfi dəyər yazıla bilməz';
+  }
+  return null;
+}
+// «Bitir» tarixi həmin GÜNÜN SONUNA qədərdir (Bakı vaxtı) — əvvəl gecə 00:00 UTC-də kəsilir,
+// kod son gün səhər 04:00-da işləməyi dayandırırdı.
+function promoUntil(v: any): Date | null {
+  if (!v) return null;
+  const s = String(v);
+  const d = /^\d{4}-\d{2}-\d{2}$/.test(s) ? new Date(`${s}T23:59:59+04:00`) : new Date(s);
+  return isNaN(d.getTime()) ? null : d;
+}
+
 // Admin: promo kod olustur
 router.post('/admin/promo', requirePermission('promo'), async (req: AuthRequest, res: Response) => {
   try {
@@ -71,6 +95,8 @@ router.post('/admin/promo', requirePermission('promo'), async (req: AuthRequest,
       res.status(400).json({ success: false, message: 'Kod, tip və qiymət tələb olunur' });
       return;
     }
+    const bad = promoError(req.body, false);
+    if (bad) { res.status(400).json({ success: false, message: bad }); return; }
     const promo = await prisma.promoCode.create({
       data: {
         code: code.toUpperCase(),
@@ -80,11 +106,12 @@ router.post('/admin/promo', requirePermission('promo'), async (req: AuthRequest,
         minOrderAmount: minOrderAmount ? parseFloat(minOrderAmount) : null,
         maxDiscount: maxDiscount ? parseFloat(maxDiscount) : null,
         usageLimit: usageLimit ? parseInt(usageLimit) : null,
-        validUntil: validUntil ? new Date(validUntil) : null,
+        validUntil: promoUntil(validUntil),
       },
     });
     res.status(201).json({ success: true, promo });
   } catch (error: any) {
+    if (error?.code === 'P2002') { res.status(400).json({ success: false, message: 'Bu kod artıq mövcuddur' }); return; }
     res.status(400).json({ success: false, message: error.message });
   }
 });
@@ -113,7 +140,10 @@ router.put('/admin/promo/:id', requirePermission('promo'), async (req: AuthReque
     if (minOrderAmount !== undefined) data.minOrderAmount = minOrderAmount ? parseFloat(minOrderAmount) : null;
     if (maxDiscount !== undefined) data.maxDiscount = maxDiscount ? parseFloat(maxDiscount) : null;
     if (usageLimit !== undefined) data.usageLimit = usageLimit ? parseInt(usageLimit) : null;
-    if (validUntil !== undefined) data.validUntil = validUntil ? new Date(validUntil) : null;
+    if (validUntil !== undefined) data.validUntil = promoUntil(validUntil);
+    { const cur = await prisma.promoCode.findUnique({ where: { id }, select: { discountType: true } });
+      const bad = promoError({ ...req.body, discountType: discountType ?? cur?.discountType }, true);
+      if (bad) { res.status(400).json({ success: false, message: bad }); return; } }
     if (active !== undefined) data.active = !!active;
     try {
       const promo = await prisma.promoCode.update({ where: { id }, data });
