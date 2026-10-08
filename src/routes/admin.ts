@@ -18,7 +18,7 @@ import { PrismaClient, Prisma, UserType } from '@prisma/client';
 import { approveReturn, finalizeReturnRefund, rejectReturn } from '../services/returnFlow';
 import { visibilityOf } from '../services/listingVisibility';
 import bcrypt from 'bcryptjs';
-import { adminAuth, requireAdmin, requirePermission, requireSuperAdmin, AuthRequest, generateToken, createSession, isAdminPhone, ADMIN_MODULES, SENSITIVE_MODULES, canAdminLogin, nationalPhone, AdminModule } from '../middleware/auth';
+import { adminAuth, requireAdmin, requirePermission, requireAnyPermission, requireSuperAdmin, AuthRequest, generateToken, createSession, isAdminPhone, ADMIN_MODULES, SENSITIVE_MODULES, canAdminLogin, nationalPhone, AdminModule } from '../middleware/auth';
 import { authLimiter } from '../middleware/rateLimiter';
 import { createOtp } from '../services/otp';
 import { listFlags, setFlag, listNumbers, setNumber } from '../services/settings';
@@ -731,7 +731,8 @@ function sendCsv(res: Response, name: string, csv: string) {
   res.send(csv);
 }
 
-router.get('/admin/export/orders.csv', requirePermission('orders'), async (_req: AuthRequest, res: Response) => {
+// Maliyyə və ödəniş səhifələrindəki «Sifariş CSV» düyməsi də bunu çağırır.
+router.get('/admin/export/orders.csv', requireAnyPermission('orders', 'finance', 'finance_payouts'), async (_req: AuthRequest, res: Response) => {
   try {
     const orders = await prisma.order.findMany({ orderBy: { createdAt: 'desc' }, take: 5000, include: { buyer: { select: { name: true } }, seller: { select: { name: true } } } });
     const rows = orders.map((o) => ({ id: o.id, buyer: o.buyer?.name, seller: o.seller?.name, total: o.total, status: o.status, paymentMethod: o.paymentMethod, paymentStatus: o.paymentStatus, createdAt: o.createdAt.toISOString() }));

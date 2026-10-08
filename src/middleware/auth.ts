@@ -309,6 +309,18 @@ export function requireAdmin(req: AuthRequest, res: Response, next: NextFunction
 // də çıxış qazanırdı. Bunlar yalnız AÇIQ verilmiş icazə ilə açılır.
 export const SENSITIVE_MODULES: AdminModule[] = ['finance', 'finance_payouts', 'users', 'settings', 'audit', 'admins'];
 
+/** Sadalanan modullardan HƏR HANSI BİRİ kifayətdir (məs. sifariş CSV-si: sifarişlər və ya maliyyə). */
+export function requireAnyPermission(...modules: AdminModule[]) {
+  return (req: AuthRequest, res: Response, next: NextFunction) => {
+    loadAdmin(req, res).then((a) => {
+      if (!a) return;
+      const ok = a.isSuper || modules.some((m) => a.perms.includes(m) || (a.perms.length === 0 && !SENSITIVE_MODULES.includes(m)));
+      if (ok) { next(); return; }
+      res.status(403).json({ success: false, message: 'Bu bölmə üçün icazəniz yoxdur' });
+    }).catch(() => { if (!res.headersSent) res.status(403).json({ success: false, message: 'İcazə yoxdur' }); });
+  };
+}
+
 export function requirePermission(module: AdminModule) {
   return (req: AuthRequest, res: Response, next: NextFunction) => {
     loadAdmin(req, res).then((a) => {
