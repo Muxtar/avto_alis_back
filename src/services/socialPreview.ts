@@ -109,14 +109,24 @@ export async function fetchPreview(url: string, platform = ''): Promise<SocialPr
         if (done) break;
         total += value.byteLength;
         html += dec.decode(value, { stream: true });
-        if (/og:image/i.test(html) && /og:title/i.test(html)) break;  // lazım olan tapıldı
+        if (/og:image|twitter:image/i.test(html) && /og:title/i.test(html)) break;  // lazım olan tapıldı
       }
       reader.cancel().catch(() => {});
     } else {
       html = (await res.text()).slice(0, MAX_HTML_BYTES);
     }
 
-    const avatarUrl = metaContent(html, 'og:image');
+    // og:image yoxdursa twitter:image / image_src; nisbi ünvan tam URL-ə çevrilir.
+    let avatarUrl = metaContent(html, 'og:image') || metaContent(html, 'og:image:url')
+      || metaContent(html, 'twitter:image') || metaContent(html, 'twitter:image:src');
+    if (!avatarUrl) {
+      const m = html.match(/<link[^>]+rel=["']image_src["'][^>]*href=["']([^"']+)["']/i);
+      if (m) avatarUrl = decodeEntities(m[1]).trim();
+    }
+    if (avatarUrl) {
+      try { avatarUrl = new URL(avatarUrl, res.url || url).toString(); } catch { avatarUrl = null; }
+      if (avatarUrl && !/^https?:\/\//i.test(avatarUrl)) avatarUrl = null;
+    }
     const name = cleanName(metaContent(html, 'og:title'), platform);
     const rawDesc = metaContent(html, 'og:description') || metaContent(html, 'description');
     const description = rawDesc ? rawDesc.replace(/\s+/g, ' ').trim().slice(0, 160) : null;

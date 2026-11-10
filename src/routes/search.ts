@@ -7,6 +7,7 @@ import { imageToSearchQuery, visionSearchEnabled } from '../services/visionSearc
 import { adminAuth, AuthRequest } from '../middleware/auth';
 import { imageSearchLimiter, webSearchLimiter } from '../middleware/rateLimiter';
 import { searchWords } from '../services/searchTerms';
+import { allowImageHost } from './media';
 import { webSearch, webSearchEnabled, socialHandle, WebResult, type SearchMode } from '../services/webSearchAI';
 import { enrichProfiles, isApifyConfigured } from '../services/apifyProfiles';
 import { fetchPreviews, fallbackAvatar, probeProfiles, probeHandle, looksLikeHandle } from '../services/socialPreview';
@@ -247,6 +248,7 @@ router.post('/search/web', webSearchLimiter, adminAuth, async (req: AuthRequest,
           results = results.map((r) => {
             const p = previews.get(r.url);
             if (!p) return r;
+            if (p.avatarUrl) allowImageHost(p.avatarUrl);   // şəkil proxy-dən keçsin
             return { ...r, image: p.avatarUrl, description: r.description || p.description };
           });
         }

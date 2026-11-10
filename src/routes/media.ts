@@ -29,9 +29,33 @@ const ALLOWED_HOSTS = [
   'soliton.az', 'texnomart.az', 'optimal.az', 'amerikan.az', 'maxi.az',
   'umico.b-cdn.net', 'strgimgr.umico.az', 'b-cdn.net',   // Umico/Birmarket CDN
 ];
+// İnternet axtarışında MƏHSUL kartı şəklinin hostları (og:image) dinamik əlavə
+// olunur — ümumi axtarışda nəticə istənilən AZ saytından gələ bilər. Yalnız
+// açıq domen adları (IP / localhost / daxili adlar yox — SSRF qorunması).
+const dynamicHosts = new Map<string, number>();
+const DYNAMIC_TTL_MS = 24 * 60 * 60 * 1000;
+function isPublicHostname(h: string): boolean {
+  if (!h || h === 'localhost' || h.endsWith('.localhost') || h.endsWith('.local') || h.endsWith('.internal')) return false;
+  if (/^[\d.]+$/.test(h) || h.includes(':') || h.startsWith('[')) return false;  // IP literal
+  return /^[a-z0-9.-]+\.[a-z]{2,}$/i.test(h);
+}
+export function allowImageHost(rawUrl: string): void {
+  try {
+    const u = new URL(rawUrl);
+    const h = u.hostname.toLowerCase();
+    if (!/^https?:$/.test(u.protocol) || !isPublicHostname(h)) return;
+    dynamicHosts.set(h, Date.now());
+    if (dynamicHosts.size > 2000) {
+      const oldest = dynamicHosts.keys().next().value;
+      if (oldest !== undefined) dynamicHosts.delete(oldest);
+    }
+  } catch { /* keç */ }
+}
 function hostAllowed(host: string): boolean {
   const h = host.toLowerCase().replace(/^www\./, '');
-  return ALLOWED_HOSTS.some((a) => h === a || h.endsWith('.' + a));
+  if (ALLOWED_HOSTS.some((a) => h === a || h.endsWith('.' + a))) return true;
+  const at = dynamicHosts.get(host.toLowerCase());
+  return at !== undefined && Date.now() - at < DYNAMIC_TTL_MS;
 }
 
 // Yaddaş keşi — eyni avatar təkrar-təkrar çəkilməsin.

@@ -656,7 +656,7 @@ router.post('/me/listings', listingWriteLimiter, adminAuth, upload.array('images
 
     // VÖEN-li elan MÜTLƏQ təsdiqlənmiş biznes obyektinə bağlı olmalıdır (kartla satış).
     if (listingMode === 'voen' && !bizObjId) {
-      res.status(400).json({ success: false, message: 'VÖEN-li elan üçün təsdiqlənmiş biznes və ona bağlı obyekt seçilməlidir' }); return;
+      res.status(400).json({ success: false, message: 'Sahibkar elanı üçün təsdiqlənmiş biznes və ona bağlı obyekt seçilməlidir' }); return;
     }
 
     const files = req.files as Express.Multer.File[];
@@ -758,7 +758,7 @@ router.post('/me/listings', listingWriteLimiter, adminAuth, upload.array('images
       if (listing.stock <= 1) { res.status(400).json({ success: false, message: 'Birgə alış üçün stok 1-dən çox olmalıdır' }); return; }
       // Endirim fərqi kartla qaytarılır — ona görə elan kartla alına bilməlidir (VÖEN).
       if (!listing.businessId && !listing.businessObjectId) {
-        res.status(400).json({ success: false, message: 'Birgə alış yalnız VÖEN-li (biznes) elanlarda mümkündür — endirim fərqi kartla qaytarılır' }); return;
+        res.status(400).json({ success: false, message: 'Birgə alış yalnız Sahibkar elanlarında mümkündür — endirim fərqi kartla qaytarılır' }); return;
       }
       await prisma.listing.update({ where: { id: listing.id }, data: { groupBuyDays: gbDays } });
       (listing as any).groupBuyDays = gbDays;
@@ -914,7 +914,7 @@ router.put('/me/listings/:id', adminAuth, upload.array('images', 5), processImag
       if (gbDays && !tierCount) { res.status(400).json({ success: false, message: 'Birgə alış üçün ən azı bir say-qiymət pilləsi lazımdır' }); return; }
       if (gbDays && listing.stock <= 1) { res.status(400).json({ success: false, message: 'Birgə alış üçün stok 1-dən çox olmalıdır' }); return; }
       if (gbDays && !listing.businessId && !listing.businessObjectId) {
-        res.status(400).json({ success: false, message: 'Birgə alış yalnız VÖEN-li (biznes) elanlarda mümkündür — endirim fərqi kartla qaytarılır' }); return;
+        res.status(400).json({ success: false, message: 'Birgə alış yalnız Sahibkar elanlarında mümkündür — endirim fərqi kartla qaytarılır' }); return;
       }
       await prisma.listing.update({ where: { id: listing.id }, data: { groupBuyDays: gbDays } });
       (listing as any).groupBuyDays = gbDays;
