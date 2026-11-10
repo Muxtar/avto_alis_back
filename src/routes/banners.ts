@@ -3,6 +3,7 @@ import { PrismaClient } from '@prisma/client';
 import multer from 'multer';
 import { requirePermission, AuthRequest } from '../middleware/auth';
 import { processImages } from '../middleware/imageProcess';
+import { pushAdmins } from '../services/live';
 import fs from 'fs';
 import path from 'path';
 
@@ -44,11 +45,15 @@ function bannerImage(req: Request, res: Response, next: NextFunction) {
 // Public — ana səhifə karuseli üçün aktiv bannerlər.
 router.get('/banners', async (_req: Request, res: Response) => {
   try {
-    const banners = await prisma.banner.findMany({
-      where: { active: true },
-      orderBy: [{ sortOrder: 'asc' }, { createdAt: 'desc' }],
-    });
-    res.json({ success: true, banners });
+    const [banners, siteRows] = await Promise.all([
+      prisma.banner.findMany({
+        where: { active: true },
+        orderBy: [{ sortOrder: 'asc' }, { createdAt: 'desc' }],
+      }),
+      prisma.banner.count({ where: { kind: 'SITE' } }),
+    ]);
+    // siteConfigured=false → admin hələ sayt slaydı seçməyib, frontend hamısını göstərir.
+    res.json({ success: true, banners, siteConfigured: siteRows > 0 });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }
@@ -75,6 +80,8 @@ router.post('/admin/banners', requirePermission('banners'), bannerImage, process
         position: req.body.position === 'SIDE' ? 'SIDE' : 'MAIN',
         link: req.body.link ? String(req.body.link).trim() : null,
         title: req.body.title ? String(req.body.title).trim() : null,
+        subtitle: req.body.subtitle ? String(req.body.subtitle).trim().slice(0, 160) : null,
+        ctaLabel: req.body.ctaLabel ? String(req.body.ctaLabel).trim().slice(0, 40) : null,
         active: req.body.active !== 'false',
         sortOrder: req.body.sortOrder ? parseInt(String(req.body.sortOrder)) || 0 : 0,
       },
@@ -95,8 +102,41 @@ router.put('/admin/banners/:id', requirePermission('banners'), async (req: AuthR
     if (req.body.title !== undefined) data.title = req.body.title ? String(req.body.title).trim() : null;
     if (req.body.sortOrder !== undefined) data.sortOrder = parseInt(String(req.body.sortOrder)) || 0;
     if (req.body.position !== undefined) data.position = req.body.position === 'SIDE' ? 'SIDE' : 'MAIN';
+    if (req.body.subtitle !== undefined) data.subtitle = req.body.subtitle ? String(req.body.subtitle).trim().slice(0, 160) : null;
+    if (req.body.ctaLabel !== undefined) data.ctaLabel = req.body.ctaLabel ? String(req.body.ctaLabel).trim().slice(0, 40) : null;
     const banner = await prisma.banner.update({ where: { id }, data });
     res.json({ success: true, banner });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+// Admin — saytın hazır dizayn slaydını karuselə əlavə et (şəkil yüklənmir).
+// Mətn/link boş qalırsa frontend slaydın öz mətnini göstərir.
+router.post('/admin/banners/site', requirePermission('banners'), async (req: AuthRequest, res: Response) => {
+  try {
+    const siteKey = String(req.body?.siteKey || '').trim();
+    if (!/^[a-z0-9_-]{2,40}$/.test(siteKey)) { res.status(400).json({ success: false, message: 'Slayd seçin' }); return; }
+    const exists = await prisma.banner.findFirst({ where: { kind: 'SITE', siteKey } });
+    if (exists) { res.status(400).json({ success: false, message: 'Bu slayd artıq karuseldədir' }); return; }
+    const last = await prisma.banner.findFirst({ where: { position: 'MAIN' }, orderBy: { sortOrder: 'desc' }, select: { sortOrder: true } });
+    const banner = await prisma.banner.create({
+      data: { kind: 'SITE', siteKey, image: '', position: 'MAIN', active: true, sortOrder: (last?.sortOrder ?? -1) + 1 },
+    });
+    pushAdmins('banner', { id: banner.id });
+    res.status(201).json({ success: true, banner });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+// Admin — sıranı toplu yenilə (sürüşdür / yuxarı-aşağı).
+router.put('/admin/banners-order', requirePermission('banners'), async (req: AuthRequest, res: Response) => {
+  try {
+    const ids: number[] = (Array.isArray(req.body?.ids) ? req.body.ids : []).map(Number).filter((n: number) => Number.isInteger(n) && n > 0).slice(0, 200);
+    await prisma.$transaction(ids.map((id, i) => prisma.banner.update({ where: { id }, data: { sortOrder: i } })));
+    pushAdmins('banner', {});
+    res.json({ success: true });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }
@@ -107,7 +147,7 @@ router.delete('/admin/banners/:id', requirePermission('banners'), async (req: Au
   try {
     const id = parseInt(String(req.params.id));
     const b = await prisma.banner.findUnique({ where: { id } });
-    if (b?.image) { try { fs.unlinkSync(path.join(UPLOADS_DIR, b.image)); } catch { /* fayl yoxdur */ } }
+    if (b?.image && b.kind !== 'SITE') { try { fs.unlinkSync(path.join(UPLOADS_DIR, b.image)); } catch { /* fayl yoxdur */ } }
     await prisma.banner.delete({ where: { id } });
     res.json({ success: true });
   } catch (error: any) {

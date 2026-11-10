@@ -1760,10 +1760,15 @@ model Session {
 // Ana səhifə karuseli — admin şəkil/banner yükləyir (endirimlər və s.).
 model Banner {
   id        Int      @id @default(autoincrement())
-  image     String // yüklənmiş fayl adı
+  image     String // yüklənmiş fayl adı (SITE slaydında boş)
   position  String   @default("MAIN") // MAIN = əsas karusel, SIDE = sağ yan bannerlər
+  // IMAGE = admin yüklədiyi şəkil · SITE = saytın hazır dizayn slaydı (frontend-də kodla çəkilir)
+  kind      String   @default("IMAGE")
+  siteKey   String? // SITE: hansı hazır slayd (frontend/src/lib/siteSlides)
   link      String? // klikləyəndə keçid (opsional)
   title     String? // alt yazı / başlıq (opsional)
+  subtitle  String? // ikinci sətir (opsional)
+  ctaLabel  String? // düymə mətni (opsional, məs. «Kampaniyaya bax»)
   active    Boolean  @default(true)
   sortOrder Int      @default(0)
   createdAt DateTime @default(now())
