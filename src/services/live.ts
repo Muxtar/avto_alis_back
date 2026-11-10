@@ -58,7 +58,7 @@ export type AdminLiveKind =
   | 'listing' | 'identity' | 'seller' | 'business' | 'object' | 'credential' | 'social'
   | 'complaint' | 'support' | 'return' | 'order' | 'refund'
   | 'user' | 'payout' | 'comment' | 'promo' | 'banner' | 'page' | 'setting' | 'admin'
-  | 'outreach' | 'broadcast' | 'courier';
+  | 'outreach' | 'broadcast' | 'courier' | 'ad';
 
 const USER_TO_ADMIN_KIND: Partial<Record<LiveKind, AdminLiveKind>> = {
   listing: 'listing', identity: 'identity', seller: 'seller', business: 'business', object: 'object',

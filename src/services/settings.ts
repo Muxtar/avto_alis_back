@@ -218,6 +218,30 @@ export interface NumberDef {
 
 export const NUMBERS: NumberDef[] = [
   {
+    key: 'ad_main_price_per_day',
+    label: 'Ana səhifə reklamı — karusel (1 gün)',
+    description: 'İstifadəçinin öz elanını/obyektini ana səhifənin böyük karuselində reklam etməsinin GÜNLÜK qiyməti. Paket qiyməti = günlük qiymət × gün sayı (uzun paketlərdə endirim tətbiq olunur). 0 yazılsa pulsuzdur.',
+    default: 3, min: 0, max: 1000, unit: 'AZN', decimals: 2,
+  },
+  {
+    key: 'ad_side_price_per_day',
+    label: 'Ana səhifə reklamı — yan banner (1 gün)',
+    description: 'Karuselin sağındakı kiçik bannerdə reklamın GÜNLÜK qiyməti. 0 yazılsa pulsuzdur.',
+    default: 1.5, min: 0, max: 1000, unit: 'AZN', decimals: 2,
+  },
+  {
+    key: 'ad_main_max_slots',
+    label: 'Karuseldə eyni anda maks. reklam sayı',
+    description: 'Ana karuseldə eyni vaxtda göstərilən istifadəçi reklamlarının maksimum sayı. Dolu olanda yeni reklam qəbul edilmir (ən tez boşalma tarixi göstərilir).',
+    default: 8, min: 1, max: 50, unit: 'ədəd', decimals: 0,
+  },
+  {
+    key: 'ad_side_max_slots',
+    label: 'Yan bannerdə eyni anda maks. reklam sayı',
+    description: 'Yan bannerdə eyni vaxtda göstərilən istifadəçi reklamlarının maksimum sayı (yan banner növbə ilə dəyişir).',
+    default: 6, min: 1, max: 30, unit: 'ədəd', decimals: 0,
+  },
+  {
     key: 'business_fee_azn',
     label: 'Biznes yaratma haqqı',
     description:

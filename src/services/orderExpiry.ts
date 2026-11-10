@@ -11,6 +11,7 @@ import { closeExpiredGroups, settleDueGroups, syncGroupWindows } from './groupBu
 import { notifyExpiredListings } from './listingExpiry';
 import { runDisputeDeadlines } from './disputeDecision';
 import { expireVips } from './vip';
+import { expireAds } from './homeAds';
 import { releaseReferralLedgers } from './referral';
 import { autoConfirmPickups } from './pickupFlow';
 import { expireOffers } from './priceOffer';
@@ -297,6 +298,8 @@ export function startOrderExpiryJob() {
     expireOffers().catch(() => {});
     // Müddəti bitmiş VIP elanları adi elana çevir.
     expireVips().catch(() => {});
+    // Müddəti bitmiş ana səhifə reklamlarını bağla.
+    expireAds().catch(() => {});
   };
   setTimeout(run, 30 * 1000);              // start-dan 30 san sonra ilk yoxlama
   setInterval(run, 10 * 60 * 1000);        // sonra hər 10 dəqiqə

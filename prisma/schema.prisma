@@ -261,6 +261,7 @@ model User {
   savedCards    SavedCard[]
   consents      UserConsent[]
   businessFees  BusinessFee[]
+  homeAds       HomeAd[]
 
   // Peşə qrupları ilk dəfə sinxronlaşdırılıb (köhnə istifadəçilər üçün bir dəfəlik avtomatik qoşulma).
   proGroupsSyncedAt DateTime?
@@ -1788,7 +1789,7 @@ model BusinessFee {
   userId Int
   amount Float // ödəniş anındakı tarif (sonradan tarif dəyişsə də bu qalır)
 
-  /// BUSINESS = biznes yaratma haqqı · VERIFF = Veriff ilə kimlik doğrulaması · VIP = elanı önə çıxarma
+  /// BUSINESS = biznes yaratma haqqı · VERIFF = Veriff ilə kimlik doğrulaması · VIP = elanı önə çıxarma · AD = ana səhifə reklamı
   purpose String @default("BUSINESS")
 
   // UNPAID → PAID (ödənildi, hələ istifadə olunmayıb) → USED (biznes yaradıldı)
@@ -1803,6 +1804,7 @@ model BusinessFee {
   businessId Int? // hansı biznes üçün xərclənib (rədd olunsa geri açılır)
   listingId  Int? // VIP: hansı elan üçün
   vipDays    Int? // VIP: neçə günlük paket
+  adId       Int? // AD: hansı ana səhifə reklamı üçün
   paidAt     DateTime?
   usedAt     DateTime?
   createdAt  DateTime  @default(now())
@@ -2202,4 +2204,38 @@ model StaffActivity {
 
   @@index([businessId, createdAt])
   @@index([businessId, userId, createdAt])
+}
+
+// ── Ana səhifə reklamı (ödənişli) ─────────────────────────────────────────────
+// İstənilən istifadəçi (fərdi və ya sahibkar) öz ELANINI və ya OBYEKTİNİ ana
+// səhifənin karuselində (MAIN) və ya yan bannerində (SIDE) reklam edir.
+// Axın: UNPAID (ödəniş gözləyir) → PENDING_REVIEW (ödənildi, admin yoxlayır)
+//       → ACTIVE (göstərilir, endsAt-a qədər) → EXPIRED.
+//       Admin rədd etsə REJECTED (refundStatus=PENDING → pul qaytarılmalıdır).
+model HomeAd {
+  id            Int       @id @default(autoincrement())
+  userId        Int
+  placement     String    @default("MAIN") // MAIN = əsas karusel · SIDE = yan banner
+  sourceType    String // LISTING | OBJECT
+  listingId     Int?
+  objectId      Int?
+  sellerKind    String    @default("INDIVIDUAL") // INDIVIDUAL (Fərdi) | BUSINESS (Sahibkar)
+  headline      String
+  subtitle      String?
+  image         String? // xüsusi banner şəkli (yüklənibsə); yoxdursa elanın şəkli
+  days          Int
+  amount        Float     @default(0)
+  status        String    @default("UNPAID")
+  rejectReason  String?
+  refundStatus  String? // PENDING | DONE — rədd edilmiş ödənişli reklam
+  startsAt      DateTime?
+  endsAt        DateTime?
+  impressions   Int       @default(0)
+  clicks        Int       @default(0)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([status, placement, endsAt])
+  @@index([userId])
 }

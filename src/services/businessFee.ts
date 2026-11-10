@@ -19,6 +19,7 @@
 
 import { PrismaClient } from '@prisma/client';
 import { activateVip } from './vip';
+import { markAdPaid } from './homeAds';
 import { getNumber } from './settings';
 
 const prisma = new PrismaClient();
@@ -165,6 +166,13 @@ export async function settleBusinessFee(
         const row = await prisma.businessFee.findUnique({ where: { id: f.id }, select: { listingId: true, vipDays: true } });
         await prisma.businessFee.update({ where: { id: f.id }, data: { status: 'USED', paidAt: new Date(), usedAt: new Date() } });
         if (row?.listingId && row.vipDays) await activateVip(row.listingId, row.vipDays).catch((e) => console.error('[vip] aktivləşmədi', f.id, e?.message));
+        continue;
+      }
+      // Ana səhifə reklamı — ödəniş təsdiqləndi, reklam admin yoxlamasına keçir.
+      if (f.purpose === 'AD') {
+        const row = await prisma.businessFee.findUnique({ where: { id: f.id }, select: { adId: true } });
+        await prisma.businessFee.update({ where: { id: f.id }, data: { status: 'USED', paidAt: new Date(), usedAt: new Date() } });
+        if (row?.adId) await markAdPaid(row.adId).catch((e) => console.error('[ad] ödəniş qeyd olunmadı', f.id, e?.message));
         continue;
       }
       await prisma.businessFee.update({ where: { id: f.id }, data: { status: 'PAID', paidAt: new Date() } });
