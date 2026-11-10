@@ -161,6 +161,12 @@ model User {
   avatar                String? // profil şəkli
   cvFile                String? // istifadəçinin CV-si (PDF/şəkil)
   cvPublic              Boolean               @default(false) // CV public profildə görünsünmü
+  // Qapı QR kodu (fərdi satıcı) — evin qapısına yapışdırılan QR skan ediləndə
+  // bu ünvan və satıcının fərdi (VÖEN-siz) elanları göstərilir. Yalnız homeQrEnabled=true olanda ictimaidir.
+  homeQrEnabled         Boolean               @default(false)
+  homeQrAddress         String?
+  homeQrLat             Float?
+  homeQrLng             Float?
   idNumber              String? // kimlik / FIN (köhnə — indi şəkil istənir)
   birthDate             DateTime? // doğum tarixi (vəsiqədən AI ilə)
   gender                String? // cinsiyyət (vəsiqədən AI ilə: "Kişi"/"Qadın")

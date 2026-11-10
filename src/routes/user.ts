@@ -1617,4 +1617,39 @@ router.post('/me/logout', adminAuth, async (req: AuthRequest, res: Response) => 
   }
 });
 
+// ── Qapı QR kodu (fərdi satıcı) ──────────────────────────────────────────────
+// Fərdi satıcı ev ünvanını yazır və çap üçün QR alır (/seller/:id?ev=1).
+// Ünvan YALNIZ satıcı aktivləşdirəndə ictimai olur; söndürəndə gizlənir.
+router.get('/user/home-qr', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const u = await prisma.user.findUnique({
+      where: { id: req.adminId! },
+      select: { id: true, name: true, homeQrEnabled: true, homeQrAddress: true, homeQrLat: true, homeQrLng: true },
+    });
+    if (!u) { res.status(404).json({ success: false, message: 'İstifadəçi tapılmadı' }); return; }
+    const individualCount = await prisma.listing.count({ where: { userId: u.id, businessId: null, businessObjectId: null } });
+    res.json({ success: true, ...u, individualCount });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
+router.put('/user/home-qr', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const enabled = !!req.body?.enabled;
+    const address = String(req.body?.address || '').replace(/\s+/g, ' ').trim().slice(0, 200);
+    const num = (v: any) => { const n = Number(v); return v === null || v === undefined || v === '' || !Number.isFinite(n) ? null : n; };
+    let lat = num(req.body?.lat), lng = num(req.body?.lng);
+    if (lat !== null && (lat < -90 || lat > 90)) lat = null;
+    if (lng !== null && (lng < -180 || lng > 180)) lng = null;
+    if (enabled && address.length < 5) {
+      res.status(400).json({ success: false, message: 'Ev ünvanını yazın (ən azı 5 simvol)' }); return;
+    }
+    const u = await prisma.user.update({
+      where: { id: req.adminId! },
+      data: { homeQrEnabled: enabled, homeQrAddress: address || null, homeQrLat: lat, homeQrLng: lng },
+      select: { id: true, homeQrEnabled: true, homeQrAddress: true, homeQrLat: true, homeQrLng: true },
+    });
+    res.json({ success: true, ...u });
+  } catch (e: any) { res.status(400).json({ success: false, message: e.message }); }
+});
+
 export default router;

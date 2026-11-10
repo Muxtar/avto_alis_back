@@ -271,7 +271,18 @@ router.get('/sellers/:id', async (req: Request, res: Response) => {
     const skip = (page - 1) * limit;
     // Ana səhifə ilə EYNİ qayda (services/listingVisibility): əvvəl burada biznes/obyekt
     // aktivliyi yoxlanmırdı — deaktiv obyektin elanı profildə görünür, ana səhifədə yox idi.
-    const sellerListingsWhere: Prisma.ListingWhereInput = { userId: user.id, ...publicListingWhere() };
+    // Qapı QR kodu (?ev=1): satıcı aktivləşdiribsə ev ünvanı + YALNIZ fərdi (biznesə bağlı olmayan) elanlar.
+    let home: { address: string; lat: number | null; lng: number | null } | null = null;
+    if (String(req.query.ev || '') === '1') {
+      const h = await prisma.user.findUnique({
+        where: { id: user.id },
+        select: { homeQrEnabled: true, homeQrAddress: true, homeQrLat: true, homeQrLng: true },
+      });
+      if (h?.homeQrEnabled && h.homeQrAddress) home = { address: h.homeQrAddress, lat: h.homeQrLat, lng: h.homeQrLng };
+    }
+    const sellerListingsWhere: Prisma.ListingWhereInput = home
+      ? { userId: user.id, businessId: null, businessObjectId: null, ...publicListingWhere() }
+      : { userId: user.id, ...publicListingWhere() };
     const [listings, listingsTotal] = await Promise.all([
       prisma.listing.findMany({
         where: sellerListingsWhere,
@@ -296,7 +307,7 @@ router.get('/sellers/:id', async (req: Request, res: Response) => {
 
     // Etibarlılıq: şikayətlər + iadə davranışı (services/sellerReputation).
     const reputation = await sellerReputation(user.id).catch(() => null);
-    res.json({ user, listings, stats, reputation, page, totalPages: Math.ceil(listingsTotal / limit) });
+    res.json({ user, listings, stats, reputation, home, page, totalPages: Math.ceil(listingsTotal / limit) });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }
