@@ -15,13 +15,15 @@
 
 import Anthropic from '@anthropic-ai/sdk';
 import { resolveFlag } from './settings';
+import { searchShops, fetchProductPage, looksLikeProductUrl } from './shopScrapers';
 
 export interface WebResult {
   title: string;
   url: string;
   snippet: string;
-  price: number | null;   // AZN — səhifədə görünürsə
-  site: string;           // mənbə sayt (tap.az, turbo.az ...)
+  price: number | null;   // saytdakı qiymət (canlı) — səhifədə görünürsə
+  currency?: string;      // qiymətin valyutası saytda necədirsə (AZN, USD ...)
+  site: string;          // mənbə sayt (tap.az, turbo.az ...)
   kind?: 'product' | 'social';  // məhsul elanı, yoxsa şəxsin sosial profili
   platform?: string;      // social üçün: instagram/facebook/linkedin/tiktok/x/youtube/telegram
   handle?: string;        // social üçün: istifadəçi adı (profil şəkli üçün də lazımdır)
@@ -71,7 +73,8 @@ const AI_MODEL = process.env.WEB_SEARCH_MODEL || 'claude-opus-4-8';
 interface CacheEntry { at: number; ttl: number; data: WebSearchResponse; }
 const cache = new Map<string, CacheEntry>();
 const CACHE_MAX = 500;                       // maks. sorğu sayı (yaddaş limiti)
-const TTL_HIT = 12 * 60 * 60 * 1000;         // nəticə tapıldı → 12 saat
+// Qiymət saytdakı ilə EYNİ olmalıdır — ona görə nəticə qısa saxlanılır.
+const TTL_HIT = 20 * 60 * 1000;              // nəticə tapıldı → 20 dəqiqə
 const TTL_EMPTY = 60 * 60 * 1000;            // boş nəticə → 1 saat (sonra sayt yeni elan əlavə edə bilər)
 const TTL_ERROR = 2 * 60 * 1000;             // xəta → 2 dəqiqə (keçici ola bilər, uzun saxlama)
 
@@ -361,10 +364,17 @@ async function webSearchUncached(q: string, mode: SearchMode = 'auto'): Promise<
     return { ok: true, mode: 'person', summary: '', results: [] };  // deaktiv → boş
   }
 
-  // ── Məhsul — əvvəlcə Tavily (aktivsə), sonra Claude ehtiyat (aktivsə) ──
-  if (tavilyOn && hasTavily) return webSearchTavily(q);
-  if (claudeOn && hasClaude) return webSearchClaude(q);
-  return { ...EMPTY, error: 'İnternet axtarışı hazırda deaktivdir.' };
+  // ── Məhsul — AZ saytlarında birbaşa axtarış (açarsız, canlı qiymət) +
+  //    Tavily (aktivsə) əlavə mağazalar üçün. Claude yalnız heç nə tapılmasa.
+  const products = await webSearchProducts(q, tavilyOn && hasTavily);
+  if (products.ok && products.results.length) return products;
+  if (claudeOn && hasClaude) {
+    const c = await webSearchClaude(q);
+    // Claude-un linkləri də açılıb yoxlanılır — qiymət səhifədən gəlsin.
+    const verified = c.ok && c.results.length ? await verifyLinks(c.results) : [];
+    if (verified.length) return { ...c, results: pickDiverse(verified, MAX_RESULTS) };
+  }
+  return products.ok ? products : { ...EMPTY, error: products.error || 'İnternet axtarışı alınmadı.' };
 }
 
 // ── Şəxs axtarışı (public sosial media profilləri) ───────────────────────────
@@ -444,23 +454,6 @@ async function webSearchPerson(q: string): Promise<WebSearchResponse> {
 // ── Tavily yolu (əsas) ───────────────────────────────────────────────────────
 const TAVILY_URL = 'https://api.tavily.com/search';
 
-// Snippet/başlıqdan AZN qiymətini çıxaran ehtiyat regex (Haiku olmayanda və ya
-// tapmadıqda). Yalnız açıq AZN/manat işarəsi olan qiyməti qəbul edir.
-function extractPriceAzn(text: string): number | null {
-  if (!text) return null;
-  // Rəqəm şablonu: minlik ayırıcılı (28 500 / 32.000 / 1,250) VƏ YA sadə (12500,50).
-  // Sərbəst [\d\s.,]* işlətmirik — əks halda "2015, 28 500 AZN" kimi mətndə
-  // iki ayrı rəqəmi birləşdirib yanlış qiymət verirdi.
-  const NUM = String.raw`\d{1,3}(?:[ .,]\d{3})+(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?`;
-  const m = text.match(new RegExp(`(${NUM})\\s*(?:azn|₼|manat|man\\b)`, 'i'))      // 28 500 AZN
-        || text.match(new RegExp(`(?:azn|₼|manat)\\s*(${NUM})`, 'i'))              // AZN 45 000
-        || text.match(new RegExp(`(?:qiym[əe]t|price)\\D{0,4}(${NUM})`, 'i'));     // Qiymət: 12500
-  if (!m) return null;
-  const n = parseFloat(
-    m[1].replace(/[^\d.,]/g, '').replace(/[.\s](?=\d{3}\b)/g, '').replace(',', '.'),
-  );
-  return Number.isFinite(n) && n > 0 ? n : null;
-}
 
 // Snippet/məzmundan satıcı adını çıxaran ehtiyat regex (səhifədə açıq yazılıbsa).
 // Tapılmasa null — uydurmuruq. Yalnız "Satıcı: X" / "Seller: X" formatları.
@@ -507,72 +500,133 @@ async function tavilyQuery(q: string, shopsOnly: boolean): Promise<{ results: an
   }
 }
 
-async function webSearchTavily(q: string): Promise<WebSearchResponse> {
-  console.log('[webSearch] Tavily başladı — sorğu:', q);
+// ── Məhsul axtarışı (əsas yol) ───────────────────────────────────────────────
+// 1) tap.az / lalafo.az / turbo.az-da BİRBAŞA axtarış — konkret elan linki,
+//    saytın öz qiyməti və şəkli (canlı, elana daxil olanda görünənlə eyni).
+// 2) Tavily (aktivsə) — digər AZ mağazaları; HƏR link açılıb yoxlanılır:
+//    məhsul səhifəsi deyilsə / ana səhifəyə atırsa atılır, qiymət və şəkil
+//    snippet-dən YOX, səhifənin özündən götürülür.
+// Nəticə: ən azı 5 (mövcuddursa), maksimum 10 birbaşa məhsul linki.
+const MIN_RESULTS = 5;
+const MAX_RESULTS = 10;
+// Yalnız SIRALAMA üçün təxmini məzənnə — göstərilən qiymət saytdakı kimi qalır.
+const SORT_RATE: Record<string, number> = { AZN: 1, USD: 1.7, EUR: 1.85, RUB: 0.02 };
 
-  // 1) ƏVVƏLCƏ Azərbaycan alış-veriş saytları (tap.az, turbo.az, bina.az,
-  //    lalafo.az, umico.az, kontakt.az ...) — burada nəticə ELANDIR, yəni
-  //    ad + qiymət + satıcı çıxarmaq mümkündür.
-  let first = await tavilyQuery(q, true);
-  if ('error' in first) return { ...EMPTY, error: first.error };
-  let rawResults: any[] = first.results;
+function normUrl(u: string): string {
+  try { const x = new URL(u); return (x.hostname.replace(/^www\./, '') + x.pathname).replace(/\/+$/, '').toLowerCase(); }
+  catch { return u; }
+}
 
-  // 2) Həmin saytlarda tapılmadısa — ümumi AZ axtarışı (əlavə 1 kredit YALNIZ
-  //    burada sərf olunur; adətən birinci addım kifayət edir).
-  if (rawResults.length === 0) {
-    console.log('[webSearch] alış-veriş saytlarında tapılmadı → ümumi AZ axtarışı');
-    const second = await tavilyQuery(q, false);
-    if ('error' in second) return { ...EMPTY, error: second.error };
-    rawResults = second.results;
-  }
-
-  // Buraxılır: AZ saytları (məhsul/elan) VƏ YA public sosial media profil linkləri
-  // (şəxs/ixtisas axtarışı — yalnız açıq profil linki, scrape yox).
-  const azResults = rawResults.filter(
-    (r) => r && typeof r.url === 'string' && /^https?:\/\//i.test(r.url) && (isAzResult(r.url) || isSocialResult(r.url)),
-  );
-
-  if (rawResults.length > 0 && azResults.length === 0) {
-    console.warn('[webSearch] Tavily: nəticələr AZ filtrindən keçmədi — sorğu:', q);
-    return {
-      ok: true,
-      mode: 'product',
-      summary: 'Nəticələr tapıldı, amma Azərbaycana aid olmadığı üçün göstərilmədi.',
-      results: [],
-    };
-  }
-  if (azResults.length === 0) return { ok: true, mode: 'product', summary: '', results: [] };
-
-  // Yalnız linklər (title + url + site + varsa qiymət + varsa satıcı). Xülasə/AI
-  // təmizləmə YOXDUR — istifadəçi ən uyğun linkləri istəyir, kredit qənaəti üçün
-  // Haiku çağırılmır.
-  let items: WebResult[] = azResults.slice(0, 8).map((r) => {
+// Axtarış motorunun linklərini açıb yoxlayır (paralel). Yalnız real məhsul
+// səhifələri qalır; qiymət/şəkil/başlıq səhifənin özündən gəlir.
+async function verifyLinks(raw: { url: string; title?: string; content?: string }[], limit = 8): Promise<WebResult[]> {
+  const seen = new Set<string>();
+  const cand = raw.filter((r) => {
+    if (!r || typeof r.url !== 'string' || !/^https?:\/\//i.test(r.url)) return false;
+    if (!isAzResult(r.url) || !looksLikeProductUrl(r.url)) return false;
+    const k = normUrl(r.url);
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  }).slice(0, limit);
+  const pages = await Promise.allSettled(cand.map((r) => fetchProductPage(r.url)));
+  const out: WebResult[] = [];
+  pages.forEach((p, i) => {
+    if (p.status !== 'fulfilled' || !p.value || !p.value.isProduct) return;
+    const pg = p.value;
     let site = '';
-    try { site = new URL(r.url).hostname.replace(/^www\./, ''); } catch {}
-    const content = String(r.content || '');
-    return {
-      title: String(r.title || r.url).slice(0, 160),
-      url: String(r.url),
-      snippet: content.slice(0, 120),   // qısa izah (1 sətir)
-      price: extractPriceAzn(`${content} ${r.title || ''}`),
+    try { site = new URL(pg.url).hostname.replace(/^www\./, ''); } catch {}
+    out.push({
+      title: String(pg.title || cand[i].title || pg.url).slice(0, 160),
+      url: pg.url,                       // yönləndirmədən sonrakı son ünvan
+      snippet: String(cand[i].content || '').slice(0, 120),
+      price: pg.price,                   // YALNIZ səhifədən — snippet qiyməti işlədilmir
+      currency: pg.currency,
       site: site.slice(0, 60),
-      kind: 'product' as const,
-      seller: extractSeller(`${content} ${r.title || ''}`),
-    };
+      kind: 'product',
+      image: pg.image,
+      seller: extractSeller(String(cand[i].content || '')),
+    });
+  });
+  return out;
+}
+
+async function tavilyProductLinks(q: string): Promise<{ results: WebResult[]; error?: string }> {
+  const first = await tavilyQuery(q, true);
+  if ('error' in first) return { results: [], error: first.error };
+  let raw = first.results;
+  // Mağaza saytlarında az nəticə varsa — ümumi AZ axtarışı da (əlavə 1 kredit).
+  if (raw.length < 4) {
+    const second = await tavilyQuery(q, false);
+    if (!('error' in second)) raw = raw.concat(second.results);
+  }
+  return { results: await verifyLinks(raw) };
+}
+
+function sortValue(r: WebResult): number {
+  if (r.price == null) return Number.POSITIVE_INFINITY;
+  return r.price * (SORT_RATE[r.currency || 'AZN'] ?? 1);
+}
+
+// Aksesuar/ehtiyat hissəsi kimi kəskin ucuz uyğunsuzları atır ("iPhone 15" axtarışında
+// 25 AZN-lik qab). Yalnız kifayət qədər qiymətli nəticə olanda tətbiq olunur.
+function dropOutliers(items: WebResult[]): WebResult[] {
+  const vals = items.map(sortValue).filter(Number.isFinite).sort((a, b) => a - b);
+  if (vals.length < 4) return items;
+  const median = vals[Math.floor(vals.length / 2)];
+  const kept = items.filter((r) => { const v = sortValue(r); return !Number.isFinite(v) || v >= median * 0.25; });
+  return kept.length >= MIN_RESULTS ? kept : items;
+}
+
+// Mənbələr arasında növbə ilə seçir ki, bütün nəticələr bir saytdan olmasın;
+// sonra ucuzdan bahaya sıralayır (qiyməti bilinməyənlər sonda).
+function pickDiverse(items: WebResult[], max: number): WebResult[] {
+  const bySite = new Map<string, WebResult[]>();
+  for (const r of items) {
+    const arr = bySite.get(r.site) || [];
+    arr.push(r);
+    bySite.set(r.site, arr);
+  }
+  for (const arr of bySite.values()) arr.sort((a, b) => sortValue(a) - sortValue(b));
+  const queues = [...bySite.values()];
+  const picked: WebResult[] = [];
+  while (picked.length < max && queues.some((qq) => qq.length)) {
+    for (const qq of queues) {
+      const r = qq.shift();
+      if (r) picked.push(r);
+      if (picked.length >= max) break;
+    }
+  }
+  return picked.sort((a, b) => sortValue(a) - sortValue(b));
+}
+
+async function webSearchProducts(q: string, useTavily: boolean): Promise<WebSearchResponse> {
+  console.log('[webSearch] məhsul axtarışı — sorğu:', q, '| tavily:', useTavily);
+  const [shop, tav] = await Promise.all([
+    searchShops(q).catch((e) => { console.error('[webSearch] shops:', e?.message); return [] as WebResult[]; }),
+    useTavily ? tavilyProductLinks(q) : Promise.resolve<{ results: WebResult[]; error?: string }>({ results: [] }),
+  ]);
+
+  const seen = new Set<string>();
+  const merged = [...shop, ...tav.results].filter((r) => {
+    const k = normUrl(r.url);
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
   });
 
-  // Ucuzdan bahaya; qiyməti bilinməyənlər sona. Sonra ən uyğun 5 link.
-  items.sort((a, b) => {
-    if (a.price == null && b.price == null) return 0;
-    if (a.price == null) return 1;
-    if (b.price == null) return -1;
-    return a.price - b.price;
-  });
-  items = items.slice(0, 5);
+  if (!merged.length) {
+    if (tav.error && !shop.length) return { ...EMPTY, error: tav.error };
+    return { ok: true, mode: 'product', summary: '', results: [] };
+  }
 
-  console.log('[webSearch] Tavily sorğu:', q, '| xam:', rawResults.length,
-    '| AZ:', azResults.length, '| göstərilən:', items.length);
-  return { ok: true, mode: 'product', summary: '', results: items };
+  // "X üçün qab/oyun", "for PS5" — aksesuar elanları; kifayət qədər əsl məhsul varsa çıxarılır.
+  const notAccessory = merged.filter((r) => !/(\süçün|\sucun|\sfor)\b/i.test(r.title));
+  const pool = notAccessory.length >= MIN_RESULTS ? notAccessory : merged;
+  const results = pickDiverse(dropOutliers(pool), MAX_RESULTS);
+  console.log('[webSearch] məhsul sorğu:', q, '| saytlar:', shop.length, '| tavily (yoxlanılmış):',
+    tav.results.length, '| göstərilən:', results.length);
+  return { ok: true, mode: 'product', summary: '', results };
 }
 
 // ── Claude yolu (ehtiyat — Tavily açarı yoxdursa) ─────────────────────────────
@@ -726,8 +780,9 @@ async function webSearchClaude(q: string): Promise<WebSearchResponse> {
   };
 }
 
+// Məhsul axtarışı AZ saytlarında birbaşa aparıldığı üçün açar tələb etmir.
 export function webSearchEnabled(): boolean {
-  return !!(process.env.TAVILY_API_KEY || process.env.ANTHROPIC_API_KEY);
+  return true;
 }
 
 // Admin test — konkret axtarış motorunu (flag-dan asılı olmadan) sınaqdan keçirir.
@@ -735,5 +790,5 @@ export function webSearchEnabled(): boolean {
 export async function runWebSearchTest(engine: 'tavily' | 'claude' | 'person', q: string): Promise<WebSearchResponse> {
   if (engine === 'person') return webSearchPerson(q);
   if (engine === 'claude') return webSearchClaude(q);
-  return webSearchTavily(q);
+  return webSearchProducts(q, true);
 }

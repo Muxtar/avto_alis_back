@@ -242,8 +242,12 @@ router.post('/search/web', webSearchLimiter, adminAuth, async (req: AuthRequest,
     // tap.az, umico.az, turbo.az və s. bunu krauler UA-ya verir (yoxlanılıb).
     // Alınmasa kart şəkilsiz göstərilir — axtarış pozulmur.
     if (data.mode === 'product' && results.length) {
+      // Saytdan birbaşa gələn şəkillər — proxy-yə icazə ver.
+      for (const r of results) if (r.image) allowImageHost(r.image);
       try {
-        const previews = await fetchPreviews(results.map((r) => ({ url: r.url })), 6);
+        // Şəkli hələ olmayanlar üçün og:image (ehtiyat).
+        const need = results.filter((r) => !r.image);
+        const previews = need.length ? await fetchPreviews(need.map((r) => ({ url: r.url })), 6) : new Map();
         if (previews.size) {
           results = results.map((r) => {
             const p = previews.get(r.url);
