@@ -52,7 +52,7 @@ function decodeEntities(s: string): string {
 // Pro" keçir, "iPhone 16" və "Telefon təmiri" keçmir). Rəqəmlər tam söz kimi
 // yoxlanılır ki, "15" → "150" ilə uyğun gəlməsin.
 function fold(s: string): string {
-  return s.toLowerCase()
+  return s.toLowerCase().replace(/\+/g, ' plus ')
     .replace(/ə/g, 'e').replace(/ı/g, 'i').replace(/i̇/g, 'i').replace(/ö/g, 'o').replace(/ü/g, 'u')
     .replace(/ş/g, 's').replace(/ç/g, 'c').replace(/ğ/g, 'g')
     .replace(/[^a-z0-9а-яё]+/g, ' ').trim();
@@ -65,8 +65,10 @@ export function matchesQuery(title: string, tokens: string[]): boolean {
   const words = fold(title).split(' ');
   const joined = ' ' + words.join(' ') + ' ';
   const glued = words.join('');               // "iphone15" yazılışı üçün
-  return tokens.every((t) => {
-    if (/^\d+$/.test(t)) return words.includes(t) || new RegExp(`[a-z]${t}(?!\\d)`).test(glued);
+  return tokens.every((t, i) => {
+    // Rəqəm: ayrıca söz ("iphone 15") və ya əvvəlki sorğu sözünə bitişik ("iphone15").
+    // "playstation 5" → "PS5" ilə UYĞUN GƏLMİR (əvvəl balans/oyun elanları keçirdi).
+    if (/^\d+$/.test(t)) return words.includes(t) || (i > 0 && new RegExp(`${tokens[i - 1]}${t}(?!\\d)`).test(glued));
     // Söz başlanğıcı ilə uyğunluq ("samsung" → "samsung", "galax" → "galaxy").
     return joined.includes(' ' + t) || (t.length >= 4 && glued.includes(t));
   });
@@ -153,22 +155,90 @@ async function searchLalafo(q: string, tokens: string[]): Promise<WebResult[]> {
 }
 
 // ── turbo.az (avtomobil) ────────────────────────────────────────────────────
-// Server HTML-i — kartlar `products-i` bloklarıdır. Açar söz filtri saytda
-// həmişə tətbiq olunmur, ona görə uyğunluq filtrimiz burada xüsusilə vacibdir.
-async function searchTurboAz(q: string, tokens: string[]): Promise<WebResult[]> {
-  const page = await getHtml(`https://turbo.az/autos?q%5Bkeywords%5D=${encodeURIComponent(q)}`);
-  if (!page) return [];
+// turbo.az söz axtarışını (`q[keywords]`) NƏZƏRƏ ALMIR — ona görə marka/model
+// ID-ləri ilə axtarırıq (Google-da "bmw x5" yazanda çıxan turbo.az səhifəsi kimi).
+// Kataloq (marka + model ID-ləri) turbo.az-ın axtarış formasından oxunur və
+// 24 saat keşlənir.
+interface TurboCatalog { makes: { id: string; name: string; f: string }[]; models: { id: string; make: string; name: string; f: string }[]; at: number }
+let turboCatalog: TurboCatalog | null = null;
+let turboCatalogLoading: Promise<TurboCatalog | null> | null = null;
+
+async function loadTurboCatalog(): Promise<TurboCatalog | null> {
+  if (turboCatalog && Date.now() - turboCatalog.at < 24 * 3600 * 1000) return turboCatalog;
+  if (turboCatalogLoading) return turboCatalogLoading;
+  turboCatalogLoading = (async () => {
+    const page = await getHtml('https://turbo.az/autos');
+    if (!page) return turboCatalog;   // köhnə kataloq varsa onu saxla
+    const mk = page.html.match(/<select[^>]*name="q\[make\]\[\]"[^>]*>([\s\S]*?)<\/select>/)?.[1] || '';
+    const md = page.html.match(/<select[^>]*name="q\[model\]\[\]"[^>]*>([\s\S]*?)<\/select>/)?.[1] || '';
+    const makes = [...mk.matchAll(/<option[^>]*value="(\d+)"[^>]*>([^<]+)</g)]
+      .map((m) => { const name = decodeEntities(m[2]).trim(); return { id: m[1], name, f: fold(name) }; });
+    const models = [...md.matchAll(/<option([^>]*)>([^<]+)</g)].map((m) => {
+      const make = m[1].match(/class="(\d+)"/)?.[1] || '';
+      const id = m[1].match(/value="(\d+)"/)?.[1] || '';
+      const name = decodeEntities(m[2]).trim();
+      return { id, make, name, f: fold(name) };
+    }).filter((x) => x.id && x.make);
+    if (!makes.length) return turboCatalog;
+    turboCatalog = { makes, models, at: Date.now() };
+    return turboCatalog;
+  })().finally(() => { turboCatalogLoading = null; });
+  return turboCatalogLoading;
+}
+
+const MAKE_ALIASES: Record<string, string> = {
+  mersedes: 'mercedes', merc: 'mercedes', benz: 'mercedes', 'mercedes benz': 'mercedes',
+  vw: 'volkswagen', folksvagen: 'volkswagen', 'range rover': 'land rover', vaz: 'lada', jiguli: 'lada',
+  toyot: 'toyota', hundai: 'hyundai', xendai: 'hyundai', sevrolet: 'chevrolet', shevrolet: 'chevrolet',
+};
+// Bu sözlər varsa, sorğu maşının özü yox, HİSSƏ/AKSESUARDIR ("bmw x5 təkər").
+const CAR_PART_WORDS = /\b(teker|tekerler|disk|diski|sin|sinler|fara|faralar|stop|bamper|kapot|qapi|guzgu|ehtiyat|hisse|hisseleri|akkumulyator|yag|filtr|sesbogucu|aksesuar|ortuk|chexol|cexol|kovrik|maqnitola|radio|sensor|kamera|oyuncaq|usaq|model|maket|naklejka|stiker|amortizator|motor|muherrik|karobka|suret qutusu|reng|tuning|kuzov|salon)\b/;
+
+export interface CarQuery { makeId: string; makeName: string; modelIds: string[]; modelName: string | null }
+
+// Sorğu konkret maşındırsa (marka tapıldı, hissə sözü yoxdur) marka/model ID-lərini qaytarır.
+export async function detectCar(q: string): Promise<CarQuery | null> {
+  let fq = ' ' + fold(q) + ' ';
+  for (const [k, v] of Object.entries(MAKE_ALIASES)) fq = fq.replace(new RegExp(` ${k} `, 'g'), ` ${v} `);
+  if (CAR_PART_WORDS.test(fq)) return null;
+  const cat = await loadTurboCatalog();
+  if (!cat) return null;
+  // Ən uzun uyğun marka adı ("land rover" > "rover"; "bmw alpina" > "bmw").
+  const make = cat.makes
+    .filter((m) => m.f.length >= 2 && fq.includes(' ' + m.f + ' '))
+    .sort((a, b) => b.f.length - a.f.length)[0]
+    || cat.makes.filter((m) => m.f.length >= 3 && fq.includes(' ' + m.f.split(' ')[0] + ' ')).sort((a, b) => a.f.length - b.f.length)[0];
+  if (!make) return null;
+  const rest = ' ' + fq.replace(' ' + make.f + ' ', ' ').trim() + ' ';
+  const glued = rest.replace(/\s+/g, '');
+  const models = cat.models.filter((m) => m.make === make.id && m.f);
+  // Model: əvvəlcə tam söz uyğunluğu ("x5"), sonra bitişik yazılış ("e class" ↔ "eclass").
+  // "e class" / "c klass" / "s sinif" → həmin sinfin BÜTÜN modelləri (E 200, E 220 ...).
+  const cls = rest.trim().match(/^([a-z]{1,3})[ -]?(class|klass|klas|sinif|sinfi)$/);
+  if (cls) {
+    const ids = models.filter((m) => new RegExp(`^${cls[1]} \\d`).test(m.f)).map((m) => m.id);
+    if (ids.length) return { makeId: make.id, makeName: make.name, modelIds: ids, modelName: `${cls[1].toUpperCase()}-Class` };
+  }
+  const model = models.filter((m) => rest.includes(' ' + m.f + ' ')).sort((a, b) => b.f.length - a.f.length)[0]
+    || models.filter((m) => m.f.replace(/\s+/g, '').length >= 2 && glued.includes(m.f.replace(/\s+/g, ''))).sort((a, b) => b.f.length - a.f.length)[0]
+    || null;
+  // Marka tapıldı, amma model yazılıb və tanınmadısa ("bmw iphone") — maşın deyil.
+  const leftover = rest.trim().split(' ').filter((w) => w && !/^\d{4}$/.test(w) && !(model && model.f.split(' ').includes(w)));
+  if (!model && leftover.some((w) => !/^(masin|avtomobil|satilir|qiymet|ucuz|baki)$/.test(w))) return null;
+  return { makeId: make.id, makeName: make.name, modelIds: model ? [model.id] : [], modelName: model?.name || null };
+}
+
+function parseTurboCards(html: string): WebResult[] {
   const out: WebResult[] = [];
-  const parts = page.html.split(/<div class="products-i[ "]/).slice(1);
-  for (const raw of parts) {
+  for (const raw of html.split(/<div class="products-i[ "]/).slice(1)) {
     const chunk = raw.slice(0, 4000);
     const href = chunk.match(/class="products-i__link"[^>]*href="(\/autos\/\d+[^"]*)"/)?.[1];
     if (!href) continue;
     const name = decodeEntities(chunk.match(/products-i__name[^>]*>([^<]+)</)?.[1] || '').trim();
     const attrs = decodeEntities(chunk.match(/products-i__attributes[^>]*>([^<]+)</)?.[1] || '').trim();
-    if (!name || !matchesQuery(`${name} ${attrs}`, tokens)) continue;
+    if (!name) continue;
     const priceTxt = decodeEntities(chunk.match(/products-i__price[^>]*>([^<]+)</)?.[1] || '');
-    const num = priceTxt.match(/[\d\s ]+/)?.[0];
+    const num = priceTxt.match(/\d[\d\s ]*/)?.[0];
     const cur = priceTxt.match(/₼|\$|€|AZN|USD|EUR/i)?.[0];
     out.push({
       title: `${name}${attrs ? ', ' + attrs : ''}`.slice(0, 160),
@@ -182,27 +252,47 @@ async function searchTurboAz(q: string, tokens: string[]): Promise<WebResult[]> 
       seller: null,
     });
   }
-  // Eyni elan VIP və adi blokda iki dəfə görünə bilər.
   const seen = new Set<string>();
   return out.filter((r) => (seen.has(r.url) ? false : (seen.add(r.url), true)));
 }
 
-const CAR_WORDS = /\b(bmw|mercedes|benz|audi|toyota|lexus|honda|nissan|hyundai|kia|ford|chevrolet|opel|volkswagen|vw|skoda|renault|peugeot|mazda|mitsubishi|subaru|volvo|jeep|porsche|tesla|lada|vaz|chery|geely|byd|infiniti|land rover|range rover|zeekr|genesis|haval|changan|prius|camry|corolla|cobalt|maşın|masin|avtomobil)\b/i;
+// Marka (+ model) üzrə turbo.az elanları, ən ucuzdan (saytın öz sıralaması).
+async function searchTurboAz(car: CarQuery): Promise<WebResult[]> {
+  const p = new URLSearchParams();
+  p.append('q[make][]', car.makeId);
+  for (const id of car.modelIds) p.append('q[model][]', id);
+  p.append('q[sort]', 'price_asc');
+  const page = await getHtml(`https://turbo.az/autos?${p.toString()}`);
+  if (!page) return [];
+  // Sinif axtarışında yalnız marka yoxlanılır (model adları müxtəlifdir).
+  const want = fold(`${car.makeName} ${car.modelIds.length === 1 ? car.modelName || '' : ''}`).split(' ').filter(Boolean);
+  // Kartın adı marka/modelə uyğun olmalıdır (reklam blokları başqa maşın göstərə bilər).
+  return parseTurboCards(page.html).filter((r) => matchesQuery(r.title.split(',')[0], want));
+}
 
 /**
- * Bütün mənbələrdə paralel axtarır. Hər mənbədən uyğun elanlar qaytarılır.
- * Avtomobil sorğusunda turbo.az da əlavə olunur.
+ * Bütün mənbələrdə paralel axtarır.
+ *  • Maşın sorğusu ("bmw x5") → turbo.az (marka/model üzrə, ən ucuzdan) + tap.az-ın
+ *    yalnız AVTOMOBİL bölməsi. Hissə/aksesuar/oyuncaq elanları gəlmir.
+ *  • Digər məhsullar → tap.az + lalafo.az.
  */
-export async function searchShops(q: string): Promise<WebResult[]> {
+export async function searchShops(q: string): Promise<{ results: WebResult[]; isCar: boolean }> {
   const tokens = queryTokens(q);
-  if (!tokens.length) return [];
-  const jobs: Promise<WebResult[]>[] = [searchTapAz(q, tokens), searchLalafo(q, tokens)];
-  if (CAR_WORDS.test(q)) jobs.push(searchTurboAz(q, tokens));
-  const settled = await Promise.allSettled(jobs);
+  if (!tokens.length) return { results: [], isCar: false };
+  const car = await detectCar(q).catch(() => null);
+  if (car) {
+    const [turbo, tap] = await Promise.all([
+      searchTurboAz(car).catch(() => [] as WebResult[]),
+      searchTapAz(q, tokens).catch(() => [] as WebResult[]),
+    ]);
+    const tapCars = tap.filter((r) => /\/elanlar\/neqliyyat\/avtomobiller\//.test(r.url));
+    console.log('[shopScrapers] maşın:', car.makeName, car.modelName || '-', '| turbo:', turbo.length, '| tap.az avto:', tapCars.length);
+    return { results: [...turbo, ...tapCars], isCar: true };
+  }
+  const settled = await Promise.allSettled([searchTapAz(q, tokens), searchLalafo(q, tokens)]);
   const lists = settled.map((s) => (s.status === 'fulfilled' ? s.value : []));
-  console.log('[shopScrapers] sorğu:', q, '| tap.az:', lists[0].length, '| lalafo:', lists[1].length,
-    lists[2] ? `| turbo: ${lists[2].length}` : '');
-  return lists.flat();
+  console.log('[shopScrapers] sorğu:', q, '| tap.az:', lists[0].length, '| lalafo:', lists[1].length);
+  return { results: lists.flat(), isCar: false };
 }
 
 // ── Ümumi məhsul səhifəsi yoxlaması (Tavily nəticələri üçün) ──────────────────
@@ -257,11 +347,16 @@ export async function fetchProductPage(url: string): Promise<ProductPage | null>
   if (Array.isArray(offer)) offer = offer[0];
   if (offer?.['@type'] === 'AggregateOffer') offer = { price: offer.lowPrice ?? offer.price, priceCurrency: offer.priceCurrency };
 
+  // turbo.az elan səhifəsində JSON-LD/meta qiymət yoxdur — görünən qiymət bloku.
+  const turboPrice = /turbo\.az$/.test(new URL(finalUrl).hostname)
+    ? decodeEntities(html.match(/product-price__i--bold[^>]*>([^<]+)</)?.[1] || '') : '';
+  const turboNum = turboPrice.match(/\d[\d\s\u00a0]*/)?.[0];
   const price = toNum(offer?.price)
+    ?? (turboNum ? toNum(turboNum) : null)
     ?? toNum(meta(html, 'product:price:amount'))
     ?? toNum(meta(html, 'og:price:amount'))
     ?? toNum(meta(html, 'price'));
-  const currency = normCurrency(offer?.priceCurrency || meta(html, 'product:price:currency') || meta(html, 'og:price:currency') || meta(html, 'priceCurrency'));
+  const currency = normCurrency(offer?.priceCurrency || turboPrice.match(/₼|\$|€/)?.[0] || meta(html, 'product:price:currency') || meta(html, 'og:price:currency') || meta(html, 'priceCurrency'));
 
   let image: string | null = null;
   const ldImg = ld?.image;
@@ -286,4 +381,26 @@ export function looksLikeProductUrl(raw: string): boolean {
     // Rəqəmsal ID və ya uzun slug (məhsul adı) — tipik məhsul səhifəsi.
     return /\d{3,}/.test(path) || segs.some((s) => s.split('-').length >= 3);
   } catch { return false; }
+}
+
+// ── Dəqiqlik süzgəci ────────────────────────────────────────────────────────
+// Google-da "iphone 15" yazanda əvvəlcə məhz iPhone 15 çıxır — "15 Pro Max",
+// ekran, qab, təmir yox. Burada da: sorğuda olmayan VARİANT sözü (pro, max,
+// ultra, plus, fe ...) və ya HİSSƏ/AKSESUAR sözü başlıqda varsa elan atılır.
+// Bu sərt süzgəcdən sonra 5-dən az qalırsa, mərhələli yumşaldılır.
+const VARIANT_WORDS = ['pro', 'max', 'plus', 'ultra', 'mini', 'fe', 'lite', 'air', 'se', 'note', 'slim', 'digital', 'portal', 'edge', 'neo'];
+const PART_WORDS = ['ekran', 'ekrani', 'ekranlari', 'displey', 'batareya', 'batareyasi', 'korpus', 'qab', 'qabi', 'kabro', 'cexol', 'chexol', 'case',
+  'suse', 'plyonka', 'temir', 'temiri', 'ehtiyat', 'hisse', 'hisseleri', 'adapter', 'kabel', 'sarj', 'sarjer', 'ucun', 'for', 'oyun', 'oyunlari',
+  'disk', 'pult', 'joystick', 'dualsense', 'kreditle', 'alisi', 'alinir', 'aliram', 'icare', 'icaresi', 'kiraye', 'stiker', 'naklejka', 'qutu', 'qutusu', 'maket', 'oyuncaq',
+  'oyunu', 'balans', 'artirilmasi', 'abuneliyi', 'abunelik', 'sehifesi', 'hesab', 'hesabi', 'kod', 'kodu', 'hediyye', 'gift', 'card'];
+
+export function refineRelevance(items: WebResult[], q: string, min = 5): WebResult[] {
+  const qw = new Set(queryTokens(q));
+  const words = (t: string) => fold(t).split(' ');
+  const hasForeign = (t: string, list: string[]) => words(t).some((w) => list.includes(w) && !qw.has(w));
+  const noParts = items.filter((r) => !hasForeign(r.title, PART_WORDS));
+  const strict = noParts.filter((r) => !hasForeign(r.title, VARIANT_WORDS));
+  if (strict.length >= min) return strict;
+  if (noParts.length >= min) return noParts;
+  return items;
 }

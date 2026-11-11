@@ -15,7 +15,7 @@
 
 import Anthropic from '@anthropic-ai/sdk';
 import { resolveFlag } from './settings';
-import { searchShops, fetchProductPage, looksLikeProductUrl } from './shopScrapers';
+import { searchShops, fetchProductPage, looksLikeProductUrl, refineRelevance, matchesQuery, queryTokens } from './shopScrapers';
 
 export interface WebResult {
   title: string;
@@ -372,7 +372,7 @@ async function webSearchUncached(q: string, mode: SearchMode = 'auto'): Promise<
     const c = await webSearchClaude(q);
     // Claude-un linkləri də açılıb yoxlanılır — qiymət səhifədən gəlsin.
     const verified = c.ok && c.results.length ? await verifyLinks(c.results) : [];
-    if (verified.length) return { ...c, results: pickDiverse(verified, MAX_RESULTS) };
+    if (verified.length) return { ...c, results: cheapest(verified, MAX_RESULTS) };
   }
   return products.ok ? products : { ...EMPTY, error: products.error || 'İnternet axtarışı alınmadı.' };
 }
@@ -507,8 +507,9 @@ async function tavilyQuery(q: string, shopsOnly: boolean): Promise<{ results: an
 //    məhsul səhifəsi deyilsə / ana səhifəyə atırsa atılır, qiymət və şəkil
 //    snippet-dən YOX, səhifənin özündən götürülür.
 // Nəticə: ən azı 5 (mövcuddursa), maksimum 10 birbaşa məhsul linki.
+// İstifadəçi tələbi: axtarılan məhsula uyğun ƏN UCUZ 5 elan.
 const MIN_RESULTS = 5;
-const MAX_RESULTS = 10;
+const MAX_RESULTS = 5;
 // Yalnız SIRALAMA üçün təxmini məzənnə — göstərilən qiymət saytdakı kimi qalır.
 const SORT_RATE: Record<string, number> = { AZN: 1, USD: 1.7, EUR: 1.85, RUB: 0.02 };
 
@@ -578,54 +579,52 @@ function dropOutliers(items: WebResult[]): WebResult[] {
   return kept.length >= MIN_RESULTS ? kept : items;
 }
 
-// Mənbələr arasında növbə ilə seçir ki, bütün nəticələr bir saytdan olmasın;
-// sonra ucuzdan bahaya sıralayır (qiyməti bilinməyənlər sonda).
-function pickDiverse(items: WebResult[], max: number): WebResult[] {
-  const bySite = new Map<string, WebResult[]>();
-  for (const r of items) {
-    const arr = bySite.get(r.site) || [];
-    arr.push(r);
-    bySite.set(r.site, arr);
-  }
-  for (const arr of bySite.values()) arr.sort((a, b) => sortValue(a) - sortValue(b));
-  const queues = [...bySite.values()];
-  const picked: WebResult[] = [];
-  while (picked.length < max && queues.some((qq) => qq.length)) {
-    for (const qq of queues) {
-      const r = qq.shift();
-      if (r) picked.push(r);
-      if (picked.length >= max) break;
-    }
-  }
-  return picked.sort((a, b) => sortValue(a) - sortValue(b));
+// Ən ucuzdan bahaya; qiyməti bilinməyənlər sonda.
+function cheapest(items: WebResult[], n: number): WebResult[] {
+  return [...items].sort((a, b) => sortValue(a) - sortValue(b)).slice(0, n);
 }
 
-async function webSearchProducts(q: string, useTavily: boolean): Promise<WebSearchResponse> {
-  console.log('[webSearch] məhsul axtarışı — sorğu:', q, '| tavily:', useTavily);
-  const [shop, tav] = await Promise.all([
-    searchShops(q).catch((e) => { console.error('[webSearch] shops:', e?.message); return [] as WebResult[]; }),
-    useTavily ? tavilyProductLinks(q) : Promise.resolve<{ results: WebResult[]; error?: string }>({ results: [] }),
-  ]);
-
+function dedupe(items: WebResult[]): WebResult[] {
   const seen = new Set<string>();
-  const merged = [...shop, ...tav.results].filter((r) => {
+  return items.filter((r) => {
     const k = normUrl(r.url);
     if (seen.has(k)) return false;
     seen.add(k);
     return true;
   });
+}
 
-  if (!merged.length) {
-    if (tav.error && !shop.length) return { ...EMPTY, error: tav.error };
+async function webSearchProducts(q: string, useTavily: boolean): Promise<WebSearchResponse> {
+  console.log('[webSearch] məhsul axtarışı — sorğu:', q, '| tavily:', useTavily);
+  // 1) Əvvəlcə AZ saytlarında birbaşa (maşın → turbo.az, digər → tap.az/lalafo.az).
+  const shop = await searchShops(q).catch((e) => {
+    console.error('[webSearch] shops:', e?.message);
+    return { results: [] as WebResult[], isCar: false };
+  });
+  let pool = shop.isCar ? shop.results : refineRelevance(shop.results, q, MIN_RESULTS);
+  pool = dropOutliers(pool);
+
+  // 2) 5-dən az qalıbsa — Tavily ilə digər mağazalar (linklər açılıb yoxlanılır,
+  //    başlıq sorğuya uyğun olmalıdır). Kifayət qədər varsa Tavily kreditini xərcləmirik.
+  let tavCount = 0;
+  let tavError: string | undefined;
+  if (pool.length < MIN_RESULTS && useTavily) {
+    const tav = await tavilyProductLinks(q);
+    tavError = tav.error;
+    const tokens = queryTokens(q);
+    const relevant = tav.results.filter((r) => matchesQuery(r.title, tokens));
+    tavCount = relevant.length;
+    pool = dedupe([...pool, ...(shop.isCar ? relevant : refineRelevance(relevant, q, 1))]);
+  }
+
+  if (!pool.length) {
+    if (tavError) return { ...EMPTY, error: tavError };
     return { ok: true, mode: 'product', summary: '', results: [] };
   }
 
-  // "X üçün qab/oyun", "for PS5" — aksesuar elanları; kifayət qədər əsl məhsul varsa çıxarılır.
-  const notAccessory = merged.filter((r) => !/(\süçün|\sucun|\sfor)\b/i.test(r.title));
-  const pool = notAccessory.length >= MIN_RESULTS ? notAccessory : merged;
-  const results = pickDiverse(dropOutliers(pool), MAX_RESULTS);
-  console.log('[webSearch] məhsul sorğu:', q, '| saytlar:', shop.length, '| tavily (yoxlanılmış):',
-    tav.results.length, '| göstərilən:', results.length);
+  const results = cheapest(dedupe(pool), MAX_RESULTS);
+  console.log('[webSearch] məhsul sorğu:', q, '| maşın:', shop.isCar, '| saytlar:', shop.results.length,
+    '| tavily:', tavCount, '| göstərilən:', results.length);
   return { ok: true, mode: 'product', summary: '', results };
 }
 
