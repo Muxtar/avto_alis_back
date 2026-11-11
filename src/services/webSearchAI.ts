@@ -372,7 +372,7 @@ async function webSearchUncached(q: string, mode: SearchMode = 'auto'): Promise<
     const c = await webSearchClaude(q);
     // Claude-un linkləri də açılıb yoxlanılır — qiymət səhifədən gəlsin.
     const verified = c.ok && c.results.length ? await verifyLinks(c.results) : [];
-    if (verified.length) return { ...c, results: cheapest(verified, MAX_RESULTS) };
+    if (verified.length) return { ...c, results: verified.slice(0, MAX_RESULTS) };
   }
   return products.ok ? products : { ...EMPTY, error: products.error || 'İnternet axtarışı alınmadı.' };
 }
@@ -507,7 +507,7 @@ async function tavilyQuery(q: string, shopsOnly: boolean): Promise<{ results: an
 //    məhsul səhifəsi deyilsə / ana səhifəyə atırsa atılır, qiymət və şəkil
 //    snippet-dən YOX, səhifənin özündən götürülür.
 // Nəticə: ən azı 5 (mövcuddursa), maksimum 10 birbaşa məhsul linki.
-// İstifadəçi tələbi: axtarılan məhsula uyğun ƏN UCUZ 5 elan.
+// İstifadəçi tələbi: Google-dakı kimi ilk 5 uyğun elan (qiymətə görə sıralanmır).
 const MIN_RESULTS = 5;
 const MAX_RESULTS = 5;
 // Yalnız SIRALAMA üçün təxmini məzənnə — göstərilən qiymət saytdakı kimi qalır.
@@ -579,9 +579,40 @@ function dropOutliers(items: WebResult[]): WebResult[] {
   return kept.length >= MIN_RESULTS ? kept : items;
 }
 
-// Ən ucuzdan bahaya; qiyməti bilinməyənlər sonda.
-function cheapest(items: WebResult[], n: number): WebResult[] {
-  return [...items].sort((a, b) => sortValue(a) - sortValue(b)).slice(0, n);
+// Google-vari sıralama (qiymətə görə YOX). İstifadəçi tələbi: "ən ucuz" məntiqi
+// oyuncaq maşın / aksesuar kimi uyğunsuz ucuz elanları önə çıxarırdı.
+//  1) Uyğunluq: sorğu başlıqda BİTİŞİK ifadə kimi keçirsə ("bmw x5") daha yuxarı.
+//  2) Mənbə sırası: maşın → turbo.az birinci (Google-da olduğu kimi);
+//     digər məhsullar → saytlar növbə ilə (tap.az, lalafo.az, sonra digərləri).
+//  3) Hər saytın daxilində həmin saytın öz axtarış sırası saxlanılır.
+function rankLikeGoogle(items: WebResult[], q: string, n: number, siteOrder: string[]): WebResult[] {
+  const phrase = queryTokens(q).join(' ');
+  const fold = (t: string) => ' ' + queryTokens(t).join(' ') + ' ';
+  const score = (r: WebResult) => (fold(r.title).includes(' ' + phrase + ' ') ? 1 : 0);
+  const bySite = new Map<string, WebResult[]>();
+  for (const r of items) {
+    const arr = bySite.get(r.site) || [];
+    arr.push(r);
+    bySite.set(r.site, arr);
+  }
+  // Sayt daxilində: əvvəl tam ifadə uyğunluğu, sonra saytın öz sırası (stabil sort).
+  for (const arr of bySite.values()) arr.sort((a, b) => score(b) - score(a));
+  const sites = [...bySite.keys()].sort((a, b) => {
+    const ia = siteOrder.indexOf(a), ib = siteOrder.indexOf(b);
+    return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib);
+  });
+  const out: WebResult[] = [];
+  // Birinci saytdan ilk 2 nəticə (Google-da ən uyğun sayt bir neçə dəfə çıxır), sonra növbə ilə.
+  const first = bySite.get(sites[0]) || [];
+  out.push(...first.splice(0, 2));
+  while (out.length < n && sites.some((s) => (bySite.get(s) || []).length)) {
+    for (const s of sites) {
+      const r = (bySite.get(s) || []).shift();
+      if (r) out.push(r);
+      if (out.length >= n) break;
+    }
+  }
+  return out.slice(0, n);
 }
 
 function dedupe(items: WebResult[]): WebResult[] {
@@ -622,7 +653,8 @@ async function webSearchProducts(q: string, useTavily: boolean): Promise<WebSear
     return { ok: true, mode: 'product', summary: '', results: [] };
   }
 
-  const results = cheapest(dedupe(pool), MAX_RESULTS);
+  const siteOrder = shop.isCar ? ['turbo.az', 'tap.az'] : ['tap.az', 'lalafo.az'];
+  const results = rankLikeGoogle(dedupe(pool), q, MAX_RESULTS, siteOrder);
   console.log('[webSearch] məhsul sorğu:', q, '| maşın:', shop.isCar, '| saytlar:', shop.results.length,
     '| tavily:', tavCount, '| göstərilən:', results.length);
   return { ok: true, mode: 'product', summary: '', results };

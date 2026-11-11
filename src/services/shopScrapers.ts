@@ -256,12 +256,12 @@ function parseTurboCards(html: string): WebResult[] {
   return out.filter((r) => (seen.has(r.url) ? false : (seen.add(r.url), true)));
 }
 
-// Marka (+ model) üzrə turbo.az elanları, ən ucuzdan (saytın öz sıralaması).
+// Marka (+ model) üzrə turbo.az elanları — saytın standart sırası ilə.
 async function searchTurboAz(car: CarQuery): Promise<WebResult[]> {
   const p = new URLSearchParams();
   p.append('q[make][]', car.makeId);
   for (const id of car.modelIds) p.append('q[model][]', id);
-  p.append('q[sort]', 'price_asc');
+  // Qiymətə görə SIRALAMIRIQ — saytın öz (standart) sırası, Google-dakı kimi.
   const page = await getHtml(`https://turbo.az/autos?${p.toString()}`);
   if (!page) return [];
   // Sinif axtarışında yalnız marka yoxlanılır (model adları müxtəlifdir).
@@ -392,7 +392,7 @@ const VARIANT_WORDS = ['pro', 'max', 'plus', 'ultra', 'mini', 'fe', 'lite', 'air
 const PART_WORDS = ['ekran', 'ekrani', 'ekranlari', 'displey', 'batareya', 'batareyasi', 'korpus', 'qab', 'qabi', 'kabro', 'cexol', 'chexol', 'case',
   'suse', 'plyonka', 'temir', 'temiri', 'ehtiyat', 'hisse', 'hisseleri', 'adapter', 'kabel', 'sarj', 'sarjer', 'ucun', 'for', 'oyun', 'oyunlari',
   'disk', 'pult', 'joystick', 'dualsense', 'kreditle', 'alisi', 'alinir', 'aliram', 'icare', 'icaresi', 'kiraye', 'stiker', 'naklejka', 'qutu', 'qutusu', 'maket', 'oyuncaq',
-  'oyunu', 'balans', 'artirilmasi', 'abuneliyi', 'abunelik', 'sehifesi', 'hesab', 'hesabi', 'kod', 'kodu', 'hediyye', 'gift', 'card'];
+  'oyunu', 'balans', 'artirilmasi', 'abuneliyi', 'abunelik', 'sehifesi', 'hesab', 'hesabi', 'kod', 'kodu', 'hediyye', 'gift', 'card', 'drive', 'gamepad', 'stend', 'stand', 'soyuducu'];
 
 export function refineRelevance(items: WebResult[], q: string, min = 5): WebResult[] {
   const qw = new Set(queryTokens(q));
