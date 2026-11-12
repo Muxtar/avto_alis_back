@@ -15,7 +15,8 @@
 
 import Anthropic from '@anthropic-ai/sdk';
 import { resolveFlag } from './settings';
-import { searchShops, fetchProductPage, looksLikeProductUrl, refineRelevance, matchesQuery, queryTokens } from './shopScrapers';
+import { searchShops, fetchProductPage, looksLikeProductUrl, refineRelevance, matchesQuery, queryTokens, filterByCategory } from './shopScrapers';
+import { aiRankResults, aiRankEnabled } from './searchRank';
 
 export interface WebResult {
   title: string;
@@ -23,7 +24,8 @@ export interface WebResult {
   snippet: string;
   price: number | null;   // saytdakı qiymət (canlı) — səhifədə görünürsə
   currency?: string;      // qiymətin valyutası saytda necədirsə (AZN, USD ...)
-  site: string;          // mənbə sayt (tap.az, turbo.az ...)
+  site: string;           // mənbə sayt (tap.az, turbo.az ...)
+  category?: string | null; // saytdakı kateqoriya (uyğunluq süzgəci üçün)
   kind?: 'product' | 'social';  // məhsul elanı, yoxsa şəxsin sosial profili
   platform?: string;      // social üçün: instagram/facebook/linkedin/tiktok/x/youtube/telegram
   handle?: string;        // social üçün: istifadəçi adı (profil şəkli üçün də lazımdır)
@@ -632,20 +634,47 @@ async function webSearchProducts(q: string, useTavily: boolean): Promise<WebSear
     console.error('[webSearch] shops:', e?.message);
     return { results: [] as WebResult[], isCar: false };
   });
-  let pool = shop.isCar ? shop.results : refineRelevance(shop.results, q, MIN_RESULTS);
-  pool = dropOutliers(pool);
 
-  // 2) 5-dən az qalıbsa — Tavily ilə digər mağazalar (linklər açılıb yoxlanılır,
+  // 2) Kateqoriya süzgəci: oyuncaq / ehtiyat hissə / aksesuar / xidmət kateqoriyalarındakı
+  //    elanlar atılır (sorğu bunu açıq istəmirsə). Bütün məhsul növləri üçün işləyir.
+  const candidates = shop.isCar ? shop.results : filterByCategory(shop.results, q);
+  let pool = shop.isCar ? candidates : dropOutliers(refineRelevance(candidates, q, MIN_RESULTS));
+
+  // 3) 5-dən az qalıbsa — Tavily ilə digər mağazalar (linklər açılıb yoxlanılır,
   //    başlıq sorğuya uyğun olmalıdır). Kifayət qədər varsa Tavily kreditini xərcləmirik.
   let tavCount = 0;
   let tavError: string | undefined;
+  let tavRelevant: WebResult[] = [];
   if (pool.length < MIN_RESULTS && useTavily) {
     const tav = await tavilyProductLinks(q);
     tavError = tav.error;
     const tokens = queryTokens(q);
-    const relevant = tav.results.filter((r) => matchesQuery(r.title, tokens));
-    tavCount = relevant.length;
-    pool = dedupe([...pool, ...(shop.isCar ? relevant : refineRelevance(relevant, q, 1))]);
+    tavRelevant = tav.results.filter((r) => matchesQuery(r.title, tokens));
+    tavCount = tavRelevant.length;
+    pool = dedupe([...pool, ...(shop.isCar ? tavRelevant : refineRelevance(tavRelevant, q, 1))]);
+  }
+
+  const siteOrder = shop.isCar ? ['turbo.az', 'tap.az'] : ['tap.az', 'lalafo.az'];
+
+  // 4) AI uyğunluq hakimi (maşın deyilsə və açar varsa): kateqoriya süzgəcindən keçən
+  //    BÜTÜN namizədlərə baxır, yalnız axtarılan məhsulun özünü saxlayıb sıralayır.
+  //    Maşında turbo.az nəticələri artıq marka/model üzrə təmizdir — AI lazım deyil.
+  if (!shop.isCar && aiRankEnabled()) {
+    const aiPool = dedupe([...candidates, ...tavRelevant]);
+    if (aiPool.length) {
+      // Namizədləri evristik sıra ilə ver ki, ilk 30-a ən ehtimallılar düşsün.
+      const ordered = rankLikeGoogle(dedupe([...pool, ...aiPool]), q, 30, siteOrder);
+      const ranked = await aiRankResults(q, ordered);
+      if (ranked) {
+        const results = ranked.slice(0, MAX_RESULTS);
+        console.log('[webSearch] məhsul sorğu (AI):', q, '| namizəd:', ordered.length, '| göstərilən:', results.length);
+        return {
+          ok: true, mode: 'product',
+          summary: results.length ? '' : `"${q}" üçün uyğun elan tapılmadı.`,
+          results,
+        };
+      }
+    }
   }
 
   if (!pool.length) {
@@ -653,7 +682,6 @@ async function webSearchProducts(q: string, useTavily: boolean): Promise<WebSear
     return { ok: true, mode: 'product', summary: '', results: [] };
   }
 
-  const siteOrder = shop.isCar ? ['turbo.az', 'tap.az'] : ['tap.az', 'lalafo.az'];
   const results = rankLikeGoogle(dedupe(pool), q, MAX_RESULTS, siteOrder);
   console.log('[webSearch] məhsul sorğu:', q, '| maşın:', shop.isCar, '| saytlar:', shop.results.length,
     '| tavily:', tavCount, '| göstərilən:', results.length);

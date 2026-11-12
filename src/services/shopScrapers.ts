@@ -57,6 +57,47 @@ function fold(s: string): string {
     .replace(/ş/g, 's').replace(/ç/g, 'c').replace(/ğ/g, 'g')
     .replace(/[^a-z0-9а-яё]+/g, ' ').trim();
 }
+// Sadə kök çıxarma — ən çox işlənən hal/mənsubiyyət/cəm şəkilçiləri (fold-dan sonra
+// ə→e, ı→i, ü→u, ö→o olduğundan qısa siyahı kifayətdir).
+const AZ_SUFFIXES = ['larinin', 'lerinin', 'lari', 'leri', 'larin', 'lerin', 'nin', 'nun', 'sini', 'sunu', 'si', 'su', 'lar', 'ler', 'ni', 'nu', 'da', 'de', 'dan', 'den', 'i', 'u'];
+function azStem(w: string): string {
+  if (/\d/.test(w) || w.length < 4) return w;
+  for (const suf of AZ_SUFFIXES) {
+    if (w.endsWith(suf) && w.length - suf.length >= 3) return w.slice(0, -suf.length);
+  }
+  return w;
+}
+// Məhsul növü sinonimləri — elan sahibləri eyni şeyi müxtəlif sözlə yazır
+// ("iphone 15 qabı" ↔ "iPhone 15 kabro / case / arxalıq"). Hər qrupun BİRİNCİ sözü
+// saytlarda əlavə axtarış variantı kimi işlədilir.
+const SYNONYM_GROUPS: string[][] = [
+  ['kabro', 'qab', 'case', 'cexol', 'chexol', 'arxaliq', 'ortuk', 'cover', 'qoruyucu', 'chehol', 'cehol'],
+  ['telefon', 'smartfon', 'phone', 'mobil'],
+  ['noutbuk', 'notebook', 'laptop', 'macbook'],
+  ['qulaqciq', 'qulaqliq', 'naushnik', 'headphone', 'headphones', 'earbuds', 'qulaqcig'],
+  ['soyuducu', 'xolodilnik', 'refrigerator', 'holodilnik'],
+  ['paltaryuyan', 'stiralka', 'washing'],
+  ['televizor', 'tv', 'televiziya', 'smart tv'],
+  ['velosiped', 'bike', 'bicycle', 'velo'],
+  ['planset', 'tablet'],
+  ['canta', 'sumka', 'bag'],
+  ['ayaqqabi', 'krossovka', 'krossovki', 'sneaker', 'sneakers', 'tufli'],
+  ['kondisioner', 'kondey', 'split', 'kondisoner'],
+  ['tozsoran', 'pylesos', 'tozsorani'],
+  ['saat', 'watch'],
+  ['divan', 'sofa'],
+  ['sarj', 'sarjer', 'charger', 'adapter', 'zaryadka'],
+  ['ekran', 'displey', 'display', 'ekrani'],
+  ['qoruyucu sushe', 'sushe', 'suse', 'steklo', 'glass'],
+  ['kreslo', 'oturacaq'],
+  ['masin', 'avtomobil', 'avto'],
+];
+const SYNONYM_OF = new Map<string, string[]>();
+for (const g of SYNONYM_GROUPS) for (const w of g) SYNONYM_OF.set(w, g);
+function synonymsOf(t: string): string[] | null {
+  return SYNONYM_OF.get(t) || SYNONYM_OF.get(azStem(t)) || null;
+}
+
 export function queryTokens(q: string): string[] {
   return fold(q).split(' ').filter((t) => t.length >= 1);
 }
@@ -70,7 +111,13 @@ export function matchesQuery(title: string, tokens: string[]): boolean {
     // "playstation 5" → "PS5" ilə UYĞUN GƏLMİR (əvvəl balans/oyun elanları keçirdi).
     if (/^\d+$/.test(t)) return words.includes(t) || (i > 0 && new RegExp(`${tokens[i - 1]}${t}(?!\\d)`).test(glued));
     // Söz başlanğıcı ilə uyğunluq ("samsung" → "samsung", "galax" → "galaxy").
-    return joined.includes(' ' + t) || (t.length >= 4 && glued.includes(t));
+    if (joined.includes(' ' + t) || (t.length >= 4 && glued.includes(t))) return true;
+    // Sinonim: "qab" sorğusu "kabro/case/arxalıq" yazılmış elanı da tapır.
+    const syn = synonymsOf(t);
+    if (syn && words.some((w) => syn.includes(w) || syn.includes(azStem(w)) || syn.some((x) => x.length >= 4 && w.startsWith(x)))) return true;
+    // Azərbaycan şəkilçiləri: "qabı" ↔ "qab", "saatları" ↔ "saat", "telefonu" ↔ "telefon".
+    const stem = azStem(t);
+    return stem !== t && stem.length >= 3 && words.some((w) => azStem(w) === stem || w.startsWith(stem));
   });
 }
 
@@ -112,6 +159,8 @@ async function searchTapAz(q: string, tokens: string[]): Promise<WebResult[]> {
       price: toNum(a.price),
       currency: 'AZN',            // tap.az qiymətləri həmişə AZN-dədir
       site: 'tap.az',
+      // Kateqoriya linkin özündədir: /elanlar/<bölmə>/<alt-bölmə>/<id>
+      category: a.path.split('/').slice(2, 4).join('/'),
       kind: 'product',
       image: img,
       seller: null,
@@ -120,13 +169,96 @@ async function searchTapAz(q: string, tokens: string[]): Promise<WebResult[]> {
   return out;
 }
 
+// lalafo elanında yalnız category_id var — adları kateqoriya ağacından (açıq API)
+// götürürük: 8178 → "Nəqliyyat > Aksesuarlar və tüninq > ... > Sürət qutusunun başlıqları".
+// Ağac ~2 MB-dır, 24 saat keşlənir.
+let lalafoCats: { map: Map<number, string>; at: number } | null = null;
+let lalafoCatsLoading: Promise<Map<number, string>> | null = null;
+async function loadLalafoCategories(): Promise<Map<number, string>> {
+  if (lalafoCats && Date.now() - lalafoCats.at < 24 * 3600 * 1000) return lalafoCats.map;
+  if (lalafoCatsLoading) return lalafoCatsLoading;
+  lalafoCatsLoading = (async () => {
+    try {
+      const res = await fetch('https://lalafo.az/api/catalog/v3/categories/tree?with_duplicates=1&expand=url', {
+        headers: { 'user-agent': BROWSER_UA, 'country-id': '13', device: 'pc', language: 'az_AZ', accept: 'application/json' },
+        signal: AbortSignal.timeout(TIMEOUT_MS),
+      });
+      if (!res.ok) return lalafoCats?.map || new Map();
+      const tree = (await res.json()) as any[];
+      const map = new Map<number, string>();
+      const walk = (nodes: any[], path: string[]) => {
+        for (const n of nodes || []) {
+          if (!n || typeof n.name !== 'string') continue;
+          const p = [...path, n.name];
+          map.set(Number(n.id), p.join(' > '));
+          if (Array.isArray(n.children)) walk(n.children, p);
+        }
+      };
+      walk(Array.isArray(tree) ? tree : [], []);
+      if (map.size) lalafoCats = { map, at: Date.now() };
+      return map.size ? map : (lalafoCats?.map || new Map());
+    } catch (e: any) {
+      console.error('[shopScrapers] lalafo kateqoriyalar:', e?.name || e?.message);
+      return lalafoCats?.map || new Map();
+    }
+  })().finally(() => { lalafoCatsLoading = null; });
+  return lalafoCatsLoading;
+}
+
+// ── Kateqoriya süzgəci (bütün məhsullar üçün) ───────────────────────────────
+// Axtarılan MƏHSULUN ÖZÜ lazımdır. Elan aşağıdakı "ikinci dərəcəli" kateqoriyalardadırsa
+// (oyuncaq, ehtiyat hissə, aksesuar, xidmət/təmir/icarə, iş, tanışlıq) atılır —
+// AMMA istifadəçi sorğuda bunu özü istəyibsə ("bmw x5 təkər", "iphone qabı",
+// "oyuncaq maşın", "telefon təmiri") həmin qrup saxlanılır.
+// Bu, ad siyahısından asılı deyil: hər məhsul üçün saytın öz kateqoriyası işləyir.
+const CATEGORY_GROUPS: { name: string; cat: RegExp; intent: RegExp }[] = [
+  { name: 'toy', cat: /oyuncaq|usaq-avtomobil|uşaq avtomobil|uşaq nəqliyyat|kolleksiya|maket|suvenir/i,
+    intent: /oyuncaq|usaq|uşaq|maket|kolleksiya|model\b|suvenir|radio idar|pultlu/i },
+  { name: 'part', cat: /ehtiya?t|hiss[əe]|aksess?uar|t[üu]ninq|tuning|komplektl|zapchast|ban, kuzov|şin|sin-ve-disk|təkər|teker|disk|ekran|batareya|korpus|qab|çexol|kabro/i,
+    intent: /ehtiyat|hiss[əe]|aksesuar|t[üu]ninq|t[əe]k[əe]r|disk|şin|fara|bamper|ekran|batareya|korpus|qab|çexol|cexol|kabro|şüşə|suse|adapter|kabel|şarj|sarj|pult|joystick|filtr|yağ|akkumulyator|stop|güzgü|guzgu|kapot|qapı|qapi|radiator|diffuzor/i },
+  { name: 'service', cat: /xidm[əe]t|xidmet|t[əe]mir|temir|icar[əe]|icare|kiray[əe]|kiraye|kurs|t[əe]lim|telim|usta|quraşdır/i,
+    intent: /xidm[əe]t|t[əe]mir|temir|icar|kiray|kurs|t[əe]lim|usta|quraşd|ustas/i },
+  { name: 'other', cat: /is-elanlari|iş elanları|vakansiya|tanisliq|tanışlıq|itmiş|heyvanlar|biznes üçün avadanl/i, intent: /^$/ },
+];
+
+// Kateqoriyanın HANSİ hissəsinə baxırıq: tap.az → alt-bölmə slugu; lalafo → ağacın
+// səviyyələri, amma " və " ilə birləşən ümumi qrup adları ("Mobil telefon və
+// aksesuarlar") nəzərə alınmır — əks halda telefonların özü də "aksesuar" sayılardı.
+function categorySignal(r: WebResult): string {
+  const c = r.category || '';
+  if (!c) return '';
+  if (r.site === 'tap.az') return c.split('/').slice(1).join('/');
+  // "Şəxsi əşyalar > Aksesuarlar" — saat, çanta, zinət (məhsulun özüdür, hissə deyil).
+  const cleaned = c.replace(/^Şəxsi əşyalar > Aksesuarlar( > )?/, 'Şəxsi əşyalar$1');
+  return cleaned.split(' > ').filter((seg) => !/ v[əe] /i.test(seg)).join(' > ');
+}
+
+export function categoryGroup(r: WebResult): string | null {
+  const sig = categorySignal(r);
+  if (!sig) return null;
+  for (const g of CATEGORY_GROUPS) if (g.cat.test(sig)) return g.name;
+  return null;
+}
+
+export function filterByCategory(items: WebResult[], q: string): WebResult[] {
+  const fq = q.toLowerCase();
+  const allowed = new Set(CATEGORY_GROUPS.filter((g) => g.intent.test(fq)).map((g) => g.name));
+  return items.filter((r) => {
+    const g = categoryGroup(r);
+    return !g || allowed.has(g);
+  });
+}
+
 // ── lalafo.az ───────────────────────────────────────────────────────────────
 // Axtarış: /azerbaijan/q-<sorğu>. Elanlar react-query dehydratedState-dədir.
 // DİQQƏT: lalafo-da slug köhnə başlıqdan qala bilir — uyğunluğu yalnız
 // başlıqla yoxlayırıq (slug-la yox).
 async function searchLalafo(q: string, tokens: string[]): Promise<WebResult[]> {
   const slug = q.trim().toLowerCase().replace(/\s+/g, '-');
-  const page = await getHtml(`https://lalafo.az/azerbaijan/q-${encodeURIComponent(slug)}`);
+  const [page, cats] = await Promise.all([
+    getHtml(`https://lalafo.az/azerbaijan/q-${encodeURIComponent(slug)}`),
+    loadLalafoCategories(),
+  ]);
   if (!page) return [];
   const queries: any[] = nextData(page.html)?.props?.pageProps?.dehydratedState?.queries || [];
   const feed = queries.find((x) => Array.isArray(x?.queryKey) && x.queryKey[0] === 'listingFeed');
@@ -146,6 +278,7 @@ async function searchLalafo(q: string, tokens: string[]): Promise<WebResult[]> {
       price: toNum(it.price),
       currency: normCurrency(it.currency || it.symbol),
       site: 'lalafo.az',
+      category: cats.get(Number(it.category_id)) || null,
       kind: 'product',
       image: img?.thumbnail_url || img?.original_url || null,
       seller: it.user?.company_name || null,
@@ -192,7 +325,15 @@ const MAKE_ALIASES: Record<string, string> = {
   toyot: 'toyota', hundai: 'hyundai', xendai: 'hyundai', sevrolet: 'chevrolet', shevrolet: 'chevrolet',
 };
 // Bu sözlər varsa, sorğu maşının özü yox, HİSSƏ/AKSESUARDIR ("bmw x5 təkər").
-const CAR_PART_WORDS = /\b(teker|tekerler|disk|diski|sin|sinler|fara|faralar|stop|bamper|kapot|qapi|guzgu|ehtiyat|hisse|hisseleri|akkumulyator|yag|filtr|sesbogucu|aksesuar|ortuk|chexol|cexol|kovrik|maqnitola|radio|sensor|kamera|oyuncaq|usaq|model|maket|naklejka|stiker|amortizator|motor|muherrik|karobka|suret qutusu|reng|tuning|kuzov|salon)\b/;
+const CAR_PART_STEMS = new Set(['teker', 'disk', 'sin', 'fara', 'stop', 'bamper', 'kapot', 'qapi', 'guzgu', 'ehtiyat', 'hisse',
+  'akkumulyator', 'yag', 'filtr', 'sesbogucu', 'aksesuar', 'ortuk', 'chexol', 'cexol', 'kovrik', 'maqnitola', 'radio', 'sensor',
+  'kamera', 'oyuncaq', 'usaq', 'model', 'maket', 'naklejka', 'stiker', 'amortizator', 'motor', 'muherrik', 'karobka', 'reng',
+  'tuning', 'tuninq', 'kuzov', 'salon', 'diffuzor', 'radiator', 'barmaqliq', 'spoyler', 'lyuk', 'aptechka', 'svet', 'lampa', 'akum']);
+// Sorğuda HİSSƏ/AKSESUAR sözü varmı ("bmw x5 təkərləri" → "teker" kökü)?
+function hasCarPartWord(foldedQuery: string): boolean {
+  return foldedQuery.split(' ').some((w) => w && (CAR_PART_STEMS.has(w) || CAR_PART_STEMS.has(azStem(w))
+    || [...CAR_PART_STEMS].some((st) => st.length >= 4 && w.startsWith(st))));
+}
 
 export interface CarQuery { makeId: string; makeName: string; modelIds: string[]; modelName: string | null }
 
@@ -200,7 +341,7 @@ export interface CarQuery { makeId: string; makeName: string; modelIds: string[]
 export async function detectCar(q: string): Promise<CarQuery | null> {
   let fq = ' ' + fold(q) + ' ';
   for (const [k, v] of Object.entries(MAKE_ALIASES)) fq = fq.replace(new RegExp(` ${k} `, 'g'), ` ${v} `);
-  if (CAR_PART_WORDS.test(fq)) return null;
+  if (hasCarPartWord(fq.trim())) return null;
   const cat = await loadTurboCatalog();
   if (!cat) return null;
   // Ən uzun uyğun marka adı ("land rover" > "rover"; "bmw alpina" > "bmw").
@@ -289,10 +430,20 @@ export async function searchShops(q: string): Promise<{ results: WebResult[]; is
     console.log('[shopScrapers] maşın:', car.makeName, car.modelName || '-', '| turbo:', turbo.length, '| tap.az avto:', tapCars.length);
     return { results: [...turbo, ...tapCars], isCar: true };
   }
-  const settled = await Promise.allSettled([searchTapAz(q, tokens), searchLalafo(q, tokens)]);
+  // Saytların öz axtarışı şəkilçili sözləri pis tapır ("iphone 15 qabı", "kişi saatları").
+  // Kök forma fərqlidirsə ("iphone 15 qab", "kisi saat") onunla da axtarırıq.
+  const stemQ = tokens.map(azStem).join(' ');
+  // Sinonim variantı: məhsul növü sözünü qrupun əsas sözü ilə əvəz et ("qabı" → "kabro").
+  const synQ = tokens.map((t) => { const g = synonymsOf(t); return g && g[0] !== t && g[0] !== azStem(t) ? g[0] : azStem(t); }).join(' ');
+  const variants = [...new Set([q, stemQ, synQ].filter((v, i) => i === 0 || v !== tokens.join(' ')))].slice(0, 3);
+  const jobs = variants.flatMap((v) => [searchTapAz(v, tokens), searchLalafo(v, tokens)]);
+  const settled = await Promise.allSettled(jobs);
   const lists = settled.map((s) => (s.status === 'fulfilled' ? s.value : []));
-  console.log('[shopScrapers] sorğu:', q, '| tap.az:', lists[0].length, '| lalafo:', lists[1].length);
-  return { results: lists.flat(), isCar: false };
+  const seen = new Set<string>();
+  // Sıra: orijinal sorğunun nəticələri əvvəl (tap.az, lalafo), sonra kök formanınkı.
+  const merged = lists.flat().filter((r) => (seen.has(r.url) ? false : (seen.add(r.url), true)));
+  console.log('[shopScrapers] sorğu:', variants.join(' | '), '| nəticə:', lists.map((l) => l.length).join('/'), '| birləşmiş:', merged.length);
+  return { results: merged, isCar: false };
 }
 
 // ── Ümumi məhsul səhifəsi yoxlaması (Tavily nəticələri üçün) ──────────────────
