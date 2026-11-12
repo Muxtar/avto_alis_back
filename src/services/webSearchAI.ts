@@ -17,6 +17,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { resolveFlag } from './settings';
 import { searchShops, fetchProductPage, looksLikeProductUrl, refineRelevance, matchesQuery, queryTokens, filterByCategory } from './shopScrapers';
 import { aiRankResults, aiRankEnabled } from './searchRank';
+import { tavilyCarListings, tavilyProductListings } from './tavilyListings';
 
 export interface WebResult {
   title: string;
@@ -26,6 +27,7 @@ export interface WebResult {
   currency?: string;      // qiymətin valyutası saytda necədirsə (AZN, USD ...)
   site: string;           // mənbə sayt (tap.az, turbo.az ...)
   category?: string | null; // saytdakı kateqoriya (uyğunluq süzgəci üçün)
+  priceFromIndex?: boolean; // qiymət axtarış indeksindəndir (sayt canlı açılmadı) — dəyişə bilər
   kind?: 'product' | 'social';  // məhsul elanı, yoxsa şəxsin sosial profili
   platform?: string;      // social üçün: instagram/facebook/linkedin/tiktok/x/youtube/telegram
   handle?: string;        // social üçün: istifadəçi adı (profil şəkli üçün də lazımdır)
@@ -554,18 +556,6 @@ async function verifyLinks(raw: { url: string; title?: string; content?: string 
   return out;
 }
 
-async function tavilyProductLinks(q: string): Promise<{ results: WebResult[]; error?: string }> {
-  const first = await tavilyQuery(q, true);
-  if ('error' in first) return { results: [], error: first.error };
-  let raw = first.results;
-  // Mağaza saytlarında az nəticə varsa — ümumi AZ axtarışı da (əlavə 1 kredit).
-  if (raw.length < 4) {
-    const second = await tavilyQuery(q, false);
-    if (!('error' in second)) raw = raw.concat(second.results);
-  }
-  return { results: await verifyLinks(raw) };
-}
-
 function sortValue(r: WebResult): number {
   if (r.price == null) return Number.POSITIVE_INFINITY;
   return r.price * (SORT_RATE[r.currency || 'AZN'] ?? 1);
@@ -632,7 +622,7 @@ async function webSearchProducts(q: string, useTavily: boolean): Promise<WebSear
   // 1) Əvvəlcə AZ saytlarında birbaşa (maşın → turbo.az, digər → tap.az/lalafo.az).
   const shop = await searchShops(q).catch((e) => {
     console.error('[webSearch] shops:', e?.message);
-    return { results: [] as WebResult[], isCar: false };
+    return { results: [] as WebResult[], isCar: false, car: null };
   });
 
   // 2) Kateqoriya süzgəci: oyuncaq / ehtiyat hissə / aksesuar / xidmət kateqoriyalarındakı
@@ -640,18 +630,20 @@ async function webSearchProducts(q: string, useTavily: boolean): Promise<WebSear
   const candidates = shop.isCar ? shop.results : filterByCategory(shop.results, q);
   let pool = shop.isCar ? candidates : dropOutliers(refineRelevance(candidates, q, MIN_RESULTS));
 
-  // 3) 5-dən az qalıbsa — Tavily ilə digər mağazalar (linklər açılıb yoxlanılır,
-  //    başlıq sorğuya uyğun olmalıdır). Kifayət qədər varsa Tavily kreditini xərcləmirik.
+  // 3) 5-dən az qalıbsa — Tavily İNDEKSİ. Prod-da tap.az/turbo.az/lalafo server
+  //    IP-lərinə 403 qaytarır, ona görə orada əsas mənbə budur: konkret elan
+  //    linkləri, başlıqdakı qiymət, mətndəki şəkil. Sonra hər linki canlı açmağa
+  //    cəhd edirik — açılsa qiymət/şəkil canlı olur, açılmasa indeksdən qalır.
   let tavCount = 0;
   let tavError: string | undefined;
   let tavRelevant: WebResult[] = [];
   if (pool.length < MIN_RESULTS && useTavily) {
-    const tav = await tavilyProductLinks(q);
-    tavError = tav.error;
-    const tokens = queryTokens(q);
-    tavRelevant = tav.results.filter((r) => matchesQuery(r.title, tokens));
+    const idx = shop.isCar && shop.car ? await tavilyCarListings(shop.car) : await tavilyProductListings(q);
+    tavError = idx.error;
+    tavRelevant = shop.isCar ? idx.results : filterByCategory(idx.results, q);
+    // (Canlı yoxlama tavilyListings daxilində — Tavily Extract ilə.)
     tavCount = tavRelevant.length;
-    pool = dedupe([...pool, ...(shop.isCar ? tavRelevant : refineRelevance(tavRelevant, q, 1))]);
+    pool = dedupe([...pool, ...(shop.isCar ? tavRelevant : dropOutliers(refineRelevance(tavRelevant, q, MIN_RESULTS)))]);
   }
 
   const siteOrder = shop.isCar ? ['turbo.az', 'tap.az'] : ['tap.az', 'lalafo.az'];

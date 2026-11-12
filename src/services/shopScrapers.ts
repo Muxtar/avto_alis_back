@@ -442,7 +442,7 @@ async function searchTurboAz(car: CarQuery): Promise<WebResult[]> {
  *    yalnız AVTOMOBİL bölməsi. Hissə/aksesuar/oyuncaq elanları gəlmir.
  *  • Digər məhsullar → tap.az + lalafo.az.
  */
-export async function searchShops(q: string): Promise<{ results: WebResult[]; isCar: boolean }> {
+export async function searchShops(q: string): Promise<{ results: WebResult[]; isCar: boolean; car?: CarQuery | null }> {
   const tokens = queryTokens(q);
   if (!tokens.length) return { results: [], isCar: false };
   const car = await detectCar(q).catch(() => null);
@@ -466,7 +466,7 @@ export async function searchShops(q: string): Promise<{ results: WebResult[]; is
     ]);
     const tapCars = tap.filter((r) => /\/elanlar\/neqliyyat\/avtomobiller\//.test(r.url));
     console.log('[shopScrapers] maşın:', car.makeName, car.modelName || '-', '| turbo:', turbo.length, '| tap.az avto:', tapCars.length);
-    return { results: [...turbo, ...tapCars], isCar: true };
+    return { results: [...turbo, ...tapCars], isCar: true, car };
   }
   // Saytların öz axtarışı şəkilçili sözləri pis tapır ("iphone 15 qabı", "kişi saatları").
   // Kök forma fərqlidirsə ("iphone 15 qab", "kisi saat") onunla da axtarırıq.
@@ -579,7 +579,7 @@ export function looksLikeProductUrl(raw: string): boolean {
 // Bu sərt süzgəcdən sonra 5-dən az qalırsa, mərhələli yumşaldılır.
 const VARIANT_WORDS = ['pro', 'max', 'plus', 'ultra', 'mini', 'fe', 'lite', 'air', 'se', 'note', 'slim', 'digital', 'portal', 'edge', 'neo'];
 const PART_WORDS = ['ekran', 'ekrani', 'ekranlari', 'displey', 'batareya', 'batareyasi', 'korpus', 'qab', 'qabi', 'kabro', 'cexol', 'chexol', 'case',
-  'suse', 'plyonka', 'temir', 'temiri', 'ehtiyat', 'hisse', 'hisseleri', 'adapter', 'kabel', 'sarj', 'sarjer', 'ucun', 'for', 'oyun', 'oyunlari',
+  'suse', 'plyonka', 'temir', 'temiri', 'ehtiyat', 'hisse', 'hisseleri', 'adapter', 'kabel', 'sarj', 'sarjer', 'ucun', 'for', 'oyunlari',
   'disk', 'pult', 'joystick', 'dualsense', 'kreditle', 'alisi', 'alinir', 'aliram', 'icare', 'icaresi', 'kiraye', 'stiker', 'naklejka', 'qutu', 'qutusu', 'maket', 'oyuncaq',
   'oyunu', 'balans', 'artirilmasi', 'abuneliyi', 'abunelik', 'sehifesi', 'hesab', 'hesabi', 'kod', 'kodu', 'hediyye', 'gift', 'card', 'drive', 'gamepad', 'stend', 'stand', 'soyuducu'];
 
@@ -590,6 +590,7 @@ export function refineRelevance(items: WebResult[], q: string, min = 5): WebResu
   const noParts = items.filter((r) => !hasForeign(r.title, PART_WORDS));
   const strict = noParts.filter((r) => !hasForeign(r.title, VARIANT_WORDS));
   if (strict.length >= min) return strict;
-  if (noParts.length >= min) return noParts;
-  return items;
+  // Hissə/aksesuar elanlarını (disk, qab, ekran ...) az nəticə olanda belə QAYTARMIRIQ —
+  // yanlış məhsul göstərməkdənsə az nəticə yaxşıdır. Yalnız variant süzgəci yumşaldılır.
+  return noParts.length ? noParts : items.filter(() => false);
 }
