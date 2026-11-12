@@ -379,6 +379,10 @@ model Listing {
   title                String
   // Ştrix-kod (GTIN: EAN-13/EAN-8/UPC-A/ITF-14) — çeklə və mağazalarla qiymət müqayisəsi üçün.
   barcode              String?
+  // Marketin öz daxili məhsul kodu (SKU / artikul) — satıcı təyin edir, Excel idxalından da gəlir.
+  sku                  String?
+  // Məhsulun QR kodunun mətni/linki (Excel idxalından və ya redaktədən).
+  qrCode               String?
   description          String
   price                Float
   category             String

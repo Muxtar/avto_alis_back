@@ -689,6 +689,8 @@ router.post('/me/listings', listingWriteLimiter, adminAuth, upload.array('images
       data: {
         userId: sellerUserId, createdById: req.adminId!, title, description, price: parseFloat(price),
         barcode: bc.value ?? null,
+        sku: req.body.sku ? String(req.body.sku).trim().slice(0, 100) || null : null,
+        qrCode: req.body.qrCode ? String(req.body.qrCode).trim().slice(0, 500) || null : null,
         category, type, images, location: effectiveLocation, phone: phone || null,
         condition: condition || 'NEW',
         country: country || null,
@@ -814,6 +816,8 @@ router.put('/me/listings/:id', adminAuth, upload.array('images', 5), processImag
       data: {
         ...(title !== undefined && { title }), ...(description !== undefined && { description }),
         ...(req.body.barcode !== undefined && { barcode: bcUpd.value }),
+        ...(req.body.sku !== undefined && { sku: String(req.body.sku ?? '').trim().slice(0, 100) || null }),
+        ...(req.body.qrCode !== undefined && { qrCode: String(req.body.qrCode ?? '').trim().slice(0, 500) || null }),
         ...(price !== undefined && { price: parseFloat(price) }), ...(category !== undefined && { category }),
         ...(type !== undefined && { type }), ...(location !== undefined && { location }),
         ...(phone !== undefined && { phone }),
@@ -937,8 +941,11 @@ router.put('/me/listings/:id', adminAuth, upload.array('images', 5), processImag
   }
 });
 
-// Bulk publish from desktop sync — accepts up to 100 items at once.
-// Used by Kassa SQL desktop app to push local inventory to tradixai.
+// Toplu elan yükləmə — bir sorğuda 500-ə qədər məhsul.
+// İstifadə edənlər: Kassa SQL desktop proqramı və saytdakı «Excel ilə əlavə et»
+// (/account/import). Şəkil gəlmir — elan şəkilsiz yaradılır, kartda yer tutucu
+// görünür, satıcı şəkli sonra əlavə edir. Kateqoriya verilməsə «Digər» yazılır.
+// Səhv sətir idxalı dayandırmır: `errors`-da indeksi və səbəbi qayıdır.
 router.post('/me/listings/bulk', bulkLimiter, adminAuth, async (req: AuthRequest, res: Response) => {
   try {
     const items = req.body?.items;
@@ -947,8 +954,8 @@ router.post('/me/listings/bulk', bulkLimiter, adminAuth, async (req: AuthRequest
       res.status(400).json({ success: false, message: 'items massiv tələb olunur' });
       return;
     }
-    if (items.length > 100) {
-      res.status(400).json({ success: false, message: 'Maksimum 100 məhsul bir sorğuda' });
+    if (items.length > 500) {
+      res.status(400).json({ success: false, message: 'Maksimum 500 məhsul bir sorğuda' });
       return;
     }
 
@@ -956,12 +963,22 @@ router.post('/me/listings/bulk', bulkLimiter, adminAuth, async (req: AuthRequest
     let bizId: number | null = null;
     let bizObjId: number | null = null;
     let sellerUserId = req.adminId!;
+    // Konum: obyektə bağlıdırsa obyektin ünvanı, yoxsa istifadəçinin profil şəhəri/ünvanı.
+    let defCity: string | null = null;
+    let defLocation: string | null = null;
+    let defLat: number | null = null;
+    let defLng: number | null = null;
     if (businessObjectId) {
       const r = await resolveObjectForSelling(businessObjectId, req.adminId!);
       if (r.error) { res.status(r.code || 403).json({ success: false, message: r.error }); return; }
       bizId = r.bizId!;
       bizObjId = r.bizObjId!;
       sellerUserId = r.ownerId ?? req.adminId!;   // satıcı biznes sahibidir (işçi yükləsə belə)
+      defCity = r.objCity ?? null; defLocation = r.objAddress ?? null;
+      defLat = r.objLat ?? null; defLng = r.objLng ?? null;
+    } else {
+      const me = await prisma.user.findUnique({ where: { id: req.adminId! }, select: { city: true, address: true } });
+      defCity = me?.city || null; defLocation = me?.address || null;
     }
     // VÖEN-li toplu yükləmədə obyekt mütləqdir.
     if (listingMode === 'voen' && !bizObjId) {
@@ -977,10 +994,23 @@ router.post('/me/listings/bulk', bulkLimiter, adminAuth, async (req: AuthRequest
     for (let i = 0; i < items.length; i++) {
       const it = items[i];
       try {
-        if (!it?.title || !it?.price || !it?.category) {
-          errors.push({ index: i, message: 'title, price, category tələb olunur', externalId: it?.externalId });
+        const title = String(it?.title ?? '').trim();
+        if (!title) {
+          errors.push({ index: i, message: 'Məhsulun adı boşdur', externalId: it?.externalId });
           continue;
         }
+        if (it?.price === undefined || it?.price === null || String(it.price).trim() === '') {
+          errors.push({ index: i, message: 'Qiymət boşdur', externalId: it?.externalId });
+          continue;
+        }
+        const price = parseFloat(String(it.price).replace(',', '.'));
+        if (!Number.isFinite(price) || price <= 0) {
+          errors.push({ index: i, message: 'Qiymət müsbət rəqəm olmalıdır', externalId: it?.externalId });
+          continue;
+        }
+        const stockN = it.stock != null && String(it.stock).trim() !== '' ? parseInt(String(it.stock)) : 1;
+        const sku = it.sku != null ? String(it.sku).trim().slice(0, 100) || null : null;
+        const qrCode = it.qrCode != null ? String(it.qrCode).trim().slice(0, 500) || null : null;
         let barcode: string | null = null;
         if (it.type !== 'SERVICE' && it.barcode != null && String(it.barcode).trim()) {
           const bc = await barcodeFor(it.barcode, sellerUserId);
@@ -991,20 +1021,25 @@ router.post('/me/listings/bulk', bulkLimiter, adminAuth, async (req: AuthRequest
         const listing = await prisma.listing.create({
           data: {
             userId: sellerUserId, createdById: req.adminId!,
-            title: String(it.title),
-            description: String(it.description || it.title),
-            price: parseFloat(String(it.price)),
-            category: String(it.category),
+            title: title.slice(0, 200),
+            description: String(it.description || '').trim() || title,
+            price,
+            category: String(it.category || '').trim() || 'Digər',
             type: it.type === 'SERVICE' ? 'SERVICE' : 'PRODUCT',
             images: [],
             condition: it.condition || 'NEW',
             brand: it.brand ? String(it.brand) : null,
-            stock: it.stock ? parseInt(String(it.stock)) : 1,
+            stock: Number.isFinite(stockN) && stockN >= 0 ? stockN : 1,
             model: it.model ? String(it.model) : null,
             year: it.year ? parseInt(String(it.year)) : null,
-            city: it.city ? String(it.city) : null,
+            city: it.city ? String(it.city) : defCity,
+            location: defLocation,
+            latitude: defLat,
+            longitude: defLng,
             forVehicle: it.forVehicle ? String(it.forVehicle) : null,
             barcode,
+            sku,
+            qrCode,
             businessId: bizId,
             businessObjectId: bizObjId,
             expiresAt,
