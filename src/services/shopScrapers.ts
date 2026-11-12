@@ -11,6 +11,9 @@
 // Alınmayan mənbə sadəcə boş massiv qaytarır — axtarış pozulmur.
 
 import type { WebResult } from './webSearchAI';
+// turbo.az marka/model kataloqunun layihədəki surəti — prod server turbo.az-a
+// çata bilməsə də maşın sorğuları ("bmw x5") tanınsın.
+import bundledTurboCatalog from '../data/turboCatalog.json';
 
 const BROWSER_UA =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36';
@@ -140,8 +143,8 @@ function normCurrency(c: unknown): string {
 // ── tap.az ──────────────────────────────────────────────────────────────────
 // Axtarış səhifəsi SSR-dir; elanlar __NEXT_DATA__ → apolloState-dədir.
 // Açar parametr `q[keywords]` (sadə `keywords` server tərəfdə nəzərə alınmır).
-async function searchTapAz(q: string, tokens: string[]): Promise<WebResult[]> {
-  const page = await getHtml(`https://tap.az/elanlar?q%5Bkeywords%5D=${encodeURIComponent(q)}`);
+async function searchTapAz(q: string, tokens: string[], section = 'elanlar'): Promise<WebResult[]> {
+  const page = await getHtml(`https://tap.az/${section}?q%5Bkeywords%5D=${encodeURIComponent(q)}`);
   if (!page) return [];
   const ap = nextData(page.html)?.props?.pageProps?.apolloState;
   if (!ap || typeof ap !== 'object') return [];
@@ -295,13 +298,31 @@ async function searchLalafo(q: string, tokens: string[]): Promise<WebResult[]> {
 interface TurboCatalog { makes: { id: string; name: string; f: string }[]; models: { id: string; make: string; name: string; f: string }[]; at: number }
 let turboCatalog: TurboCatalog | null = null;
 let turboCatalogLoading: Promise<TurboCatalog | null> | null = null;
+let turboCatalogFailedAt = 0;
+
+function catalogFromBundle(): TurboCatalog {
+  const b: any = bundledTurboCatalog;
+  return {
+    makes: (b.makes || []).map(([id, name]: [string, string]) => ({ id, name, f: fold(name) })),
+    models: (b.models || []).map(([id, make, name]: [string, string, string]) => ({ id, make, name, f: fold(name) })),
+    at: 0,   // canlı yükləmə uğurlu olanda əvəzlənsin
+  };
+}
 
 async function loadTurboCatalog(): Promise<TurboCatalog | null> {
-  if (turboCatalog && Date.now() - turboCatalog.at < 24 * 3600 * 1000) return turboCatalog;
+  if (turboCatalog && turboCatalog.at && Date.now() - turboCatalog.at < 24 * 3600 * 1000) return turboCatalog;
+  // Canlı yükləmə uğursuz olubsa, 1 saatdan bir yenidən cəhd et; arada surət işləsin.
+  if (turboCatalog && !turboCatalog.at && Date.now() - turboCatalogFailedAt < 3600 * 1000) return turboCatalog;
   if (turboCatalogLoading) return turboCatalogLoading;
   turboCatalogLoading = (async () => {
     const page = await getHtml('https://turbo.az/autos');
-    if (!page) return turboCatalog;   // köhnə kataloq varsa onu saxla
+    if (!page) {
+      // turbo.az əlçatan deyil (məs. server IP-si bloklanır) — layihədəki surət.
+      console.warn('[shopScrapers] turbo.az kataloqu yüklənmədi — layihədəki surət işlədilir');
+      turboCatalogFailedAt = Date.now();
+      if (!turboCatalog) turboCatalog = catalogFromBundle();
+      return turboCatalog;
+    }
     const mk = page.html.match(/<select[^>]*name="q\[make\]\[\]"[^>]*>([\s\S]*?)<\/select>/)?.[1] || '';
     const md = page.html.match(/<select[^>]*name="q\[model\]\[\]"[^>]*>([\s\S]*?)<\/select>/)?.[1] || '';
     const makes = [...mk.matchAll(/<option[^>]*value="(\d+)"[^>]*>([^<]+)</g)]
@@ -312,7 +333,11 @@ async function loadTurboCatalog(): Promise<TurboCatalog | null> {
       const name = decodeEntities(m[2]).trim();
       return { id, make, name, f: fold(name) };
     }).filter((x) => x.id && x.make);
-    if (!makes.length) return turboCatalog;
+    if (!makes.length) {
+      turboCatalogFailedAt = Date.now();
+      if (!turboCatalog) turboCatalog = catalogFromBundle();
+      return turboCatalog;
+    }
     turboCatalog = { makes, models, at: Date.now() };
     return turboCatalog;
   })().finally(() => { turboCatalogLoading = null; });
@@ -335,7 +360,7 @@ function hasCarPartWord(foldedQuery: string): boolean {
     || [...CAR_PART_STEMS].some((st) => st.length >= 4 && w.startsWith(st))));
 }
 
-export interface CarQuery { makeId: string; makeName: string; modelIds: string[]; modelName: string | null }
+export interface CarQuery { makeId: string; makeName: string; modelIds: string[]; modelName: string | null; classLetter?: string }
 
 // Sorğu konkret maşındırsa (marka tapıldı, hissə sözü yoxdur) marka/model ID-lərini qaytarır.
 export async function detectCar(q: string): Promise<CarQuery | null> {
@@ -358,7 +383,7 @@ export async function detectCar(q: string): Promise<CarQuery | null> {
   const cls = rest.trim().match(/^([a-z]{1,3})[ -]?(class|klass|klas|sinif|sinfi)$/);
   if (cls) {
     const ids = models.filter((m) => new RegExp(`^${cls[1]} \\d`).test(m.f)).map((m) => m.id);
-    if (ids.length) return { makeId: make.id, makeName: make.name, modelIds: ids, modelName: `${cls[1].toUpperCase()}-Class` };
+    if (ids.length) return { makeId: make.id, makeName: make.name, modelIds: ids, modelName: `${cls[1].toUpperCase()}-Class`, classLetter: cls[1] };
   }
   const model = models.filter((m) => rest.includes(' ' + m.f + ' ')).sort((a, b) => b.f.length - a.f.length)[0]
     || models.filter((m) => m.f.replace(/\s+/g, '').length >= 2 && glued.includes(m.f.replace(/\s+/g, ''))).sort((a, b) => b.f.length - a.f.length)[0]
@@ -422,9 +447,22 @@ export async function searchShops(q: string): Promise<{ results: WebResult[]; is
   if (!tokens.length) return { results: [], isCar: false };
   const car = await detectCar(q).catch(() => null);
   if (car) {
+    const tapCarQuery = car.classLetter
+      ? `${car.makeName} ${car.classLetter.toUpperCase()}`
+      : `${car.makeName} ${car.modelIds.length === 1 ? car.modelName || '' : ''}`.trim();
+    const tapCarTokens = queryTokens(car.classLetter ? car.makeName : tapCarQuery);
     const [turbo, tap] = await Promise.all([
       searchTurboAz(car).catch(() => [] as WebResult[]),
-      searchTapAz(q, tokens).catch(() => [] as WebResult[]),
+      // tap.az-ın "Avtomobillər" bölməsində axtarış — ümumi axtarışdan fərqli olaraq
+      // burada yalnız maşınlar çıxır (hissə/oyuncaq yox). turbo.az əlçatan
+      // olmayanda əsas mənbə budur.
+      // Sorğu kimi kataloqdakı marka + model adı ("BMW X5", sinifdə "Mercedes E")
+      // işlədilir — istifadəçinin yazılışından ("mersedes e class") asılı olmasın.
+      searchTapAz(tapCarQuery, tapCarTokens, 'elanlar/neqliyyat/avtomobiller')
+        .then((list) => (car.classLetter
+          ? list.filter((r) => new RegExp(`\\b${car.classLetter}[ -]?\\d{2,3}\\b`, 'i').test(r.title))
+          : list))
+        .catch(() => [] as WebResult[]),
     ]);
     const tapCars = tap.filter((r) => /\/elanlar\/neqliyyat\/avtomobiller\//.test(r.url));
     console.log('[shopScrapers] maşın:', car.makeName, car.modelName || '-', '| turbo:', turbo.length, '| tap.az avto:', tapCars.length);
