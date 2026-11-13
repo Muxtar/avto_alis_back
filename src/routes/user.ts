@@ -1092,6 +1092,35 @@ router.post('/me/listings/:id/reactivate', adminAuth, async (req: AuthRequest, r
   }
 });
 
+// Toplu silmə — seçilmiş elanları bir sorğu ilə silir. Hər elan üçün icazə
+// ayrıca yoxlanır; biri alınmasa qalanları yenə silinir (failed-də qaytarılır).
+router.post('/me/listings/bulk-delete', adminAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const raw: unknown[] = Array.isArray(req.body?.ids) ? req.body.ids : [];
+    const ids = [...new Set(raw.map((x) => Number(x)).filter((n) => Number.isInteger(n) && n > 0))];
+    if (ids.length === 0) { res.status(400).json({ success: false, message: 'Elan seçilməyib' }); return; }
+    if (ids.length > 500) { res.status(400).json({ success: false, message: 'Bir dəfəyə ən çox 500 elan silmək olar' }); return; }
+
+    const found = await prisma.listing.findMany({ where: { id: { in: ids } } });
+    const deleted: number[] = [];
+    const failed: number[] = ids.filter((id) => !found.some((l) => l.id === id));
+    for (const existing of found) {
+      try {
+        if (!(await canManageListing(existing, req.adminId!))) { failed.push(existing.id); continue; }
+        await prisma.listing.delete({ where: { id: existing.id } });
+        if (existing.images) for (const img of existing.images) fs.unlink(path.join(__dirname, "../../uploads", img), () => {});
+        logStaffActivity({ businessId: existing.businessId, objectId: existing.businessObjectId }, req.adminId!, { action: 'listing.deleted', targetType: 'listing', targetId: existing.id, summary: `Məhsulu sildi: «${existing.title}»` });
+        deleted.push(existing.id);
+      } catch {
+        failed.push(existing.id);
+      }
+    }
+    res.json({ success: true, deleted, failed });
+  } catch (error: any) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
 // Delete my listing + cleanup uploaded images
 router.delete('/me/listings/:id', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
