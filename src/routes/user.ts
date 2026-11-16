@@ -1092,28 +1092,70 @@ router.post('/me/listings/:id/reactivate', adminAuth, async (req: AuthRequest, r
   }
 });
 
-// Toplu silmə — seçilmiş elanları bir sorğu ilə silir. Hər elan üçün icazə
-// ayrıca yoxlanır; biri alınmasa qalanları yenə silinir (failed-də qaytarılır).
+// Toplu silmə — seçilmiş elanları bir sorğu ilə silir. Say limiti YOXDUR
+// (Excel ilə minlərlə məhsul yüklənə bilir): elanlar hissə-hissə oxunur və
+// deleteMany ilə silinir. İcazə hər elan üçün yoxlanır (mağaza üzrə keşlənir);
+// silinməyənlər failed-də qaytarılır.
 router.post('/me/listings/bulk-delete', adminAuth, async (req: AuthRequest, res: Response) => {
   try {
+    const me = req.adminId!;
     const raw: unknown[] = Array.isArray(req.body?.ids) ? req.body.ids : [];
     const ids = [...new Set(raw.map((x) => Number(x)).filter((n) => Number.isInteger(n) && n > 0))];
     if (ids.length === 0) { res.status(400).json({ success: false, message: 'Elan seçilməyib' }); return; }
-    if (ids.length > 500) { res.status(400).json({ success: false, message: 'Bir dəfəyə ən çox 500 elan silmək olar' }); return; }
 
-    const found = await prisma.listing.findMany({ where: { id: { in: ids } } });
+    const CHUNK = 1000;
     const deleted: number[] = [];
-    const failed: number[] = ids.filter((id) => !found.some((l) => l.id === id));
-    for (const existing of found) {
+    const failed: number[] = [];
+    const permCache = new Map<string, Promise<boolean>>();
+    const allowed = (l: { userId: number; businessId: number | null; businessObjectId: number | null }) => {
+      if (l.userId === me) return Promise.resolve(true);
+      const key = `${l.userId}:${l.businessId}:${l.businessObjectId}`;
+      if (!permCache.has(key)) permCache.set(key, canManageListing(l, me).catch(() => false));
+      return permCache.get(key)!;
+    };
+    // Fəaliyyət jurnalı: hər elan üçün ayrı sətir yox, mağaza üzrə bir yekun.
+    const logGroups = new Map<string, { businessId: number; objectId: number | null; count: number; firstId: number; firstTitle: string }>();
+
+    for (let i = 0; i < ids.length; i += CHUNK) {
+      const part = ids.slice(i, i + CHUNK);
+      const found = await prisma.listing.findMany({
+        where: { id: { in: part } },
+        select: { id: true, userId: true, businessId: true, businessObjectId: true, title: true, images: true },
+      });
+      const foundIds = new Set(found.map((l) => l.id));
+      for (const id of part) if (!foundIds.has(id)) failed.push(id);
+
+      const ok: typeof found = [];
+      for (const l of found) { if (await allowed(l)) ok.push(l); else failed.push(l.id); }
+      if (ok.length === 0) continue;
+
+      let gone: typeof found = [];
       try {
-        if (!(await canManageListing(existing, req.adminId!))) { failed.push(existing.id); continue; }
-        await prisma.listing.delete({ where: { id: existing.id } });
-        if (existing.images) for (const img of existing.images) fs.unlink(path.join(__dirname, "../../uploads", img), () => {});
-        logStaffActivity({ businessId: existing.businessId, objectId: existing.businessObjectId }, req.adminId!, { action: 'listing.deleted', targetType: 'listing', targetId: existing.id, summary: `Məhsulu sildi: «${existing.title}»` });
-        deleted.push(existing.id);
+        await prisma.listing.deleteMany({ where: { id: { in: ok.map((l) => l.id) } } });
+        gone = ok;
       } catch {
-        failed.push(existing.id);
+        // Hissə bütöv silinmədisə — tək-tək, alınmayanı failed-ə yaz.
+        for (const l of ok) {
+          try { await prisma.listing.delete({ where: { id: l.id } }); gone.push(l); }
+          catch { failed.push(l.id); }
+        }
       }
+      for (const l of gone) {
+        deleted.push(l.id);
+        if (l.images) for (const img of l.images) fs.unlink(path.join(__dirname, "../../uploads", img), () => {});
+        if (l.businessId) {
+          const key = `${l.businessId}:${l.businessObjectId}`;
+          const g = logGroups.get(key);
+          if (g) g.count++;
+          else logGroups.set(key, { businessId: l.businessId, objectId: l.businessObjectId, count: 1, firstId: l.id, firstTitle: l.title });
+        }
+      }
+    }
+
+    for (const g of logGroups.values()) {
+      logStaffActivity({ businessId: g.businessId, objectId: g.objectId }, me, g.count === 1
+        ? { action: 'listing.deleted', targetType: 'listing', targetId: g.firstId, summary: `Məhsulu sildi: «${g.firstTitle}»` }
+        : { action: 'listing.deleted', targetType: 'listing', summary: `${g.count} məhsulu toplu sildi` });
     }
     res.json({ success: true, deleted, failed });
   } catch (error: any) {
