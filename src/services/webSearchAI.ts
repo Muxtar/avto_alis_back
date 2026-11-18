@@ -15,8 +15,10 @@
 
 import Anthropic from '@anthropic-ai/sdk';
 import { resolveFlag } from './settings';
+import { PrismaClient } from '@prisma/client';
 import { searchShops, searchScope, type SearchScope, fetchProductPage, looksLikeProductUrl, refineRelevance, matchesQuery, queryTokens, filterByCategory } from './shopScrapers';
 import { aiRankResults, aiRankEnabled } from './searchRank';
+import { parseIntent, applyIntent, hasFilters } from './searchIntent';
 import { tavilyCarListings, tavilyProductListings, tavilyScopeListings } from './tavilyListings';
 export type { SearchScope };
 
@@ -52,6 +54,9 @@ export interface WebSearchResponse {
   summary: string;      // qısa Azərbaycanca xülasə
   results: WebResult[];
   error?: string;
+  // true → bu İLKİN cavabdır (indeks nəticələri və ya köhnəlmiş keş); canlı yoxlama
+  // arxada davam edir, klient bir neçə saniyədən sonra eyni sorğunu təkrar göndərir.
+  refining?: boolean;
 }
 
 const EMPTY: WebSearchResponse = { ok: false, mode: 'product', summary: '', results: [] };
@@ -319,21 +324,34 @@ Azərbaycanla əlaqəsini yoxla. Əlaqəni izah edə bilmirsənsə, nəticəni a
  * Claude web_search yoluna düşülür. İstifadəçiyə qaytarılan forma eynidir.
  * @param query istifadəçinin axtarış mətni
  */
-export async function webSearch(query: string, mode: SearchMode = 'auto', scope?: SearchScope): Promise<WebSearchResponse> {
-  const q = query.trim().slice(0, 200);
-  if (!q) return { ...EMPTY, error: 'Axtarış mətni boşdur.' };
+// ── Davamlı keş (DB) ─────────────────────────────────────────────────────────
+// Yaddaş keşi hər yayımda (deploy) silinirdi — populyar sorğular yenidən 10+ saniyə
+// çəkirdi. Məhsul nəticələri bazada da saxlanılır (şəxs axtarışı YOX — sosial
+// profil məlumatı bazaya yazılmır).
+const prisma = new PrismaClient();
+// Köhnəlmiş (20 dəq – 6 saat) nəticə DƏRHAL göstərilir və arxada təzələnir.
+const STALE_MAX = 6 * 60 * 60 * 1000;
 
-  // Keş açarına rejim də daxildir — eyni söz "məhsul" və "şəxs" rejimlərində
-  // fərqli nəticə verir (məs. "Rəna Səlimova" ad ola bilər, marka da).
-  const key = `${mode}|${scope || '-'}|${cacheKey(q)}`;
-  const hit = cache.get(key);
-  if (hit && Date.now() - hit.at < hit.ttl) {
-    console.log('[webSearch] keş HIT — sorğu:', q);
-    return hit.data;
-  }
+async function dbCacheGet(key: string): Promise<CacheEntry | null> {
+  try {
+    const row = await prisma.webSearchCache.findUnique({ where: { key } });
+    if (!row) return null;
+    const data = row.data as unknown as WebSearchResponse;
+    if (!data || !Array.isArray(data.results)) return null;
+    return { at: row.at.getTime(), ttl: TTL_HIT, data };
+  } catch (e: any) { console.error('[webSearch] db keş oxu:', e?.message); return null; }
+}
 
-  const data = await webSearchUncached(q, mode, scope);
+function dbCacheSet(key: string, data: WebSearchResponse): void {
+  const json = JSON.parse(JSON.stringify({ ...data, refining: undefined }));
+  prisma.webSearchCache.upsert({ where: { key }, create: { key, data: json, at: new Date() }, update: { data: json, at: new Date() } })
+    .then(() => (Math.random() < 0.02
+      ? prisma.webSearchCache.deleteMany({ where: { at: { lt: new Date(Date.now() - 24 * 3600 * 1000) } } }).then(() => undefined)
+      : undefined))
+    .catch((e: any) => console.error('[webSearch] db keş yaz:', e?.message));
+}
 
+function cacheSet(key: string, mode: SearchMode, data: WebSearchResponse): void {
   // TTL: nəticə var → uzun, boş → orta, xəta → qısa.
   const ttl = data.ok ? (data.results.length > 0 ? TTL_HIT : TTL_EMPTY) : TTL_ERROR;
   cache.delete(key);                          // varsa sona köçsün (LRU təmizləmə üçün)
@@ -342,7 +360,77 @@ export async function webSearch(query: string, mode: SearchMode = 'auto', scope?
     const oldest = cache.keys().next().value;
     if (oldest !== undefined) cache.delete(oldest);
   }
-  return data;
+  if (data.ok && data.mode === 'product' && data.results.length && mode !== 'person') dbCacheSet(key, data);
+}
+
+// ── Gedən axtarışlar ─────────────────────────────────────────────────────────
+// Eyni sorğu eyni anda iki dəfə gələndə (prod loglarında hər axtarış cüt gedirdi)
+// yalnız BİR dəfə icra olunur. `prelim` — canlı yoxlamadan əvvəlki ilkin nəticə.
+interface Job { promise: Promise<WebSearchResponse>; prelim: WebSearchResponse | null; prelimReady: Promise<null> }
+const inflight = new Map<string, Job>();
+
+function startJob(key: string, q: string, mode: SearchMode, scope: SearchScope | undefined, stale: WebSearchResponse | null): Job {
+  let ready: (v: null) => void = () => {};
+  const job: Job = { prelim: stale, prelimReady: new Promise<null>((r) => { ready = r; }), promise: null as unknown as Promise<WebSearchResponse> };
+  if (stale) ready(null);
+  const t0 = Date.now();
+  job.promise = webSearchUncached(q, mode, scope, (items) => {
+    if (job.prelim || !items.length) return;       // köhnə keş varsa o daha etibarlıdır
+    job.prelim = { ok: true, mode: 'product', summary: '', results: items };
+    console.log('[webSearch] ilkin nəticə —', q, '|', items.length, '|', Date.now() - t0, 'ms');
+    ready(null);
+  })
+    .catch((e: any) => { console.error('[webSearch] xəta:', e?.message); return { ...EMPTY, error: 'İnternet axtarışı alınmadı.' } as WebSearchResponse; })
+    .then((data) => {
+      // Təzələmə boş/xətalı qayıtdısa köhnə yaxşı nəticəni silmirik.
+      if (!(stale && !(data.ok && data.results.length))) cacheSet(key, mode, data);
+      console.log('[webSearch] yekun —', q, '| nəticə:', data.results.length, '|', Date.now() - t0, 'ms');
+      inflight.delete(key);
+      return data;
+    });
+  inflight.set(key, job);
+  return job;
+}
+
+const wait = (ms: number) => new Promise<null>((r) => setTimeout(() => r(null), ms));
+
+export async function webSearch(query: string, mode: SearchMode = 'auto', scope?: SearchScope): Promise<WebSearchResponse> {
+  const q = query.trim().slice(0, 200);
+  if (!q) return { ...EMPTY, error: 'Axtarış mətni boşdur.' };
+
+  // Keş açarına rejim və sahə də daxildir — eyni söz fərqli rejimdə fərqli nəticə verir.
+  const key = `${mode}|${scope || '-'}|${cacheKey(q)}`;
+
+  // Artıq gedən axtarış varsa (təkrar sorğu / klientin yenidən soruşması) ona qoşul:
+  // yekun 7 saniyəyə hazır olsa onu, olmasa ilkin nəticəni qaytar.
+  const running = inflight.get(key);
+  if (running) {
+    if (!running.prelim) await Promise.race([running.promise, running.prelimReady]);
+    const done = await Promise.race([running.promise, wait(running.prelim ? 7000 : 0)]);
+    if (done) return done;
+    return running.prelim ? { ...running.prelim, refining: true } : running.promise;
+  }
+
+  let hit = cache.get(key) || null;
+  if (!hit && mode !== 'person') {
+    hit = await dbCacheGet(key);
+    if (hit) cache.set(key, hit);
+  }
+  if (hit) {
+    const age = Date.now() - hit.at;
+    if (age < hit.ttl) { console.log('[webSearch] keş HIT — sorğu:', q); return hit.data; }
+    // Köhnəlib, amma hələ yararlıdır → dərhal göstər, arxada təzələ.
+    if (hit.data.ok && hit.data.results.length && age < STALE_MAX) {
+      console.log('[webSearch] keş KÖHNƏ (arxada təzələnir) — sorğu:', q, '| yaş dəq:', Math.round(age / 60000));
+      startJob(key, q, mode, scope, hit.data);
+      return { ...hit.data, refining: true };
+    }
+  }
+
+  const job = startJob(key, q, mode, scope, null);
+  const first = await Promise.race([job.promise, job.prelimReady]);
+  if (first) return first;                                  // yekun ilkindən tez gəldi
+  return { ...job.prelim!, refining: true };
 }
 
 // Keşsiz əsl axtarış — əvvəlcə sorğu tipini müəyyən edirik (şəxs, yoxsa məhsul).
@@ -350,7 +438,9 @@ export async function webSearch(query: string, mode: SearchMode = 'auto', scope?
 //   ai_websearch_tavily  — məhsul üçün əsas Tavily motoru
 //   ai_websearch_claude  — məhsul üçün Claude ehtiyat motoru
 //   ai_person_search     — şəxs (sosial media) axtarışı (Tavily)
-async function webSearchUncached(q: string, mode: SearchMode = 'auto', scope?: SearchScope): Promise<WebSearchResponse> {
+type OnPrelim = (items: WebResult[]) => void;
+
+async function webSearchUncached(q: string, mode: SearchMode = 'auto', scope?: SearchScope, onPrelim?: OnPrelim): Promise<WebSearchResponse> {
   const [tavilyOn, claudeOn, personOn] = await Promise.all([
     resolveFlag('ai_websearch_tavily'),
     resolveFlag('ai_websearch_claude'),
@@ -371,7 +461,7 @@ async function webSearchUncached(q: string, mode: SearchMode = 'auto', scope?: S
 
   // ── Məhsul — AZ saytlarında birbaşa axtarış (açarsız, canlı qiymət) +
   //    Tavily (aktivsə) əlavə mağazalar üçün. Claude yalnız heç nə tapılmasa.
-  const products = await webSearchProducts(q, tavilyOn && hasTavily, scope);
+  const products = await webSearchProducts(q, tavilyOn && hasTavily, scope, onPrelim);
   if (products.ok && products.results.length) return products;
   // Sahə seçilibsə Claude ehtiyatı işləmir — o, başqa saytlardan da gətirir,
   // istifadəçi isə yalnız seçdiyi sahənin saytlarını istəyir.
@@ -627,13 +717,20 @@ const SCOPE_SITES: Record<SearchScope, string[]> = {
   other: ['tap.az', 'lalafo.az'],
 };
 
-async function webSearchProducts(q: string, useTavily: boolean, scope?: SearchScope): Promise<WebSearchResponse> {
+async function webSearchProducts(rawQ: string, useTavily: boolean, scope?: SearchScope, onPrelim?: OnPrelim): Promise<WebSearchResponse> {
+  // Sorğudan süzgəcləri çıxar (qiymət həddi, otaq sayı, il, kirayə/satış). Saytlara
+  // TƏMİZ sorğu gedir, nəticələr isə `fit` ilə süzülür.
+  const intent = parseIntent(rawQ, scope);
+  const q = intent.clean;
+  const fit = (items: WebResult[]) => applyIntent(items, intent);
+  if (hasFilters(intent)) console.log('[webSearch] süzgəc:', JSON.stringify({ ...intent, clean: undefined }), '| təmiz sorğu:', q);
   console.log('[webSearch] məhsul axtarışı — sorğu:', q, '| tavily:', useTavily, '| sahə:', scope || 'avto');
   // 1) Əvvəlcə AZ saytlarında birbaşa (maşın → turbo.az, digər → tap.az/lalafo.az).
   const shop = await (scope ? searchScope(q, scope) : searchShops(q)).catch((e) => {
     console.error('[webSearch] shops:', e?.message);
     return { results: [] as WebResult[], isCar: false, car: null };
   });
+  shop.results = fit(shop.results);
 
   // 2) Kateqoriya süzgəci: oyuncaq / ehtiyat hissə / aksesuar / xidmət kateqoriyalarındakı
   //    elanlar atılır (sorğu bunu açıq istəmirsə). Bütün məhsul növləri üçün işləyir.
@@ -646,23 +743,29 @@ async function webSearchProducts(q: string, useTavily: boolean, scope?: SearchSc
   //    IP-lərinə 403 qaytarır, ona görə orada əsas mənbə budur: konkret elan
   //    linkləri, başlıqdakı qiymət, mətndəki şəkil. Sonra hər linki canlı açmağa
   //    cəhd edirik — açılsa qiymət/şəkil canlı olur, açılmasa indeksdən qalır.
+  const siteOrder = scope ? SCOPE_SITES[scope] : shop.isCar ? ['turbo.az', 'tap.az'] : ['tap.az', 'lalafo.az'];
+  // Seçilmiş sahədən kənar sayt heç bir yolla (indeks, kateqoriya kartı) keçməsin.
+  const inScope = (items: WebResult[]) => (scope ? items.filter((r) => SCOPE_SITES[scope].includes(r.site)) : items);
+  // İlkin nəticə: indeks namizədləri (hələ canlı yoxlanmayıb) — dərhal göstərilir.
+  const prelim = (cands: WebResult[]) => {
+    if (!onPrelim) return;
+    const c = fit(simple ? cands : filterByCategory(cands, q));
+    onPrelim(rankLikeGoogle(inScope(dedupe([...pool, ...c])), q, MAX_RESULTS, siteOrder));
+  };
   let tavCount = 0;
   let tavError: string | undefined;
   let tavRelevant: WebResult[] = [];
   if (pool.length < MIN_RESULTS && useTavily) {
-    const idx = shop.isCar && shop.car ? await tavilyCarListings(shop.car)
-      : scope ? await tavilyScopeListings(q, scope)
-      : await tavilyProductListings(q);
+    const idx = shop.isCar && shop.car ? await tavilyCarListings(shop.car, prelim)
+      : scope ? await tavilyScopeListings(q, scope, prelim)
+      : await tavilyProductListings(q, prelim);
     tavError = idx.error;
-    tavRelevant = simple ? idx.results : filterByCategory(idx.results, q);
+    tavRelevant = fit(simple ? idx.results : filterByCategory(idx.results, q));
     // (Canlı yoxlama tavilyListings daxilində — Tavily Extract ilə.)
     tavCount = tavRelevant.length;
     pool = dedupe([...pool, ...(simple ? tavRelevant : dropOutliers(refineRelevance(tavRelevant, q, MIN_RESULTS)))]);
   }
 
-  const siteOrder = scope ? SCOPE_SITES[scope] : shop.isCar ? ['turbo.az', 'tap.az'] : ['tap.az', 'lalafo.az'];
-  // Seçilmiş sahədən kənar sayt heç bir yolla (indeks, kateqoriya kartı) keçməsin.
-  const inScope = (items: WebResult[]) => (scope ? items.filter((r) => SCOPE_SITES[scope].includes(r.site)) : items);
   pool = inScope(pool);
 
   // 4) AI uyğunluq hakimi (maşın deyilsə və açar varsa): kateqoriya süzgəcindən keçən
@@ -679,7 +782,7 @@ async function webSearchProducts(q: string, useTavily: boolean, scope?: SearchSc
         console.log('[webSearch] məhsul sorğu (AI):', q, '| namizəd:', ordered.length, '| göstərilən:', results.length);
         return {
           ok: true, mode: 'product',
-          summary: results.length ? '' : `"${q}" üçün uyğun elan tapılmadı.`,
+          summary: results.length ? '' : `"${rawQ}" üçün uyğun elan tapılmadı.`,
           results,
         };
       }

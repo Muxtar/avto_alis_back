@@ -20,14 +20,41 @@ const BROWSER_UA =
 const TIMEOUT_MS = 9000;
 const MAX_HTML = 2_500_000;
 
+// ── Bloklanmış saytlar üçün "qoruyucu" ──────────────────────────────────────
+// Prod serverə (datacenter IP) tap.az / turbo.az / lalafo.az 403 qaytarır. Əvvəl
+// HƏR axtarış yenə də bu saytlara müraciət edib boş yerə gözləyirdi. İndi sayt
+// 403/429 verəndə 30 dəqiqə ona sorğu getmir — dərhal indeks yoluna keçilir.
+// Lokalda (AZ IP) saytlar açıldığı üçün qoruyucu heç vaxt işə düşmür.
+const BLOCK_MS = 30 * 60 * 1000;
+const blockedUntil = new Map<string, number>();
+function hostOf(url: string): string {
+  try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return ''; }
+}
+function isHostBlocked(url: string): boolean {
+  // Əl ilə söndürmə (env): DIRECT_SCRAPE=off → birbaşa sorğu ümumiyyətlə getmir.
+  if (process.env.DIRECT_SCRAPE === 'off') return true;
+  const h = hostOf(url);
+  const until = blockedUntil.get(h);
+  if (!until) return false;
+  if (Date.now() > until) { blockedUntil.delete(h); return false; }
+  return true;
+}
+function noteStatus(url: string, status: number): void {
+  if (status !== 403 && status !== 429) return;
+  const h = hostOf(url);
+  if (!blockedUntil.has(h)) console.warn('[shopScrapers]', h, 'HTTP', status, '— 30 dəq birbaşa sorğu dayandırıldı (indeks yolu işləyəcək)');
+  blockedUntil.set(h, Date.now() + BLOCK_MS);
+}
+
 async function getHtml(url: string): Promise<{ html: string; finalUrl: string } | null> {
+  if (isHostBlocked(url)) return null;
   try {
     const res = await fetch(url, {
       headers: { 'user-agent': BROWSER_UA, accept: 'text/html,application/xhtml+xml', 'accept-language': 'az,en;q=0.8' },
       redirect: 'follow',
       signal: AbortSignal.timeout(TIMEOUT_MS),
     });
-    if (!res.ok) return null;
+    if (!res.ok) { noteStatus(url, res.status); return null; }
     const html = (await res.text()).slice(0, MAX_HTML);
     return { html, finalUrl: res.url || url };
   } catch (e: any) {
@@ -182,11 +209,12 @@ async function loadLalafoCategories(): Promise<Map<number, string>> {
   if (lalafoCatsLoading) return lalafoCatsLoading;
   lalafoCatsLoading = (async () => {
     try {
+      if (isHostBlocked('https://lalafo.az/')) return lalafoCats?.map || new Map();
       const res = await fetch('https://lalafo.az/api/catalog/v3/categories/tree?with_duplicates=1&expand=url', {
         headers: { 'user-agent': BROWSER_UA, 'country-id': '13', device: 'pc', language: 'az_AZ', accept: 'application/json' },
         signal: AbortSignal.timeout(TIMEOUT_MS),
       });
-      if (!res.ok) return lalafoCats?.map || new Map();
+      if (!res.ok) { noteStatus('https://lalafo.az/', res.status); return lalafoCats?.map || new Map(); }
       const tree = (await res.json()) as any[];
       const map = new Map<number, string>();
       const walk = (nodes: any[], path: string[]) => {

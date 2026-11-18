@@ -2248,3 +2248,13 @@ model HomeAd {
   @@index([status, placement, endsAt])
   @@index([userId])
 }
+
+// İnternet axtarışının davamlı keşi (yalnız MƏHSUL nəticələri; şəxs axtarışı yazılmır).
+// Yayımdan (deploy) sonra populyar sorğular yenidən 10+ saniyə çəkməsin deyə.
+model WebSearchCache {
+  key  String   @id
+  data Json
+  at   DateTime @default(now())
+
+  @@index([at])
+}

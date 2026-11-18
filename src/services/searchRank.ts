@@ -26,8 +26,12 @@ function getClient(): Anthropic | null {
   return client;
 }
 
+// Balans/açar xətası (400/401/403) hər axtarışda təkrar-təkrar yoxlanmasın: xəta
+// gələndə AI hakimi 10 dəqiqə söndürülür (balans artırılanda özü bərpa olur).
+let pausedUntil = 0;
+
 export function aiRankEnabled(): boolean {
-  return !!process.env.ANTHROPIC_API_KEY;
+  return !!process.env.ANTHROPIC_API_KEY && Date.now() > pausedUntil;
 }
 
 const SYSTEM = `Sən Azərbaycan elan saytlarında (tap.az, lalafo.az, turbo.az və mağazalar) məhsul axtarışının uyğunluq hakimisən.
@@ -105,7 +109,13 @@ export async function aiRankResults(q: string, items: WebResult[]): Promise<WebR
     return out;
   } catch (e: any) {
     if (e instanceof Anthropic.RateLimitError) console.error('[searchRank] limit (429)');
-    else if (e instanceof Anthropic.APIError) console.error('[searchRank] API xəta', e.status, e.message?.slice(0, 200));
+    else if (e instanceof Anthropic.APIError) {
+      console.error('[searchRank] API xəta', e.status, e.message?.slice(0, 200));
+      if (e.status === 400 || e.status === 401 || e.status === 403) {
+        pausedUntil = Date.now() + 10 * 60 * 1000;
+        console.warn('[searchRank] AI hakimi 10 dəqiqə dayandırıldı (balans/açar xətası)');
+      }
+    }
     else console.error('[searchRank] xəta:', e?.name, e?.message);
     return null;
   }

@@ -252,7 +252,8 @@ router.post('/search/web', webSearchLimiter, adminAuth, async (req: AuthRequest,
       for (const r of results) if (r.image) allowImageHost(r.image);
       try {
         // Şəkli hələ olmayanlar üçün og:image (ehtiyat).
-        const need = results.filter((r) => !r.image);
+        // İlkin (refining) cavabda əlavə sorğu getmir — kartlar dərhal çıxsın.
+        const need = data.refining ? [] : results.filter((r) => !r.image);
         const previews = need.length ? await fetchPreviews(need.map((r) => ({ url: r.url })), 6) : new Map();
         if (previews.size) {
           results = results.map((r) => {
@@ -264,7 +265,7 @@ router.post('/search/web', webSearchLimiter, adminAuth, async (req: AuthRequest,
         }
       } catch (e: any) { console.error('[search/web] product preview:', e?.message); }
     }
-    res.json({ success: true, mode: data.mode, summary: data.summary, results, engineError });
+    res.json({ success: true, mode: data.mode, summary: data.summary, results, engineError, refining: !!data.refining });
   } catch (error: any) {
     res.status(400).json({ success: false, message: error.message });
   }

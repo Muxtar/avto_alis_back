@@ -151,6 +151,30 @@ function livePrice(raw: string, url: string): { price: number | null; currency: 
   }
   // Şəkil sətirləri (qalereya 40+ sətir ola bilər) pəncərəni doldurmasın.
   const lines = text.split('\n').filter((l) => l.trim() && !/^\s*\[?!\[/.test(l));
+  // ── Sayta xüsusi qaydalar (prod-da səhifələrin real mətninə baxılıb) ──
+  // bina.az: qiymət başlıqdan sonrakı ilk "256 000 AZN3 560 AZN/m²" / "798 AZN/ay" sətridir.
+  // Kirayədə "/ay" olduğu üçün ümumi qayda onu taksit sayıb atırdı → qiymət boş qalırdı.
+  if (/bina\.az/.test(url)) {
+    const h = lines.findIndex((l) => /^#\s/.test(l));
+    for (const line of lines.slice(Math.max(0, h), h + 12)) {
+      // Minlik ayırıcı adi boşluq yox, qırılmaz boşluqdur (\s onu da tutur).
+      const m = line.match(/^\s*(\d{1,3}(?:\s\d{3})+|\d+)\s*(AZN|USD|EUR|₼|\$|€)/);
+      if (m) { const price = parseNum(m[1]); if (price != null) return { price, currency: curOf(m[2]) }; }
+    }
+    return { price: null, currency: 'AZN' };
+  }
+  // tap.az: elanın qiyməti başlığın YANINDADIR (±3 sətir). Səhifənin sonundakı
+  // rəqəmlər başqa şeydir — kirayə elanında 90 m² mənzilə "217₼" oxunmuşdu.
+  if (/tap\.az/.test(url)) {
+    const h = lines.findIndex((l) => /^#\s/.test(l));
+    if (h >= 0) {
+      for (const line of lines.slice(Math.max(0, h - 3), h + 4)) {
+        const m = line.match(new RegExp(`^\\s*(${NUM})\\s*(AZN|₼|\\$|USD|€|EUR)\\s*$`, 'i'));
+        if (m) { const price = parseNum(m[1]); if (price != null) return { price, currency: curOf(m[2]) }; }
+      }
+      return { price: null, currency: 'AZN' };
+    }
+  }
   // Əsas qiymət başlığa ("# ...") yaxındır; aşağıda oxşar məhsulların qiymətləri olur.
   // turbo.az-da artıq "№" sətrində kəsilib — pəncərə lazım deyil.
   const ti = lines.findIndex((l) => /^#\s/.test(l));
@@ -377,7 +401,11 @@ async function verifyLive(items: WebResult[], min = 5): Promise<WebResult[]> {
 // Yalnız konkret maşın elanları: turbo.az/autos/<id>-<slug> və tap.az-ın
 // "Avtomobillər" bölməsi. Model dəqiq olmalıdır: "bmw x5" → "BMW X5 M" yox
 // (turbo.az linkinin slug-ı ilə yoxlanılır).
-export async function tavilyCarListings(car: CarQuery): Promise<{ results: WebResult[]; error?: string }> {
+// `onCandidates` — canlı yoxlamadan ƏVVƏL indeks namizədlərini bildirir (iki mərhələli
+// göstərmə: istifadəçi kartları dərhal görür, yoxlama arxada davam edir).
+type OnCandidates = (items: WebResult[]) => void;
+
+export async function tavilyCarListings(car: CarQuery, onCandidates?: OnCandidates): Promise<{ results: WebResult[]; error?: string }> {
   const name = car.classLetter
     ? `${car.makeName} ${car.classLetter.toUpperCase()}-Class`
     : `${car.makeName} ${car.modelIds.length === 1 ? car.modelName || '' : ''}`.trim();
@@ -407,6 +435,7 @@ export async function tavilyCarListings(car: CarQuery): Promise<{ results: WebRe
   console.log('[tavilyListings] maşın:', name, '| xam:', rows.length, '| elan:', out.length);
   // turbo.az birinci (maşın üçün əsas sayt), ən çox 12 namizəd canlı yoxlanılır.
   const cands = dedupe(out).sort((a, b) => (a.site === 'turbo.az' ? 0 : 1) - (b.site === 'turbo.az' ? 0 : 1)).slice(0, 15);
+  if (cands.length) onCandidates?.(cands);
   return { results: await verifyLive(cands) };
 }
 
@@ -444,7 +473,7 @@ function isListingUrl(url: string): boolean {
 //   car        → turbo.az/autos/<id>, tap.az «Avtomobillər»
 //   realestate → bina.az/items/<id>, tap.az «Daşınmaz əmlak»
 //   other      → tap.az, lalafo.az elanları
-export async function tavilyScopeListings(q: string, scope: 'car' | 'realestate' | 'other'): Promise<{ results: WebResult[]; error?: string }> {
+export async function tavilyScopeListings(q: string, scope: 'car' | 'realestate' | 'other', onCandidates?: OnCandidates): Promise<{ results: WebResult[]; error?: string }> {
   const domains = scope === 'car' ? ['turbo.az', 'tap.az'] : scope === 'realestate' ? ['bina.az', 'tap.az'] : ['tap.az', 'lalafo.az'];
   // HƏR SAYT AYRICA soruşulur. Prod-da ölçülüb: iki sayt bir sorğuda olanda
   // indeks əsasən siyahı/axtarış səhifələri qaytarır (bina.az elanı 0–6, tap.az 0),
@@ -493,10 +522,11 @@ export async function tavilyScopeListings(q: string, scope: 'car' | 'realestate'
   const bySite = domains.map((d) => uniq.filter((r) => r.site === d));
   const cands: WebResult[] = [];
   for (let i = 0; cands.length < 12 && bySite.some((l) => i < l.length); i++) for (const l of bySite) if (l[i] && cands.length < 12) cands.push(l[i]);
+  if (cands.length) onCandidates?.(cands);
   return { results: cands.length ? await verifyLive(cands) : [] };
 }
 
-export async function tavilyProductListings(q: string): Promise<{ results: WebResult[]; error?: string }> {
+export async function tavilyProductListings(q: string, onCandidates?: OnCandidates): Promise<{ results: WebResult[]; error?: string }> {
   // İki paralel axtarış: elan saytları (tap.az, lalafo.az) və mağazalar — əks halda
   // mağaza səhifələri elanları sıxışdırıb çıxarır.
   const [ads, shops] = await Promise.all([
@@ -535,6 +565,7 @@ export async function tavilyProductListings(q: string): Promise<{ results: WebRe
     out.push(res);
   }
   console.log('[tavilyListings] məhsul:', q, '| xam:', rows.length, '| elan:', out.length, '| kateqoriya:', catPages.length);
+  if (out.length) onCandidates?.(dedupe(out).slice(0, 15));
   // Elan linkləri canlı yoxlanılır; paralel olaraq kateqoriya səhifələrindən kartlar.
   const [listings, cards] = await Promise.all([
     out.length ? verifyLive(dedupe(out).slice(0, 15)) : Promise.resolve([] as WebResult[]),
