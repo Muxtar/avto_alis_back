@@ -72,7 +72,12 @@ router.get('/listings', async (req: Request, res: Response) => {
       where.type = 'PRODUCT';
       (where.AND as Prisma.ListingWhereInput[]).push({ type: 'PRODUCT' }, { groupBuyDays: { gt: 0 } }, { stock: { gt: 1 } }, { priceTiers: { some: {} } });
     }
-    if (condition) where.condition = condition as any;
+    // Vəziyyət (yeni/işlənmiş) yalnız məhsula aiddir: xidmət siyahısında nəzərə
+    // alınmır, qarışıq axtarışda isə xidmətləri süzüb atmır.
+    if (condition && type !== 'SERVICE') {
+      if (where.type === 'PRODUCT') where.condition = condition as any;
+      else where.AND = [...(Array.isArray(where.AND) ? where.AND : where.AND ? [where.AND] : []), { OR: [{ type: 'SERVICE' }, { condition: condition as any }] }];
+    }
     if (country) where.country = country as string;
     if (brand) where.brand = { contains: brand as string, mode: 'insensitive' };
     if (model) where.model = { contains: model as string, mode: 'insensitive' };
