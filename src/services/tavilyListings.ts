@@ -424,6 +424,49 @@ function isListingUrl(url: string): boolean {
   } catch { return false; }
 }
 
+// ── Seçilmiş sahə üzrə (istifadəçi «Maşın / Daşınmaz əmlak / Digər» seçib) ────
+// Yalnız həmin sahənin saytları və yalnız konkret elan linkləri:
+//   car        → turbo.az/autos/<id>, tap.az «Avtomobillər»
+//   realestate → bina.az/items/<id>, tap.az «Daşınmaz əmlak»
+//   other      → tap.az, lalafo.az elanları
+export async function tavilyScopeListings(q: string, scope: 'car' | 'realestate' | 'other'): Promise<{ results: WebResult[]; error?: string }> {
+  const domains = scope === 'car' ? ['turbo.az', 'tap.az'] : scope === 'realestate' ? ['bina.az', 'tap.az'] : ['tap.az', 'lalafo.az'];
+  const rows = await tavily(scope === 'car' ? `${q} satılır` : q, domains, 20);
+  if (!Array.isArray(rows)) return { results: [], error: rows.error };
+  const tokens = queryTokens(q);
+  const out: WebResult[] = [];
+  for (const r of rows) {
+    if (!r?.url) continue;
+    let path = '';
+    try { path = new URL(r.url).pathname.replace(/\/+$/, ''); } catch { continue; }
+    const site = siteOf(r.url);
+    let category: string | null = site === 'tap.az' ? path.split('/').slice(2, 4).join('/') : null;
+    if (scope === 'car') {
+      const turbo = site === 'turbo.az' && /^\/autos\/\d+/.test(path);
+      const tapCar = site === 'tap.az' && /^\/elanlar\/neqliyyat\/avtomobiller\/\d+$/.test(path);
+      if (!turbo && !tapCar) continue;
+      if (turbo) category = 'turbo.az/autos';
+    } else if (scope === 'realestate') {
+      const bina = site === 'bina.az' && /^\/items\/\d+$/.test(path);
+      const tapHome = site === 'tap.az' && /^\/elanlar\/dasinmaz-emlak\/[^/]+\/\d+$/.test(path);
+      if (!bina && !tapHome) continue;
+      if (bina) category = 'bina.az/items';
+    } else {
+      if (!domains.includes(site) || !isListingUrl(r.url)) continue;
+    }
+    const res = toResult(r, category);
+    // Əmlakda başlıq sorğunu sözbəsöz daşımır ("3 otaqlı mənzil Yasamal" ↔
+    // "Satılır 3 otaqlı yeni tikili 95 m², Yasamal r.") — indeksin uyğunluğuna güvənirik.
+    if (scope !== 'realestate' && !matchesQuery(res.title, tokens)
+      && !matchesQuery(decodeURIComponent(path).replace(/[-_/]+/g, ' '), tokens)) continue;
+    out.push(res);
+  }
+  console.log('[tavilyListings] sahə:', scope, '| sorğu:', q, '| xam:', rows.length, '| elan:', out.length);
+  const first = domains[0];
+  const cands = dedupe(out).sort((a, b) => (a.site === first ? 0 : 1) - (b.site === first ? 0 : 1)).slice(0, 15);
+  return { results: cands.length ? await verifyLive(cands) : [] };
+}
+
 export async function tavilyProductListings(q: string): Promise<{ results: WebResult[]; error?: string }> {
   // İki paralel axtarış: elan saytları (tap.az, lalafo.az) və mağazalar — əks halda
   // mağaza səhifələri elanları sıxışdırıb çıxarır.

@@ -15,9 +15,10 @@
 
 import Anthropic from '@anthropic-ai/sdk';
 import { resolveFlag } from './settings';
-import { searchShops, fetchProductPage, looksLikeProductUrl, refineRelevance, matchesQuery, queryTokens, filterByCategory } from './shopScrapers';
+import { searchShops, searchScope, type SearchScope, fetchProductPage, looksLikeProductUrl, refineRelevance, matchesQuery, queryTokens, filterByCategory } from './shopScrapers';
 import { aiRankResults, aiRankEnabled } from './searchRank';
-import { tavilyCarListings, tavilyProductListings } from './tavilyListings';
+import { tavilyCarListings, tavilyProductListings, tavilyScopeListings } from './tavilyListings';
+export type { SearchScope };
 
 export interface WebResult {
   title: string;
@@ -318,20 +319,20 @@ Azərbaycanla əlaqəsini yoxla. Əlaqəni izah edə bilmirsənsə, nəticəni a
  * Claude web_search yoluna düşülür. İstifadəçiyə qaytarılan forma eynidir.
  * @param query istifadəçinin axtarış mətni
  */
-export async function webSearch(query: string, mode: SearchMode = 'auto'): Promise<WebSearchResponse> {
+export async function webSearch(query: string, mode: SearchMode = 'auto', scope?: SearchScope): Promise<WebSearchResponse> {
   const q = query.trim().slice(0, 200);
   if (!q) return { ...EMPTY, error: 'Axtarış mətni boşdur.' };
 
   // Keş açarına rejim də daxildir — eyni söz "məhsul" və "şəxs" rejimlərində
   // fərqli nəticə verir (məs. "Rəna Səlimova" ad ola bilər, marka da).
-  const key = `${mode}|${cacheKey(q)}`;
+  const key = `${mode}|${scope || '-'}|${cacheKey(q)}`;
   const hit = cache.get(key);
   if (hit && Date.now() - hit.at < hit.ttl) {
     console.log('[webSearch] keş HIT — sorğu:', q);
     return hit.data;
   }
 
-  const data = await webSearchUncached(q, mode);
+  const data = await webSearchUncached(q, mode, scope);
 
   // TTL: nəticə var → uzun, boş → orta, xəta → qısa.
   const ttl = data.ok ? (data.results.length > 0 ? TTL_HIT : TTL_EMPTY) : TTL_ERROR;
@@ -349,7 +350,7 @@ export async function webSearch(query: string, mode: SearchMode = 'auto'): Promi
 //   ai_websearch_tavily  — məhsul üçün əsas Tavily motoru
 //   ai_websearch_claude  — məhsul üçün Claude ehtiyat motoru
 //   ai_person_search     — şəxs (sosial media) axtarışı (Tavily)
-async function webSearchUncached(q: string, mode: SearchMode = 'auto'): Promise<WebSearchResponse> {
+async function webSearchUncached(q: string, mode: SearchMode = 'auto', scope?: SearchScope): Promise<WebSearchResponse> {
   const [tavilyOn, claudeOn, personOn] = await Promise.all([
     resolveFlag('ai_websearch_tavily'),
     resolveFlag('ai_websearch_claude'),
@@ -370,9 +371,11 @@ async function webSearchUncached(q: string, mode: SearchMode = 'auto'): Promise<
 
   // ── Məhsul — AZ saytlarında birbaşa axtarış (açarsız, canlı qiymət) +
   //    Tavily (aktivsə) əlavə mağazalar üçün. Claude yalnız heç nə tapılmasa.
-  const products = await webSearchProducts(q, tavilyOn && hasTavily);
+  const products = await webSearchProducts(q, tavilyOn && hasTavily, scope);
   if (products.ok && products.results.length) return products;
-  if (claudeOn && hasClaude) {
+  // Sahə seçilibsə Claude ehtiyatı işləmir — o, başqa saytlardan da gətirir,
+  // istifadəçi isə yalnız seçdiyi sahənin saytlarını istəyir.
+  if (!scope && claudeOn && hasClaude) {
     const c = await webSearchClaude(q);
     // Claude-un linkləri də açılıb yoxlanılır — qiymət səhifədən gəlsin.
     const verified = c.ok && c.results.length ? await verifyLinks(c.results) : [];
@@ -617,18 +620,27 @@ function dedupe(items: WebResult[]): WebResult[] {
   });
 }
 
-async function webSearchProducts(q: string, useTavily: boolean): Promise<WebSearchResponse> {
-  console.log('[webSearch] məhsul axtarışı — sorğu:', q, '| tavily:', useTavily);
+// Sahə üzrə icazəli saytlar (istifadəçi seçimi) — nəticə yalnız bunlardan ola bilər.
+const SCOPE_SITES: Record<SearchScope, string[]> = {
+  car: ['turbo.az', 'tap.az'],
+  realestate: ['bina.az', 'tap.az'],
+  other: ['tap.az', 'lalafo.az'],
+};
+
+async function webSearchProducts(q: string, useTavily: boolean, scope?: SearchScope): Promise<WebSearchResponse> {
+  console.log('[webSearch] məhsul axtarışı — sorğu:', q, '| tavily:', useTavily, '| sahə:', scope || 'avto');
   // 1) Əvvəlcə AZ saytlarında birbaşa (maşın → turbo.az, digər → tap.az/lalafo.az).
-  const shop = await searchShops(q).catch((e) => {
+  const shop = await (scope ? searchScope(q, scope) : searchShops(q)).catch((e) => {
     console.error('[webSearch] shops:', e?.message);
     return { results: [] as WebResult[], isCar: false, car: null };
   });
 
   // 2) Kateqoriya süzgəci: oyuncaq / ehtiyat hissə / aksesuar / xidmət kateqoriyalarındakı
   //    elanlar atılır (sorğu bunu açıq istəmirsə). Bütün məhsul növləri üçün işləyir.
-  const candidates = shop.isCar ? shop.results : filterByCategory(shop.results, q);
-  let pool = shop.isCar ? candidates : dropOutliers(refineRelevance(candidates, q, MIN_RESULTS));
+  //    Maşın və daşınmaz əmlakda mənbə artıq öz bölməsi ilə məhdudlaşıb — süzgəc lazım deyil.
+  const simple = shop.isCar || scope === 'realestate';
+  const candidates = simple ? shop.results : filterByCategory(shop.results, q);
+  let pool = simple ? candidates : dropOutliers(refineRelevance(candidates, q, MIN_RESULTS));
 
   // 3) 5-dən az qalıbsa — Tavily İNDEKSİ. Prod-da tap.az/turbo.az/lalafo server
   //    IP-lərinə 403 qaytarır, ona görə orada əsas mənbə budur: konkret elan
@@ -638,21 +650,26 @@ async function webSearchProducts(q: string, useTavily: boolean): Promise<WebSear
   let tavError: string | undefined;
   let tavRelevant: WebResult[] = [];
   if (pool.length < MIN_RESULTS && useTavily) {
-    const idx = shop.isCar && shop.car ? await tavilyCarListings(shop.car) : await tavilyProductListings(q);
+    const idx = shop.isCar && shop.car ? await tavilyCarListings(shop.car)
+      : scope ? await tavilyScopeListings(q, scope)
+      : await tavilyProductListings(q);
     tavError = idx.error;
-    tavRelevant = shop.isCar ? idx.results : filterByCategory(idx.results, q);
+    tavRelevant = simple ? idx.results : filterByCategory(idx.results, q);
     // (Canlı yoxlama tavilyListings daxilində — Tavily Extract ilə.)
     tavCount = tavRelevant.length;
-    pool = dedupe([...pool, ...(shop.isCar ? tavRelevant : dropOutliers(refineRelevance(tavRelevant, q, MIN_RESULTS)))]);
+    pool = dedupe([...pool, ...(simple ? tavRelevant : dropOutliers(refineRelevance(tavRelevant, q, MIN_RESULTS)))]);
   }
 
-  const siteOrder = shop.isCar ? ['turbo.az', 'tap.az'] : ['tap.az', 'lalafo.az'];
+  const siteOrder = scope ? SCOPE_SITES[scope] : shop.isCar ? ['turbo.az', 'tap.az'] : ['tap.az', 'lalafo.az'];
+  // Seçilmiş sahədən kənar sayt heç bir yolla (indeks, kateqoriya kartı) keçməsin.
+  const inScope = (items: WebResult[]) => (scope ? items.filter((r) => SCOPE_SITES[scope].includes(r.site)) : items);
+  pool = inScope(pool);
 
   // 4) AI uyğunluq hakimi (maşın deyilsə və açar varsa): kateqoriya süzgəcindən keçən
   //    BÜTÜN namizədlərə baxır, yalnız axtarılan məhsulun özünü saxlayıb sıralayır.
   //    Maşında turbo.az nəticələri artıq marka/model üzrə təmizdir — AI lazım deyil.
-  if (!shop.isCar && aiRankEnabled()) {
-    const aiPool = dedupe([...candidates, ...tavRelevant]);
+  if (!simple && aiRankEnabled()) {
+    const aiPool = inScope(dedupe([...candidates, ...tavRelevant]));
     if (aiPool.length) {
       // Namizədləri evristik sıra ilə ver ki, ilk 30-a ən ehtimallılar düşsün.
       const ordered = rankLikeGoogle(dedupe([...pool, ...aiPool]), q, 30, siteOrder);

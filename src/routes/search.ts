@@ -8,7 +8,7 @@ import { adminAuth, AuthRequest } from '../middleware/auth';
 import { imageSearchLimiter, webSearchLimiter } from '../middleware/rateLimiter';
 import { searchWords } from '../services/searchTerms';
 import { allowImageHost } from './media';
-import { webSearch, webSearchEnabled, socialHandle, WebResult, type SearchMode } from '../services/webSearchAI';
+import { webSearch, webSearchEnabled, socialHandle, WebResult, type SearchMode, type SearchScope } from '../services/webSearchAI';
 import { enrichProfiles, isApifyConfigured } from '../services/apifyProfiles';
 import { fetchPreviews, fallbackAvatar, probeProfiles, probeHandle, looksLikeHandle } from '../services/socialPreview';
 import { resolveFlag } from '../services/settings';
@@ -149,7 +149,13 @@ router.post('/search/web', webSearchLimiter, adminAuth, async (req: AuthRequest,
     const rawMode = String(req.body?.mode || 'auto').toLowerCase();
     const mode: SearchMode = rawMode === 'product' || rawMode === 'person' ? rawMode : 'auto';
 
-    const data = await webSearch(q, mode);
+    // Sahə (istifadəçinin üç seçimi): car → turbo.az + tap.az avto,
+    // realestate → bina.az + tap.az əmlak, other → tap.az + lalafo.az.
+    // Göndərilməyibsə köhnə davranış (sistem özü təyin edir).
+    const rawScope = String(req.body?.scope || '').toLowerCase();
+    const scope: SearchScope | undefined = rawScope === 'car' || rawScope === 'realestate' || rawScope === 'other' ? rawScope : undefined;
+
+    const data = await webSearch(q, mode, mode === 'person' ? undefined : scope);
     // ŞƏXS rejimində motor xəta versə də dayanmırıq: birbaşa profil yoxlaması
     // (probe) motordan asılı deyil və çox vaxt nəticəni məhz o tapır.
     // Məhsul rejimində isə motorsuz edəcək bir şey yoxdur → 422.

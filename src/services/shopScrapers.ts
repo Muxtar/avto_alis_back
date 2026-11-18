@@ -143,7 +143,7 @@ function normCurrency(c: unknown): string {
 // ── tap.az ──────────────────────────────────────────────────────────────────
 // Axtarış səhifəsi SSR-dir; elanlar __NEXT_DATA__ → apolloState-dədir.
 // Açar parametr `q[keywords]` (sadə `keywords` server tərəfdə nəzərə alınmır).
-async function searchTapAz(q: string, tokens: string[], section = 'elanlar'): Promise<WebResult[]> {
+async function searchTapAz(q: string, tokens: string[], section = 'elanlar', strict = true): Promise<WebResult[]> {
   const page = await getHtml(`https://tap.az/${section}?q%5Bkeywords%5D=${encodeURIComponent(q)}`);
   if (!page) return [];
   const ap = nextData(page.html)?.props?.pageProps?.apolloState;
@@ -153,7 +153,7 @@ async function searchTapAz(q: string, tokens: string[], section = 'elanlar'): Pr
     if (!k.startsWith('Ad:') || !a || a.status !== 'APPROVED') continue;
     if (typeof a.path !== 'string' || !/\/\d+$/.test(a.path)) continue;  // yalnız konkret elan
     const title = String(a.title || '').trim();
-    if (!title || !matchesQuery(title, tokens)) continue;
+    if (!title || (strict && !matchesQuery(title, tokens))) continue;
     const img = a['photo({"source":"DESKTOP"})']?.url || a.photo?.url || null;
     out.push({
       title: title.slice(0, 160),
@@ -468,6 +468,11 @@ export async function searchShops(q: string): Promise<{ results: WebResult[]; is
     console.log('[shopScrapers] maşın:', car.makeName, car.modelName || '-', '| turbo:', turbo.length, '| tap.az avto:', tapCars.length);
     return { results: [...turbo, ...tapCars], isCar: true, car };
   }
+  return { results: await searchGeneral(q, tokens), isCar: false };
+}
+
+// Ümumi məhsul axtarışı: tap.az + lalafo.az (maşın aşkarlaması OLMADAN).
+async function searchGeneral(q: string, tokens: string[]): Promise<WebResult[]> {
   // Saytların öz axtarışı şəkilçili sözləri pis tapır ("iphone 15 qabı", "kişi saatları").
   // Kök forma fərqlidirsə ("iphone 15 qab", "kisi saat") onunla da axtarırıq.
   const stemQ = tokens.map(azStem).join(' ');
@@ -481,7 +486,41 @@ export async function searchShops(q: string): Promise<{ results: WebResult[]; is
   // Sıra: orijinal sorğunun nəticələri əvvəl (tap.az, lalafo), sonra kök formanınkı.
   const merged = lists.flat().filter((r) => (seen.has(r.url) ? false : (seen.add(r.url), true)));
   console.log('[shopScrapers] sorğu:', variants.join(' | '), '| nəticə:', lists.map((l) => l.length).join('/'), '| birləşmiş:', merged.length);
-  return { results: merged, isCar: false };
+  return merged;
+}
+
+// ── İstifadəçinin SEÇDİYİ sahə üzrə axtarış ─────────────────────────────────
+//   car        → yalnız turbo.az + tap.az-ın «Avtomobillər» bölməsi
+//   realestate → yalnız tap.az-ın «Daşınmaz əmlak» bölməsi (bina.az-ın açar sözlə
+//                axtarışı yoxdur — o, Tavily indeksindən gəlir: tavilyScopeListings)
+//   other      → yalnız tap.az + lalafo.az (maşın aşkarlaması işləmir)
+export type SearchScope = 'car' | 'realestate' | 'other';
+const TAP_CARS = 'elanlar/neqliyyat/avtomobiller';
+const TAP_REALTY = 'elanlar/dasinmaz-emlak';
+
+export async function searchScope(q: string, scope: SearchScope): Promise<{ results: WebResult[]; isCar: boolean; car?: CarQuery | null }> {
+  const tokens = queryTokens(q);
+  if (!tokens.length) return { results: [], isCar: scope === 'car' };
+  if (scope === 'other') return { results: await searchGeneral(q, tokens), isCar: false };
+  if (scope === 'car') {
+    // Marka/model tanınırsa — mövcud dəqiq yol (turbo.az + tap.az avto).
+    const known = await searchShops(q);
+    if (known.isCar) return known;
+    // Tanınmadı ("ucuz maşın", nadir model) — tap.az-ın yalnız avtomobil bölməsi.
+    // Əvvəl ciddi uyğunluq; heç nə çıxmasa bölmənin öz axtarış nəticəsi olduğu kimi.
+    let tap = await searchTapAz(q, tokens, TAP_CARS).catch(() => [] as WebResult[]);
+    if (!tap.length) tap = await searchTapAz(q, tokens, TAP_CARS, false).catch(() => [] as WebResult[]);
+    const cars = tap.filter((r) => r.url.includes(`/${TAP_CARS}/`));
+    console.log('[shopScrapers] maşın (sərbəst):', q, '| tap.az avto:', cars.length);
+    return { results: cars, isCar: true, car: null };
+  }
+  // Daşınmaz əmlak: başlıqlar qısadır ("3 otaqlı yeni tikili, Yasamal r.") — əvvəl
+  // ciddi uyğunluq, heç nə çıxmasa tap.az-ın öz axtarış nəticəsi olduğu kimi.
+  let tap = await searchTapAz(q, tokens, TAP_REALTY).catch(() => [] as WebResult[]);
+  if (!tap.length) tap = await searchTapAz(q, tokens, TAP_REALTY, false).catch(() => [] as WebResult[]);
+  const homes = tap.filter((r) => r.url.includes(`/${TAP_REALTY}/`));
+  console.log('[shopScrapers] daşınmaz əmlak:', q, '| tap.az:', homes.length);
+  return { results: homes, isCar: false };
 }
 
 // ── Ümumi məhsul səhifəsi yoxlaması (Tavily nəticələri üçün) ──────────────────
