@@ -185,7 +185,21 @@ function liveImage(images: string[], raw: string): string | null {
 interface RawPage { raw: string; images: string[] }
 
 // Tavily Extract — səhifələrin canlı mətni (markdown) və şəkilləri.
+// Tavily bəzən ilk cəhddə "Failed to fetch url" qaytarır, ikincidə açır (prod-da
+// ölçülüb: tap.az/turbo.az linklərinin bir hissəsi yalnız təkrar cəhddə açılır) —
+// açılmayanlar BİR dəfə yenidən soruşulur.
 async function extractRaw(urls: string[]): Promise<Map<string, RawPage>> {
+  const out = await extractOnce(urls);
+  const missed = urls.filter((u) => !out.has(u));
+  if (missed.length && urls.length) {
+    const again = await extractOnce(missed);
+    for (const [u, p] of again) out.set(u, p);
+    console.log('[tavilyListings] extract təkrar:', missed.length, '| əlavə açılan:', again.size);
+  }
+  return out;
+}
+
+async function extractOnce(urls: string[]): Promise<Map<string, RawPage>> {
   const out = new Map<string, RawPage>();
   if (!urls.length) return out;
   try {
@@ -215,7 +229,8 @@ async function extractLive(urls: string[]): Promise<Map<string, LivePage>> {
   const pages = await extractRaw(urls);
   const out = new Map<string, LivePage>();
   for (const [url, { raw, images }] of pages) {
-    const title = raw.match(/^#\s+(.+)$/m)?.[1]?.trim() || null;
+    // Başlıqdakı markdown linki mətnə çevir: "…, [Yasamal r.](/baki/yasamal)" → "…, Yasamal r."
+    const title = raw.match(/^#\s+(.+)$/m)?.[1]?.replace(/\[([^\]]*)\]\([^)]*\)/g, '$1').trim() || null;
     out.set(url, {
       active: !INACTIVE.test(raw),
       title: title ? title.slice(0, 160) : null,
@@ -431,8 +446,19 @@ function isListingUrl(url: string): boolean {
 //   other      → tap.az, lalafo.az elanları
 export async function tavilyScopeListings(q: string, scope: 'car' | 'realestate' | 'other'): Promise<{ results: WebResult[]; error?: string }> {
   const domains = scope === 'car' ? ['turbo.az', 'tap.az'] : scope === 'realestate' ? ['bina.az', 'tap.az'] : ['tap.az', 'lalafo.az'];
-  const rows = await tavily(scope === 'car' ? `${q} satılır` : q, domains, 20);
-  if (!Array.isArray(rows)) return { results: [], error: rows.error };
+  // HƏR SAYT AYRICA soruşulur. Prod-da ölçülüb: iki sayt bir sorğuda olanda
+  // indeks əsasən siyahı/axtarış səhifələri qaytarır (bina.az elanı 0–6, tap.az 0),
+  // ayrı-ayrı soruşanda isə hər saytdan 10–18 konkret elan linki gəlir.
+  const jobs: Promise<TavilyRow[] | { error: string }>[] = scope === 'car'
+    // Maşında birgə sorğu turbo.az elanlarını yaxşı gətirir (ayrıca soruşanda 0 çıxdı).
+    ? [tavily(`${q} satılır`, ['turbo.az', 'tap.az'], 20), tavily(`${q} avtomobil`, ['tap.az'], 20)]
+    : scope === 'realestate'
+      // bina.az-da nəticə sorğudan çox asılıdır — iki variant, biri mütləq elan gətirir.
+      ? [tavily(q, ['bina.az'], 20), tavily(`${q} satılır elan`, ['bina.az'], 20), tavily(q, ['tap.az'], 20)]
+      : [tavily(q, ['tap.az', 'lalafo.az'], 20), tavily(q, ['lalafo.az'], 20)];
+  const lists = await Promise.all(jobs);
+  if (lists.every((l) => !Array.isArray(l))) return { results: [], error: (lists[0] as { error: string }).error };
+  const rows = lists.flatMap((l) => (Array.isArray(l) ? l : []));
   const tokens = queryTokens(q);
   const out: WebResult[] = [];
   for (const r of rows) {
@@ -462,8 +488,11 @@ export async function tavilyScopeListings(q: string, scope: 'car' | 'realestate'
     out.push(res);
   }
   console.log('[tavilyListings] sahə:', scope, '| sorğu:', q, '| xam:', rows.length, '| elan:', out.length);
-  const first = domains[0];
-  const cands = dedupe(out).sort((a, b) => (a.site === first ? 0 : 1) - (b.site === first ? 0 : 1)).slice(0, 15);
+  // Saytlar növbə ilə (birinci sayt əvvəl) — canlı yoxlamaya hər saytdan namizəd düşsün.
+  const uniq = dedupe(out);
+  const bySite = domains.map((d) => uniq.filter((r) => r.site === d));
+  const cands: WebResult[] = [];
+  for (let i = 0; cands.length < 12 && bySite.some((l) => i < l.length); i++) for (const l of bySite) if (l[i] && cands.length < 12) cands.push(l[i]);
   return { results: cands.length ? await verifyLive(cands) : [] };
 }
 
