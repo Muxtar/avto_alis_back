@@ -51,6 +51,7 @@ import aiRoutes from './routes/ai';
 import contentRoutes from './routes/content';
 import supportRoutes from './routes/support';
 import outreachRoutes from './routes/outreach';
+import externalOfferRoutes from './routes/externalOffers';
 import mediaRoutes from './routes/media';
 import ogRoutes from './routes/og';
 import { auditMiddleware } from './services/auditLog';
@@ -157,6 +158,7 @@ app.use('/api', aiRoutes);
 app.use('/api', contentRoutes);
 app.use('/api', supportRoutes);
 app.use('/api', outreachRoutes);
+app.use('/api', externalOfferRoutes);
 app.use('/api', mediaRoutes);
 app.use('/api', ogRoutes);   // paylaşım önizləməsi (Open Graph)
 

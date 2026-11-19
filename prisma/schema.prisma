@@ -229,6 +229,7 @@ model User {
   emailVerifications    EmailVerification[]
   socialLinks           SocialLink[]
   outreachRequests      SocialOutreach[]      @relation("OutreachRequests")
+  externalOffersSent    ExternalOffer[]       @relation("ExternalOffersSent")
   professionDocuments   ProfessionDocument[]
   phones                PhoneNumber[]
   sharedCarts           SharedCart[]
@@ -2257,4 +2258,46 @@ model WebSearchCache {
   at   DateTime @default(now())
 
   @@index([at])
+}
+
+// KƏNAR ELANA TƏKLİF — istifadəçi internet axtarışında (tap.az, turbo.az, bina.az,
+// lalafo.az) tapdığı elana qiymət təklifi göndərir. Elan sahibi saytda olmaya bilər:
+// təklif onun NÖMRƏSİNƏ bağlanır, admin ona SMS/WhatsApp ilə xəbər verir, həmin nömrə
+// ilə qeydiyyatdan keçəndə təklifləri «Təkliflər» səhifəsində görür.
+// Nömrə yalnız admində görünür — alıcıya heç vaxt qaytarılmır.
+model ExternalOffer {
+  id              Int       @id @default(autoincrement())
+  buyerId         Int
+  listingUrl      String // normallaşdırılmış elan linki (sorğu/hash-siz)
+  listingSite     String // tap.az / turbo.az / bina.az / lalafo.az
+  listingTitle    String
+  listingImage    String?
+  listingPrice    Float?
+  listingCurrency String?
+  offerPrice      Float
+  note            String?
+  phone           String? // göstəriş üçün (+994…)
+  phoneKey        String? // son 9 rəqəm — uyğunlaşdırma açarı
+  phoneSource     String? // "auto" (səhifədə açıq idi) | "admin" (admin daxil edib)
+  // PENDING — admin xəbər verməlidir; SENT — satıcıya xəbər verilib (və ya artıq saytdadır);
+  // REJECTED — admin rədd edib / nömrə imtina edib.
+  status          String    @default("PENDING")
+  sentVia         String? // whatsapp | sms | site (qeydiyyatlıdır) | covered (bu elan üçün artıq yazılıb)
+  adminNote       String?
+  sentById        Int?
+  sentByName      String?
+  sentAt          DateTime?
+  createdAt       DateTime  @default(now())
+  buyer           User      @relation("ExternalOffersSent", fields: [buyerId], references: [id], onDelete: Cascade)
+
+  @@index([status, createdAt])
+  @@index([buyerId, createdAt])
+  @@index([phoneKey])
+}
+
+// «Bir daha yazmayın» — imtina etmiş nömrələr. Bu nömrələrə kənar təklif xəbəri getmir.
+model PhoneOptOut {
+  phoneKey  String   @id // son 9 rəqəm
+  note      String?
+  createdAt DateTime @default(now())
 }

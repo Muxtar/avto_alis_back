@@ -46,6 +46,11 @@ function noteStatus(url: string, status: number): void {
   blockedUntil.set(h, Date.now() + BLOCK_MS);
 }
 
+/** Bir səhifənin HTML-i (brauzer UA ilə). Bloklanmış sayt üçün null. */
+export async function fetchHtml(url: string): Promise<{ html: string; finalUrl: string } | null> {
+  return getHtml(url);
+}
+
 async function getHtml(url: string): Promise<{ html: string; finalUrl: string } | null> {
   if (isHostBlocked(url)) return null;
   try {

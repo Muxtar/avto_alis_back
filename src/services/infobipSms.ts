@@ -48,14 +48,14 @@ export interface SmsSendDetail {
   detail?: string;
 }
 
-async function sendSms(phone: string, code: string): Promise<SmsSendDetail> {
+async function sendSms(phone: string, code: string, rawText?: string): Promise<SmsSendDetail> {
   if (!isSmsConfigured()) {
     return { ok: false, status: 0, error: 'not_configured', detail: 'Env dəyişənləri tam deyil: ' + smsStatus().missing.join(', ') };
   }
   const to = toRecipient(phone);
   if (!to) return { ok: false, status: 0, error: 'invalid_phone', detail: 'Nömrə düzgün deyil' };
 
-  const text = SMS_TEXT.replace('{code}', code);
+  const text = rawText ?? SMS_TEXT.replace('{code}', code);
   const payload = {
     messages: [{ from: SMS_SENDER, destinations: [{ to }], text }],
   };
@@ -87,6 +87,11 @@ async function sendSms(phone: string, code: string): Promise<SmsSendDetail> {
     console.error('[infobip] SMS xətası:', e?.message || e);
     return { ok: false, status: 0, error: 'network', detail: e?.message || 'Şəbəkə xətası' };
   }
+}
+
+/** Sərbəst mətnli SMS (məs. admin panelindən kənar təklif xəbəri). */
+export async function sendSmsText(phone: string, text: string): Promise<SmsSendDetail> {
+  return sendSms(phone, '', text.slice(0, 600));
 }
 
 export async function sendSmsOtp(phone: string, code: string): Promise<{ configured: boolean; delivered: boolean; error?: string; detail?: string }> {
